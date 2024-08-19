@@ -18,7 +18,8 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use futures::stream::BoxStream;
 use futures::{stream, Future, Stream, StreamExt};
-use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::config::FromClientConfig;
+use rdkafka::consumer::{BaseConsumer, Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
@@ -37,6 +38,10 @@ use std::task::{ready, Poll};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::debug;
+
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("offset overflow error")]
+struct OverflowError;
 
 pub struct KafkaLogletProviderFactory {
     topic: String,
@@ -182,11 +187,17 @@ impl KafkaLoglet {
             last_offset = offset;
         }
 
-        Ok(Self::kafka_offset_to_loglet_offset(last_offset))
+        Ok(Self::kafka_offset_to_loglet_offset(last_offset)?)
     }
 
-    fn kafka_offset_to_loglet_offset(offset: i64) -> LogletOffset {
-        LogletOffset::from((offset + 1) as u64)
+    fn kafka_offset_to_loglet_offset(offset: i64) -> Result<LogletOffset, OperationError> {
+        // we add one because loglets use indexes of base 1, while kafka is base 0
+        let offset = u64::try_from(offset)
+            .map_err(OperationError::terminal)?
+            .checked_add(1)
+            .ok_or_else(|| OperationError::terminal(OverflowError))?;
+
+        Ok(LogletOffset(offset))
     }
 
     fn loglet_offset_to_kafka_offset(offset: LogletOffset) -> i64 {
@@ -239,7 +250,13 @@ impl LogletBase for KafkaLoglet {
     }
 
     async fn find_tail(&self) -> crate::Result<TailState<Self::Offset>, OperationError> {
-        Ok(TailState::Open(Self::Offset::OLDEST))
+        let consumer: BaseConsumer =
+            initialize_consumer(&self.client_config, &self.topic, self.partition)?;
+        let (_, high) = consumer
+            .fetch_watermarks(&self.topic, self.partition, None)
+            .map_err(OperationError::retryable)?;
+
+        Ok(TailState::Open(Self::kafka_offset_to_loglet_offset(high)?))
     }
 
     async fn get_trim_point(&self) -> crate::Result<Option<Self::Offset>, OperationError> {
@@ -255,12 +272,12 @@ impl LogletBase for KafkaLoglet {
     }
 }
 
-fn initialize_consumer(
+fn initialize_consumer<T: Consumer + FromClientConfig>(
     client_config: &ClientConfig,
     topic: &str,
     partition: i32,
-) -> Result<StreamConsumer, OperationError> {
-    let consumer: StreamConsumer = client_config.create().map_err(OperationError::terminal)?;
+) -> Result<T, OperationError> {
+    let consumer: T = client_config.create().map_err(OperationError::terminal)?;
     let mut topic_partition_list = TopicPartitionList::new();
     topic_partition_list.add_partition(topic, partition);
 
@@ -324,7 +341,8 @@ impl Stream for KafkaLogletReadStream {
                             PolyBytes::Bytes(payload.payload),
                         );
                         Ok(LogEntry::new_data(
-                            KafkaLoglet::kafka_offset_to_loglet_offset(message.offset()),
+                            KafkaLoglet::kafka_offset_to_loglet_offset(message.offset())
+                                .expect("failed to get loglet offset from kafka offset"),
                             record,
                         ))
                     }
