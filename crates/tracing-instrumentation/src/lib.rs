@@ -49,21 +49,10 @@ pub enum Error {
 }
 
 #[allow(clippy::type_complexity)]
-fn build_tracing_layer<S>(
-    common_opts: &CommonOptions,
-    service_name: String,
-) -> Result<
-    Option<
-        Filtered<tracing_opentelemetry::OpenTelemetryLayer<S, SpanModifyingTracer>, EnvFilter, S>,
-    >,
-    Error,
->
-where
-    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
-{
+fn init_tracing(common_opts: &CommonOptions, service_name: String) -> Result<(), Error> {
     // only enable tracing if endpoint or json file is set.
     if common_opts.tracing_endpoint.is_none() && common_opts.tracing_json_path.is_none() {
-        return Ok(None);
+        return Ok(());
     }
 
     let resource = opentelemetry_sdk::Resource::new(vec![
@@ -120,22 +109,9 @@ where
 
     let provider = tracer_provider_builder.build();
 
-    let tracer = SpanModifyingTracer::new(
-        provider
-            .tracer_builder("opentelemetry-otlp")
-            .with_version(env!("CARGO_PKG_VERSION"))
-            .build(),
-    );
     let _ = opentelemetry::global::set_tracer_provider(provider);
 
-    Ok(Some(
-        tracing_opentelemetry::layer()
-            .with_location(false)
-            .with_threads(false)
-            .with_tracked_inactivity(false)
-            .with_tracer(tracer)
-            .with_filter(EnvFilter::try_new(&common_opts.tracing_filter)?),
-    ))
+    Ok(())
 }
 
 #[allow(clippy::type_complexity)]
@@ -179,7 +155,9 @@ pub fn init_tracing_and_logging(
     common_opts: &CommonOptions,
     service_name: impl Display,
 ) -> Result<TracingGuard, Error> {
-    let restate_service_name = format!("Restate service: {service_name}");
+    let restate_service_name = format!("Restate: {service_name}");
+
+    init_tracing(common_opts, restate_service_name.clone())?;
 
     let layers = tracing_subscriber::registry();
 
@@ -197,12 +175,6 @@ pub fn init_tracing_and_logging(
     // Console subscriber layer
     #[cfg(feature = "console-subscriber")]
     let layers = layers.with(console_subscriber::spawn());
-
-    // Tracing layer
-    let layers = layers.with(build_tracing_layer(
-        common_opts,
-        restate_service_name.clone(),
-    )?);
 
     layers.init();
 
@@ -274,5 +246,48 @@ impl Drop for TracingGuard {
             #[cfg(not(feature = "rt-tokio"))]
             opentelemetry::global::shutdown_tracer_provider();
         }
+    }
+}
+
+#[macro_export]
+macro_rules! expand_attributes {
+    ($($($k:ident).+ = $value:expr),*) => {
+        {
+            use opentelemetry::KeyValue;
+            let mut pairs = Vec::default();
+            $(
+                pairs.push(KeyValue::new(stringify!($($k).+), $value));
+            )*
+            pairs
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! telemetry {
+    ($service:expr, start.time = $st:expr, $($($k:ident).+ = $value:expr),*) => {{
+        use opentelemetry::trace::{TracerProvider, Tracer};
+        let provider = opentelemetry::global::tracer_provider();
+        let tracer = provider.tracer_builder($service.to_string()).build();
+
+        tracer
+            .span_builder("unknown-target")
+            .with_attributes($crate::expand_attributes!( $($($key).+ = $value),* rpc.service = $service.to_string()))
+            .with_start_time($st)
+            .start(&tracer)
+    }};
+    ($service:expr, start.time = $st:expr) => {
+        $crate::telemetry!($service, start.time=$st,)
+    };
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::SystemTime;
+
+    #[test]
+    fn test() {
+        //use opentelemetry::trace::TracerProvider
+        super::telemetry!("test", start.time = SystemTime::now());
     }
 }

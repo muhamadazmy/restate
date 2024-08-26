@@ -11,11 +11,45 @@
 use super::ConnectInfo;
 
 use http::Request;
-use opentelemetry::trace::{SpanContext, TraceContextExt};
+use opentelemetry::global::BoxedSpan;
+use opentelemetry::trace::{
+    Span as OtlpSpan, SpanContext, TraceContextExt, Tracer, TracerProvider,
+};
+use opentelemetry::KeyValue;
 use restate_types::identifiers::InvocationId;
 use restate_types::invocation::{InvocationTarget, SpanRelation};
 use tracing::{info_span, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+pub(crate) fn prepare_tracing_span_otlp<B>(
+    invocation_id: &InvocationId,
+    invocation_target: &InvocationTarget,
+    req: &Request<B>,
+) -> (BoxedSpan) {
+    let provider = opentelemetry::global::tracer_provider();
+    let tracer = provider
+        .tracer_builder(invocation_target.service_name().to_string())
+        .build();
+
+    // Extract tracing context if any
+    let tracing_context: &opentelemetry::Context = req
+        .extensions()
+        .get()
+        .expect("Should have been injected by the previous layer");
+
+    //println!("### call: {} ctx: {:?}", invocation_target, ctx);
+    tracer
+        .span_builder(format!("ingress {}", invocation_target.handler_name()))
+        //.with_span_id(invocation_id)
+        //.with_trace_id(ctx.trace_id())
+        .with_kind(opentelemetry::trace::SpanKind::Server)
+        //.with_span_id(ctx.span_id())
+        .with_attributes(vec![KeyValue::new(
+            "rpc.service",
+            invocation_target.service_name().to_string(),
+        )])
+        .start_with_context(&tracer, tracing_context)
+}
 
 pub(crate) fn prepare_tracing_span<B>(
     invocation_id: &InvocationId,

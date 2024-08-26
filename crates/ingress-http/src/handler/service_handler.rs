@@ -15,6 +15,7 @@ use bytestring::ByteString;
 use http::{header, HeaderMap, HeaderName, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use metrics::{counter, histogram};
+use opentelemetry::global::ObjectSafeSpan;
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -31,7 +32,7 @@ use restate_types::schema::invocation_target::{
 };
 
 use super::path_parsing::{InvokeType, ServiceRequestType, TargetType};
-use super::tracing::prepare_tracing_span;
+use super::tracing::{prepare_tracing_span, prepare_tracing_span_otlp};
 use super::HandlerError;
 use super::{Handler, APPLICATION_JSON};
 use crate::handler::responses::{IDEMPOTENCY_EXPIRES, X_RESTATE_ID};
@@ -135,9 +136,7 @@ where
             InvocationId::generate(&invocation_target)
         };
 
-        // Prepare the tracing span
-        let (ingress_span, ingress_span_context) =
-            prepare_tracing_span(&invocation_id, &invocation_target, &req);
+        let tracing_span = prepare_tracing_span_otlp(&invocation_id, &invocation_target, &req);
 
         let result = async move {
             info!("Processing ingress request");
@@ -179,7 +178,8 @@ where
             // Prepare service invocation
             let mut service_invocation =
                 ServiceInvocation::initialize(invocation_id, invocation_target, Source::Ingress);
-            service_invocation.with_related_span(SpanRelation::Parent(ingress_span_context));
+            service_invocation
+                .with_related_span(SpanRelation::Parent(tracing_span.span_context().clone()));
             service_invocation.completion_retention_duration =
                 invocation_target_meta.compute_retention(idempotency_key.is_some());
             if let Some(key) = idempotency_key {
@@ -208,7 +208,7 @@ where
                 }
             }
         }
-        .instrument(ingress_span)
+        // .instrument(tracing_span)
         .await;
 
         // Note that we only record (mostly) successful requests here. We might want to

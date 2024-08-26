@@ -22,7 +22,8 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use futures::{Stream, TryStreamExt};
 use metrics::{histogram, Histogram};
-use opentelemetry::trace::SpanId;
+use opentelemetry::trace::{Link, Span as TelemetrySpan, SpanId, Tracer, TracerProvider};
+use opentelemetry::KeyValue;
 use restate_invoker_api::InvokeInputJournal;
 use restate_service_protocol::codec::ProtobufRawEntryCodec;
 use restate_storage_api::idempotency_table::IdempotencyMetadata;
@@ -2542,24 +2543,60 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
             Err(_) => ("Failure", true),
         };
 
-        info_span_if_leader!(
-            ctx.is_leader,
-            span_context.is_sampled(),
-            span_context.causing_span_relation(),
-            "invoke",
-            otel.name = format!("invoke {invocation_target}"),
-            rpc.service = %invocation_target.service_name(),
-            rpc.method = %invocation_target.handler_name(),
-            restate.invocation.id = %invocation_id,
-            restate.invocation.target = %invocation_target,
-            restate.invocation.result = result,
-            error = error, // jaeger uses this tag to show an error icon
-            // without converting to i64 this field will encode as a string
-            // however, overflowing i64 seems unlikely
-            restate.internal.start_time = i64::try_from(creation_time.as_u64()).expect("creation time should fit into i64"),
-            restate.internal.span_id = %span_context.span_context().span_id(),
-            restate.internal.trace_id = %span_context.span_context().trace_id()
-        );
+        let provider = opentelemetry::global::tracer_provider();
+        let tracer = provider
+            .tracer_builder(invocation_target.service_name().to_string())
+            .build();
+
+        let ctx = span_context.span_context();
+        println!("### call: {} ctx: {:?}", invocation_target, ctx);
+        let link = Link::with_context(ctx.clone());
+        let mut span = tracer
+            .span_builder(invocation_target.handler_name().to_string())
+            .with_trace_id(ctx.trace_id())
+            .with_kind(opentelemetry::trace::SpanKind::Server)
+            .with_span_id(ctx.span_id())
+            // .with_links(vec![link])
+            .with_attributes(vec![KeyValue::new(
+                "rpc.service",
+                invocation_target.service_name().to_string(),
+            )])
+            .with_start_time(creation_time)
+            // .with_links(vec![Link::new(
+            //     span_context.span_context().clone(),
+            //     vec![],
+            //     0,
+            // )])
+            .start(&tracer);
+
+        // println!(
+        //     "traced-id: {}, span-id: {}",
+        //     span_context.span_context().trace_id(),
+        //     span_context.span_context().span_id(),
+        //     span_context.as_linked()
+        // );
+        // span.add_event("making call", vec![]);
+
+        span.end();
+
+        // info_span_if_leader!(
+        //     ctx.is_leader,
+        //     span_context.is_sampled(),
+        //     span_context.causing_span_relation(),
+        //     "invoke",
+        //     otel.name = format!("invoke {invocation_target}"),
+        //     rpc.service = %invocation_target.service_name(),
+        //     rpc.method = %invocation_target.handler_name(),
+        //     restate.invocation.id = %invocation_id,
+        //     restate.invocation.target = %invocation_target,
+        //     restate.invocation.result = result,
+        //     error = error, // jaeger uses this tag to show an error icon
+        //     // without converting to i64 this field will encode as a string
+        //     // however, overflowing i64 seems unlikely
+        //     restate.internal.start_time = i64::try_from(creation_time.as_u64()).expect("creation time should fit into i64"),
+        //     restate.internal.span_id = %span_context.span_context().span_id(),
+        //     restate.internal.trace_id = %span_context.span_context().trace_id()
+        // );
     }
 
     async fn handle_outgoing_message<State: StateStorage>(
