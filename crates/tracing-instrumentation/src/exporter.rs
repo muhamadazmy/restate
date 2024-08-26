@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// `RPC_SERVICE` is used to override `service.name` on the `SpanBuilder`
-const RPC_SERVICE: Key = Key::from_static_str("rpc.service");
+pub(crate) const RPC_SERVICE: Key = Key::from_static_str("rpc.service");
 
 /// `ResourceModifyingSpanExporter` wraps a `opentelemetry::sdk::trace::SpanExporter` in order to allow mutating
 /// the service name which is within the resource field. As this field is set during export,

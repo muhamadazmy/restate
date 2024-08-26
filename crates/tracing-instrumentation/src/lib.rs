@@ -10,6 +10,7 @@
 
 // mod multi_service_tracer;
 mod exporter;
+mod invoke;
 mod pretty;
 mod tracer;
 
@@ -34,6 +35,8 @@ use tracing_subscriber::reload::Handle;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
+pub use invoke::InvocationSpanBuilder;
+
 #[derive(Debug, thiserror::Error)]
 #[error("could not initialize tracing {trace_error}")]
 pub enum Error {
@@ -49,8 +52,9 @@ pub enum Error {
 }
 
 #[allow(clippy::type_complexity)]
-fn init_tracing(common_opts: &CommonOptions, service_name: String) -> Result<(), Error> {
+fn init_invocation_tracing(common_opts: &CommonOptions) -> Result<(), Error> {
     // only enable tracing if endpoint or json file is set.
+    const SERVICE_NAME: &str = "services";
     if common_opts.tracing_endpoint.is_none() && common_opts.tracing_json_path.is_none() {
         return Ok(());
     }
@@ -58,11 +62,11 @@ fn init_tracing(common_opts: &CommonOptions, service_name: String) -> Result<(),
     let resource = opentelemetry_sdk::Resource::new(vec![
         KeyValue::new(
             opentelemetry_semantic_conventions::resource::SERVICE_NAME,
-            service_name.clone(),
+            SERVICE_NAME,
         ),
         KeyValue::new(
             opentelemetry_semantic_conventions::resource::SERVICE_NAMESPACE,
-            "Restate",
+            SERVICE_NAME,
         ),
         KeyValue::new(
             opentelemetry_semantic_conventions::resource::SERVICE_INSTANCE_ID,
@@ -97,7 +101,7 @@ fn init_tracing(common_opts: &CommonOptions, service_name: String) -> Result<(),
         let exporter = JaegerJsonExporter::new(
             path.into(),
             "trace".to_string(),
-            service_name,
+            SERVICE_NAME.into(),
             opentelemetry_sdk::runtime::Tokio,
         );
         let exporter = ResourceModifyingSpanExporter::new(exporter);
@@ -109,9 +113,97 @@ fn init_tracing(common_opts: &CommonOptions, service_name: String) -> Result<(),
 
     let provider = tracer_provider_builder.build();
 
-    let _ = opentelemetry::global::set_tracer_provider(provider);
+    let _ = invoke::set_tracer_provider(provider);
 
     Ok(())
+}
+
+#[allow(clippy::type_complexity)]
+fn build_tracing_layer<S>(
+    common_opts: &CommonOptions,
+    service_name: String,
+) -> Result<
+    Option<
+        Filtered<tracing_opentelemetry::OpenTelemetryLayer<S, SpanModifyingTracer>, EnvFilter, S>,
+    >,
+    Error,
+>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    // only enable tracing if endpoint or json file is set.
+    if common_opts.tracing_endpoint.is_none() && common_opts.tracing_json_path.is_none() {
+        return Ok(None);
+    }
+
+    let resource = opentelemetry_sdk::Resource::new(vec![
+        KeyValue::new(
+            opentelemetry_semantic_conventions::resource::SERVICE_NAME,
+            service_name.clone(),
+        ),
+        KeyValue::new(
+            opentelemetry_semantic_conventions::resource::SERVICE_NAMESPACE,
+            "Runtime",
+        ),
+        KeyValue::new(
+            opentelemetry_semantic_conventions::resource::SERVICE_INSTANCE_ID,
+            format!("{}/{}", common_opts.cluster_name(), common_opts.node_name()),
+        ),
+        KeyValue::new(
+            opentelemetry_semantic_conventions::resource::SERVICE_VERSION,
+            env!("CARGO_PKG_VERSION"),
+        ),
+    ]);
+
+    // the following logic is based on `opentelemetry_otlp::span::build_batch_with_exporter`
+    // but also injecting ResourceModifyingSpanExporter around the SpanExporter
+
+    let mut tracer_provider_builder = opentelemetry_sdk::trace::TracerProvider::builder()
+        .with_config(opentelemetry_sdk::trace::Config::default().with_resource(resource));
+
+    if let Some(endpoint) = &common_opts.tracing_endpoint {
+        let exporter = SpanExporterBuilder::from(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(endpoint),
+        )
+        .build_span_exporter()?;
+        tracer_provider_builder = tracer_provider_builder.with_span_processor(
+            BatchSpanProcessor::builder(exporter, opentelemetry_sdk::runtime::Tokio).build(),
+        );
+    }
+
+    if let Some(path) = &common_opts.tracing_json_path {
+        let exporter = JaegerJsonExporter::new(
+            path.into(),
+            "trace".to_string(),
+            service_name,
+            opentelemetry_sdk::runtime::Tokio,
+        );
+
+        tracer_provider_builder = tracer_provider_builder.with_span_processor(
+            BatchSpanProcessor::builder(exporter, opentelemetry_sdk::runtime::Tokio).build(),
+        );
+    }
+
+    let provider = tracer_provider_builder.build();
+
+    let tracer = SpanModifyingTracer::new(
+        provider
+            .tracer_builder("opentelemetry-otlp")
+            .with_version(env!("CARGO_PKG_VERSION"))
+            .build(),
+    );
+    let _ = opentelemetry::global::set_tracer_provider(provider);
+
+    Ok(Some(
+        tracing_opentelemetry::layer()
+            .with_location(false)
+            .with_threads(false)
+            .with_tracked_inactivity(false)
+            .with_tracer(tracer)
+            .with_filter(EnvFilter::try_new(&common_opts.tracing_filter)?),
+    ))
 }
 
 #[allow(clippy::type_complexity)]
@@ -157,7 +249,7 @@ pub fn init_tracing_and_logging(
 ) -> Result<TracingGuard, Error> {
     let restate_service_name = format!("Restate: {service_name}");
 
-    init_tracing(common_opts, restate_service_name.clone())?;
+    init_invocation_tracing(common_opts)?;
 
     let layers = tracing_subscriber::registry();
 
@@ -175,6 +267,12 @@ pub fn init_tracing_and_logging(
     // Console subscriber layer
     #[cfg(feature = "console-subscriber")]
     let layers = layers.with(console_subscriber::spawn());
+
+    // Tracing layer
+    let layers = layers.with(build_tracing_layer(
+        common_opts,
+        restate_service_name.clone(),
+    )?);
 
     layers.init();
 
@@ -250,44 +348,14 @@ impl Drop for TracingGuard {
 }
 
 #[macro_export]
-macro_rules! expand_attributes {
+macro_rules! trace_attributes {
     ($($($k:ident).+ = $value:expr),*) => {
         {
-            use opentelemetry::KeyValue;
             let mut pairs = Vec::default();
             $(
-                pairs.push(KeyValue::new(stringify!($($k).+), $value));
+                pairs.push(opentelemetry::KeyValue::new(stringify!($($k).+), $value));
             )*
             pairs
         }
     };
-}
-
-#[macro_export]
-macro_rules! telemetry {
-    ($service:expr, start.time = $st:expr, $($($k:ident).+ = $value:expr),*) => {{
-        use opentelemetry::trace::{TracerProvider, Tracer};
-        let provider = opentelemetry::global::tracer_provider();
-        let tracer = provider.tracer_builder($service.to_string()).build();
-
-        tracer
-            .span_builder("unknown-target")
-            .with_attributes($crate::expand_attributes!( $($($key).+ = $value),* rpc.service = $service.to_string()))
-            .with_start_time($st)
-            .start(&tracer)
-    }};
-    ($service:expr, start.time = $st:expr) => {
-        $crate::telemetry!($service, start.time=$st,)
-    };
-}
-
-#[cfg(test)]
-mod test {
-    use std::time::SystemTime;
-
-    #[test]
-    fn test() {
-        //use opentelemetry::trace::TracerProvider
-        super::telemetry!("test", start.time = SystemTime::now());
-    }
 }
