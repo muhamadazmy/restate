@@ -9,21 +9,20 @@
 // by the Apache License, Version 2.0.
 
 mod actions;
-mod tracing;
+mod utils;
 
 use crate::metric_definitions::PARTITION_APPLY_COMMAND;
-use crate::partition::state_machine::tracing::StateMachineSpanExt;
-use crate::partition::types::InvocationIdAndTarget;
 use crate::partition::types::{InvokerEffect, InvokerEffectKind, OutboxMessageExt};
 use ::tracing::{debug, trace, warn, Instrument, Span};
+pub use actions::{Action, ActionCollector};
 use assert2::let_assert;
 use bytes::Bytes;
 use bytestring::ByteString;
 use futures::{StreamExt, TryStreamExt};
 use metrics::{histogram, Histogram};
-use opentelemetry::trace::SpanId;
 use restate_invoker_api::InvokeInputJournal;
 use restate_service_protocol::codec::ProtobufRawEntryCodec;
+use restate_storage_api::fsm_table::FsmTable;
 use restate_storage_api::idempotency_table::IdempotencyMetadata;
 use restate_storage_api::idempotency_table::{IdempotencyTable, ReadOnlyIdempotencyTable};
 use restate_storage_api::inbox_table::{InboxEntry, InboxTable};
@@ -42,6 +41,7 @@ use restate_storage_api::promise_table::{Promise, PromiseState, PromiseTable};
 use restate_storage_api::service_status_table::{
     ReadOnlyVirtualObjectStatusTable, VirtualObjectStatus, VirtualObjectStatusTable,
 };
+use restate_storage_api::state_table::StateTable;
 use restate_storage_api::timer_table::TimerKey;
 use restate_storage_api::timer_table::{Timer, TimerTable};
 use restate_storage_api::Result as StorageResult;
@@ -61,10 +61,10 @@ use restate_types::ingress::{IngressResponseEnvelope, IngressResponseResult};
 use restate_types::invocation::{
     AttachInvocationRequest, InvocationQuery, InvocationResponse, InvocationTarget,
     InvocationTargetType, InvocationTermination, ResponseResult, ServiceInvocation,
-    ServiceInvocationResponseSink, ServiceInvocationSpanContext, Source, SpanRelationCause,
-    SubmitNotificationSink, TerminationFlavor, VirtualObjectHandlerType, WorkflowHandlerType,
+    ServiceInvocationResponseSink, ServiceInvocationSpanContext, Source, SubmitNotificationSink,
+    TerminationFlavor, VirtualObjectHandlerType, WorkflowHandlerType,
 };
-use restate_types::invocation::{InvocationInput, SpanExt};
+use restate_types::invocation::{InvocationInput, SpanRelation};
 use restate_types::journal::enriched::EnrichedRawEntry;
 use restate_types::journal::enriched::{
     AwakeableEnrichmentResult, CallEnrichmentResult, EnrichedEntryHeader,
@@ -89,10 +89,7 @@ use std::marker::PhantomData;
 use std::ops::RangeInclusive;
 use std::time::Duration;
 use std::time::Instant;
-
-pub use actions::{Action, ActionCollector};
-use restate_storage_api::fsm_table::FsmTable;
-use restate_storage_api::state_table::StateTable;
+use utils::SpanExt;
 
 pub struct StateMachine<Codec> {
     // initialized from persistent storage
@@ -140,6 +137,24 @@ macro_rules! debug_if_leader {
     }};
 }
 
+macro_rules! span_if_leader {
+    ($level:expr, $i_am_leader:expr, $sampled:expr, $span_relation:expr, $($args:tt)*) => {{
+        if $i_am_leader && $sampled {
+            let span = ::tracing::span!($level, $($args)*);
+            // span.set_relation($span_relation);
+            let _ = span.enter();
+        }
+    }};
+}
+
+// creates and inter an info span if both i_am_leader and sampled are true
+macro_rules! info_span_if_leader {
+    ($i_am_leader:expr, $sampled:expr, $span_relation:expr, $($args:tt)*) => {{
+        use ::tracing::Level;
+        span_if_leader!(Level::INFO, $i_am_leader, $sampled, $span_relation, $($args)*)
+    }};
+}
+
 impl<Codec> StateMachine<Codec> {
     pub fn new(
         inbox_seq_number: MessageIndex,
@@ -176,13 +191,11 @@ impl<'a, S> StateMachineApplyContext<'a, S> {
     where
         S: ReadOnlyInvocationStatusTable,
     {
-        Span::record_invocation_id(invocation_id);
+        Span::current().record_invocation_id(invocation_id);
         let status = self.storage.get_invocation_status(invocation_id).await?;
-        if let Some(invocation_target) = status.invocation_target() {
-            Span::record_invocation_target(invocation_target);
-        }
-        if let Some(journal_metadata) = status.get_journal_metadata() {
-            Span::current().set_relation(journal_metadata.span_context.as_parent());
+
+        if let Some(invocation_traget) = status.invocation_target() {
+            Span::current().record_invocation_target(invocation_traget);
         }
         Ok(status)
     }
@@ -196,7 +209,7 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
         action_collector: &mut ActionCollector,
         is_leader: bool,
     ) -> Result<(), Error> {
-        let span = tracing::state_machine_apply_command_span(is_leader, &command);
+        let span = utils::state_machine_apply_command_span(is_leader, &command);
         async {
             let start = Instant::now();
             // Apply the command
@@ -291,8 +304,7 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                 Ok(())
             }
             Command::ScheduleTimer(timer) => {
-                // todo: can we find the invocation target here?
-                Self::register_timer(&mut ctx, timer, None, Default::default()).await?;
+                Self::register_timer(&mut ctx, timer, Default::default()).await?;
                 Ok(())
             }
         }
@@ -320,10 +332,8 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
             service_invocation.partition_key(),
             self.partition_key_range);
 
-        Span::record_invocation_id(&invocation_id);
-        Span::record_invocation_target(&service_invocation.invocation_target);
-        Span::current().set_relation(service_invocation.span_context.as_parent());
-
+        Span::current().record_invocation_id(&invocation_id);
+        Span::current().record_invocation_target(&service_invocation.invocation_target);
         // Phases of an invocation
         // 1. Try deduplicate it first
         // 1.1. Deduplicate using idempotency id
@@ -580,7 +590,7 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                             execution_time,
                             ServiceInvocation {
                                 invocation_id,
-                                invocation_target: metadata.invocation_target.clone(),
+                                invocation_target: metadata.invocation_target,
                                 argument: metadata.argument,
                                 source: metadata.source,
                                 span_context: span_context.clone(),
@@ -594,7 +604,6 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                                 submit_notification_sink: None,
                             },
                         ),
-                        Some(&metadata.invocation_target),
                         span_context,
                     )
                     .await?;
@@ -605,7 +614,6 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                     Self::register_timer(
                         ctx,
                         TimerKeyValue::neo_invoke(execution_time, invocation_id),
-                        Some(&metadata.invocation_target),
                         span_context,
                     )
                     .await?;
@@ -1302,13 +1310,7 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                         .expect("Workflow methods must have keyed service id");
 
                     Self::do_unlock_service(ctx, service_id.clone()).await?;
-                    Self::do_clear_all_state(
-                        ctx,
-                        service_id.clone(),
-                        invocation_id,
-                        ServiceInvocationSpanContext::empty(),
-                    )
-                    .await?;
+                    Self::do_clear_all_state(ctx, service_id.clone(), invocation_id).await?;
                     Self::do_clear_all_promises(ctx, service_id).await?;
                 }
             }
@@ -1882,18 +1884,24 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                         journal_entry.deserialize_entry_ref::<Codec>()?
                 );
 
+                let _span = instrumentation::info_invocation_span!(
+                    relation = invocation_metadata
+                        .journal_metadata
+                        .span_context
+                        .as_parent(),
+                    prefix = "set-state",
+                    id = invocation_id,
+                    name = format!("set-state {key:?}"),
+                    tags = (rpc.service = invocation_metadata
+                        .invocation_target
+                        .service_name()
+                        .to_string())
+                );
+
                 if let Some(service_id) =
                     invocation_metadata.invocation_target.as_keyed_service_id()
                 {
-                    Self::do_set_state(
-                        ctx,
-                        service_id,
-                        invocation_id,
-                        invocation_metadata.journal_metadata.span_context.clone(),
-                        key,
-                        value,
-                    )
-                    .await;
+                    Self::do_set_state(ctx, service_id, invocation_id, key, value).await;
                 } else {
                     warn!(
                         "Trying to process entry {} for a target that has no state",
@@ -1907,17 +1915,24 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                         journal_entry.deserialize_entry_ref::<Codec>()?
                 );
 
+                let _span = instrumentation::info_invocation_span!(
+                    relation = invocation_metadata
+                        .journal_metadata
+                        .span_context
+                        .as_parent(),
+                    prefix = "clear-state",
+                    id = invocation_id,
+                    name = "clear-state",
+                    tags = (rpc.service = invocation_metadata
+                        .invocation_target
+                        .service_name()
+                        .to_string())
+                );
+
                 if let Some(service_id) =
                     invocation_metadata.invocation_target.as_keyed_service_id()
                 {
-                    Self::do_clear_state(
-                        ctx,
-                        service_id,
-                        invocation_id,
-                        invocation_metadata.journal_metadata.span_context.clone(),
-                        key,
-                    )
-                    .await;
+                    Self::do_clear_state(ctx, service_id, invocation_id, key).await;
                 } else {
                     warn!(
                         "Trying to process entry {} for a target that has no state",
@@ -1926,16 +1941,24 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                 }
             }
             EnrichedEntryHeader::ClearAllState { .. } => {
+                let _span = instrumentation::info_invocation_span!(
+                    relation = invocation_metadata
+                        .journal_metadata
+                        .span_context
+                        .as_parent(),
+                    prefix = "clear-all-state",
+                    id = invocation_id,
+                    name = "clear-all-state",
+                    tags = (rpc.service = invocation_metadata
+                        .invocation_target
+                        .service_name()
+                        .to_string())
+                );
+
                 if let Some(service_id) =
                     invocation_metadata.invocation_target.as_keyed_service_id()
                 {
-                    Self::do_clear_all_state(
-                        ctx,
-                        service_id,
-                        invocation_id,
-                        invocation_metadata.journal_metadata.span_context.clone(),
-                    )
-                    .await?;
+                    Self::do_clear_all_state(ctx, service_id, invocation_id).await?;
                 } else {
                     warn!(
                         "Trying to process entry {} for a target that has no state",
@@ -2174,12 +2197,25 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                 }
             }
             EnrichedEntryHeader::Sleep { is_completed, .. } => {
+                let _span = instrumentation::info_invocation_span!(
+                    relation = invocation_metadata
+                        .journal_metadata
+                        .span_context
+                        .as_parent(),
+                    prefix = "sleep",
+                    id = invocation_id,
+                    name = "sleep",
+                    tags = (rpc.service = invocation_metadata
+                        .invocation_target
+                        .service_name()
+                        .to_string())
+                );
+
                 debug_assert!(!is_completed, "Sleep entry must not be completed.");
                 let_assert!(
                     Entry::Sleep(SleepEntry { wake_up_time, .. }) =
                         journal_entry.deserialize_entry_ref::<Codec>()?
                 );
-
                 Self::register_timer(
                     ctx,
                     TimerKeyValue::complete_journal_entry(
@@ -2187,7 +2223,6 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                         invocation_id,
                         entry_index,
                     ),
-                    Some(&invocation_metadata.invocation_target),
                     invocation_metadata.journal_metadata.span_context.clone(),
                 )
                 .await?;
@@ -2260,6 +2295,22 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                     Some(MillisSinceEpoch::new(invoke_time))
                 };
 
+                use opentelemetry::trace::Span;
+                let mut span = instrumentation::info_invocation_span!(
+                    relation = invocation_metadata
+                        .journal_metadata
+                        .span_context
+                        .as_parent(),
+                    prefix = "oneway-call",
+                    id = callee_invocation_id,
+                    target = callee_invocation_target,
+                    tags = ()
+                );
+
+                if let SpanRelation::Linked(ctx) = span_context.causing_span_relation() {
+                    span.add_link(ctx, Vec::default());
+                }
+
                 let service_invocation = ServiceInvocation {
                     invocation_id: *callee_invocation_id,
                     invocation_target: callee_invocation_target.clone(),
@@ -2276,18 +2327,6 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
                     idempotency_key: None,
                     submit_notification_sink: None,
                 };
-
-                let pointer_span_id = match span_context.span_cause() {
-                    Some(SpanRelationCause::Linked(_, span_id)) => Some(*span_id),
-                    _ => None,
-                };
-
-                Self::do_trace_background_invoke(
-                    ctx,
-                    (*callee_invocation_id, callee_invocation_target.clone()),
-                    invocation_metadata.journal_metadata.span_context.clone(),
-                    pointer_span_id,
-                );
 
                 self.handle_outgoing_message(
                     ctx,
@@ -2466,21 +2505,25 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
             Err(_) => ("Failure", true),
         };
 
+        //let ctx = span_context.causing_span_relation();
+
         if ctx.is_leader && span_context.is_sampled() {
             instrumentation::info_invocation_span!(
+                relation = span_context.causing_span_relation(),
                 prefix = "invoke",
                 id = invocation_id,
                 target = invocation_target,
-                restate.invocation.result = result,
-                error = error,
-                restate.internal.start_time = i64::try_from(creation_time.as_u64())
-                    .expect("creation time should fit into i64"),
-                restate.internal.span_id =
-                    ::tracing::field::display(span_context.span_context().span_id()),
-                restate.internal.trace_id =
-                    ::tracing::field::display(span_context.span_context().trace_id())
-            )
-            .set_relation(span_context.causing_span_relation());
+                tags = (
+                    restate.invocation.result = result,
+                    error = error,
+                    restate.span.context = format!("{:?}", span_context)
+                ),
+                fields = (
+                    with_start_time = creation_time,
+                    with_trace_id = span_context.span_context().trace_id(),
+                    with_span_id = span_context.span_context().span_id()
+                )
+            );
         }
     }
 
@@ -2703,24 +2746,21 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
         Ok(())
     }
 
+    #[tracing::instrument(
+        skip_all,
+        level="info", 
+        name="suspend", 
+        fields(
+            metadata.journal.length = metadata.journal_metadata.length,
+            restate.invocation.id = %invocation_id)
+        )
+    ]
     async fn do_suspend_service<State: InvocationStatusTable>(
         ctx: &mut StateMachineApplyContext<'_, State>,
         invocation_id: InvocationId,
         mut metadata: InFlightInvocationMetadata,
         waiting_for_completed_entries: HashSet<EntryIndex>,
     ) {
-        let span_ctx = &metadata.journal_metadata.span_context;
-
-        if ctx.is_leader && span_ctx.is_sampled() {
-            instrumentation::info_invocation_span!(
-                prefix = "suspend",
-                id = invocation_id,
-                target = &metadata.invocation_target,
-                restate.journal.length = metadata.journal_metadata.length
-            )
-            .set_relation(span_ctx.as_parent());
-        }
-
         debug_if_leader!(
             ctx.is_leader,
             restate.journal.length = metadata.journal_metadata.length,
@@ -2881,27 +2921,23 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
         Ok(())
     }
 
+    #[tracing::instrument(
+        skip_all,
+        level="info", 
+        name="set_state", 
+        fields(
+            restate.invocation.id = %invocation_id,
+            restate.state.key = ?key,
+            rpc.service = %service_id.service_name
+        )
+    )]
     async fn do_set_state<State: StateTable>(
         ctx: &mut StateMachineApplyContext<'_, State>,
         service_id: ServiceId,
         invocation_id: InvocationId,
-        span_context: ServiceInvocationSpanContext,
         key: Bytes,
         value: Bytes,
     ) {
-        if ctx.is_leader && span_context.is_sampled() {
-            instrumentation::info_invocation_span!(
-                prefix = "set-state",
-                id = invocation_id,
-                name = format!("set-state {{key}}"),
-                // we need to set this explicitly since we have
-                // no target.
-                restate.state.key = ::tracing::field::debug(&key),
-                rpc.service = ::tracing::field::display(&service_id.service_name)
-            )
-            .set_relation(span_context.as_parent());
-        }
-
         debug_if_leader!(
             ctx.is_leader,
             restate.state.key = ?key,
@@ -2911,24 +2947,22 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
         ctx.storage.put_user_state(&service_id, key, value).await;
     }
 
+    #[tracing::instrument(
+        skip_all,
+        level="info", 
+        name="clear_state", 
+        fields(
+            restate.invocation.id = %invocation_id,
+            restate.state.key = ?key,
+            rpc.service = %service_id.service_name
+        )
+    )]
     async fn do_clear_state<State: StateTable>(
         ctx: &mut StateMachineApplyContext<'_, State>,
         service_id: ServiceId,
         invocation_id: InvocationId,
-        span_context: ServiceInvocationSpanContext,
         key: Bytes,
     ) {
-        if ctx.is_leader && span_context.is_sampled() {
-            instrumentation::info_invocation_span!(
-                prefix = "clear-state",
-                id = invocation_id,
-                name = format!("clear-state: {{key}}"),
-                rpc.service = ::tracing::field::display(&service_id.service_name),
-                restate.state.key = ::tracing::field::debug(&key)
-            )
-            .set_relation(span_context.as_parent());
-        }
-
         debug_if_leader!(
             ctx.is_leader,
             restate.state.key = ?key,
@@ -2938,22 +2972,20 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
         ctx.storage.delete_user_state(&service_id, &key).await;
     }
 
+    #[tracing::instrument(
+        skip_all,
+        level="info", 
+        name="clear_all_state", 
+        fields(
+            restate.invocation.id = %invocation_id,
+            rpc.service = %service_id.service_name
+        )
+    )]
     async fn do_clear_all_state<State: StateTable>(
         ctx: &mut StateMachineApplyContext<'_, State>,
         service_id: ServiceId,
         invocation_id: InvocationId,
-        span_context: ServiceInvocationSpanContext,
     ) -> Result<(), Error> {
-        if ctx.is_leader && span_context.is_sampled() {
-            instrumentation::info_invocation_span!(
-                prefix = "clear-all-state",
-                id = invocation_id,
-                name = "clear-all-state",
-                rpc.service = ::tracing::field::display(&service_id.service_name)
-            )
-            .set_relation(span_context.as_parent());
-        }
-
         debug_if_leader!(ctx.is_leader, "Effect: Clear all state");
 
         ctx.storage.delete_all_user_state(&service_id).await?;
@@ -2964,50 +2996,22 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
     async fn register_timer<State: TimerTable>(
         ctx: &mut StateMachineApplyContext<'_, State>,
         timer_value: TimerKeyValue,
-        invocation_target: Option<&InvocationTarget>,
         span_context: ServiceInvocationSpanContext,
     ) -> Result<(), Error> {
         match timer_value.value() {
             Timer::CompleteJournalEntry(_, entry_index) => {
-                if ctx.is_leader && span_context.is_sampled() {
-                    match invocation_target {
-                        Some(target) => {
-                            instrumentation::info_invocation_span!(
-                                prefix = "sleep",
-                                id = timer_value.invocation_id().to_string(),
-                                target = target,
-                                restate.journal.index = *entry_index as i64,
-                                restate.timer.wake_up_time =
-                                    ::tracing::field::display(timer_value.wake_up_time()),
-                                restate.timer.key =
-                                    format!("{:?}", TimerKeyDisplay(timer_value.key())),
-                                // without converting to i64 this field will encode as a string
-                                // however, overflowing i64 seems unlikely
-                                restate.internal.end_time =
-                                    i64::try_from(timer_value.wake_up_time().as_u64())
-                                        .expect("wake up time should fit into i64")
-                            )
-                        }
-                        None => {
-                            instrumentation::info_invocation_span!(
-                                prefix = "sleep",
-                                id = timer_value.invocation_id().to_string(),
-                                name = "sleep",
-                                restate.journal.index = *entry_index as i64,
-                                restate.timer.wake_up_time =
-                                    ::tracing::field::display(timer_value.wake_up_time()),
-                                restate.timer.key =
-                                    format!("{:?}", TimerKeyDisplay(timer_value.key())),
-                                // without converting to i64 this field will encode as a string
-                                // however, overflowing i64 seems unlikely
-                                restate.internal.end_time =
-                                    i64::try_from(timer_value.wake_up_time().as_u64())
-                                        .expect("wake up time should fit into i64")
-                            )
-                        }
-                    }
-                    .set_relation(span_context.as_parent());
-                }
+                info_span_if_leader!(
+                    ctx.is_leader,
+                    span_context.is_sampled(),
+                    span_context.as_parent(),
+                    "sleep",
+                    restate.journal.index = entry_index,
+                    restate.timer.wake_up_time = %timer_value.wake_up_time(),
+                    restate.timer.key = %TimerKeyDisplay(timer_value.key()),
+                    // without converting to i64 this field will encode as a string
+                    // however, overflowing i64 seems unlikely
+                    restate.internal.end_time = i64::try_from(timer_value.wake_up_time().as_u64()).expect("wake up time should fit into i64"),
+                );
 
                 debug_if_leader!(
                     ctx.is_leader,
@@ -3276,36 +3280,6 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
             .await;
 
         Ok(())
-    }
-
-    fn do_trace_background_invoke<State>(
-        ctx: &mut StateMachineApplyContext<'_, State>,
-        (invocation_id, invocation_target): InvocationIdAndTarget,
-        span_context: ServiceInvocationSpanContext,
-        pointer_span_id: Option<SpanId>,
-    ) {
-        // create an instantaneous 'pointer span' which lives in the calling trace at the
-        // time of background call, and primarily exists to be linked to by the new trace
-        // that will be created for the background invocation, but even if that trace wasn't
-        // sampled for some reason, it's still worth producing this span
-
-        if ctx.is_leader && span_context.is_sampled() {
-            let span = if let Some(pointer_span_id) = pointer_span_id {
-                instrumentation::info_invocation_span!(
-                    prefix = "background_invoke",
-                    id = invocation_id,
-                    target = invocation_target,
-                    restate.internal.span_id = ::tracing::field::display(pointer_span_id)
-                )
-            } else {
-                instrumentation::info_invocation_span!(
-                    prefix = "background_invoke",
-                    id = invocation_id,
-                    target = invocation_target
-                )
-            };
-            span.set_relation(span_context.as_parent());
-        }
     }
 
     fn do_send_abort_invocation_to_invoker<State>(

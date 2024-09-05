@@ -19,14 +19,12 @@ use crate::time::MillisSinceEpoch;
 use crate::GenerationalNodeId;
 use bytes::Bytes;
 use bytestring::ByteString;
-use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceState};
-use opentelemetry::Context;
+use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceState};
 use serde_with::{serde_as, FromInto};
 use std::fmt;
 use std::hash::Hash;
 use std::str::FromStr;
 use std::time::Duration;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 // Re-exporting opentelemetry [`TraceId`] to avoid having to import opentelemetry in all crates.
 pub use opentelemetry::trace::TraceId;
@@ -458,6 +456,7 @@ pub struct ServiceInvocationSpanContext {
 
 impl ServiceInvocationSpanContext {
     pub fn new(span_context: SpanContext, cause: Option<SpanRelationCause>) -> Self {
+        // SpanContext::new()
         Self {
             span_context,
             cause,
@@ -488,14 +487,6 @@ impl ServiceInvocationSpanContext {
 
         let (cause, new_span_context) = match &related_span {
             SpanRelation::Linked(linked_span_context) => {
-                // use part of the invocation id as the span id of the new trace root
-                let span_id: SpanId = invocation_id.invocation_uuid().into();
-
-                // use its reverse as the span id of the background_invoke 'pointer' span in the previous trace
-                // as we cannot use the same span id for both spans
-                let mut pointer_span_id = span_id.to_bytes();
-                pointer_span_id.reverse();
-
                 // create a span context with a new trace that will be used for any actions as part of the background invocation
                 // a span will be emitted using these details when its finished (so we know how long the invocation took)
                 let new_span_context = SpanContext::new(
@@ -503,7 +494,7 @@ impl ServiceInvocationSpanContext {
                     // trace ids are 128 bits and 'worldwide unique'
                     invocation_id.invocation_uuid().into(),
                     // use part of the invocation id as the new span id; this is 64 bits and best-effort 'globally unique'
-                    span_id,
+                    invocation_id.invocation_uuid().into(),
                     // use sampling decision of the causing trace; this is NOT default otel behaviour but
                     // is useful for users
                     linked_span_context.trace_flags(),
@@ -511,10 +502,12 @@ impl ServiceInvocationSpanContext {
                     false,
                     TraceState::default(),
                 );
+
                 let cause = SpanRelationCause::Linked(
                     linked_span_context.trace_id(),
-                    SpanId::from_bytes(pointer_span_id),
+                    linked_span_context.span_id(),
                 );
+
                 (Some(cause), new_span_context)
             }
             SpanRelation::Parent(parent_span_context) => {
@@ -671,20 +664,18 @@ pub enum SpanRelation {
     Linked(SpanContext),
 }
 
-pub trait SpanExt: OpenTelemetrySpanExt {
-    fn set_relation(&self, relation: SpanRelation) -> &Self {
-        match relation {
-            SpanRelation::Parent(span_context) => {
-                self.set_parent(Context::new().with_remote_span_context(span_context))
-            }
-            SpanRelation::Linked(span_context) => self.add_link(span_context),
-            SpanRelation::None => (),
-        };
-        self
-    }
-}
-
-impl SpanExt for tracing::Span {}
+// pub trait SpanExt: opentelemetry::trace::Span {
+//     fn set_relation(&self, relation: SpanRelation) -> &Self {
+//         match relation {
+//             SpanRelation::Parent(span_context) => {
+//                 self.set_parent(Context::new().with_remote_span_context(span_context))
+//             }
+//             SpanRelation::Linked(span_context) => self.add_link(span_context),
+//             SpanRelation::None => (),
+//         };
+//         self
+//     }
+// }
 
 impl SpanRelation {
     fn is_sampled(&self) -> bool {

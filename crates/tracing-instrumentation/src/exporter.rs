@@ -10,7 +10,7 @@
 
 use arc_swap::ArcSwap;
 use futures::future::BoxFuture;
-use opentelemetry::trace::{Link, SpanContext, SpanId, TraceError, TraceId};
+use opentelemetry::trace::TraceError;
 use opentelemetry::{Key, KeyValue, StringValue, Value};
 use opentelemetry_sdk::export::trace::{SpanData, SpanExporter};
 use opentelemetry_sdk::Resource;
@@ -138,18 +138,6 @@ impl<T: SpanExporter + 'static> SpanExporter for ResourceModifyingSpanExporter<T
     }
 }
 
-/// rotates a given ID around midpoint
-/// it's used to generate unique trace ids and span ids
-/// that are deterministic
-macro_rules! rotate_half {
-    ($type:tt, $id:expr) => {{
-        let mut bytes = $id.to_bytes();
-        let mid = bytes.len() / 2;
-        bytes.rotate_left(mid);
-        $type::from_bytes(bytes)
-    }};
-}
-
 #[derive(Debug)]
 /// this is an exporter that can classify and separate spans that related
 /// to runtime tracing from services spans.
@@ -181,36 +169,15 @@ where
 {
     fn export(
         &mut self,
-        mut batch: Vec<SpanData>,
+        batch: Vec<SpanData>,
     ) -> BoxFuture<'static, opentelemetry_sdk::export::trace::ExportResult> {
         let runtime = Arc::clone(&self.runtime);
         let services = self.services.clone();
 
-        let mut services_batch = Vec::default();
         // only build services traces if services exporter is set
-        if self.services.is_some() {
-            for span in batch.iter_mut() {
-                if span.attributes.iter().any(|kv| kv.key == USER_SERVICE_KEY) {
-                    span.attributes.retain(|e| e.key != USER_SERVICE_KEY);
-
-                    let mut service_span = span.clone();
-                    let ctx = service_span.span_context;
-                    service_span.span_context = SpanContext::new(
-                        rotate_half!(TraceId, ctx.trace_id()),
-                        rotate_half!(SpanId, ctx.span_id()),
-                        ctx.trace_flags(),
-                        ctx.is_remote(),
-                        ctx.trace_state().clone(),
-                    );
-
-                    // link this span to original runtime span
-                    service_span.links.links.push(Link::new(ctx, vec![], 0));
-                    service_span.parent_span_id = rotate_half!(SpanId, service_span.parent_span_id);
-
-                    services_batch.push(service_span);
-                }
-            }
-        }
+        let (services_batch, runtime_batch): (Vec<_>, Vec<_>) = batch
+            .into_iter()
+            .partition(|s| s.attributes.iter().any(|kv| kv.key == USER_SERVICE_KEY));
 
         Box::pin(async move {
             {
@@ -218,7 +185,7 @@ where
                     Ok(a) => a,
                     Err(_) => return Err(TraceError::Other("exporter mutex is poisoned".into())),
                 };
-                a.export(batch)
+                a.export(runtime_batch)
             }
             .await?;
 

@@ -148,6 +148,8 @@ where
             .build(),
     );
 
+    opentelemetry::global::set_tracer_provider(provider);
+
     Ok(Some(
         tracing_opentelemetry::layer()
             .with_location(false)
@@ -305,36 +307,92 @@ impl Drop for TracingGuard {
 /// Any extra named arguments are added as extra tags to the span.
 #[macro_export]
 macro_rules! invocation_span {
-    (level= $lvl:expr, prefix= $prefix:expr, id= $id:expr, target= $target:expr $(,$($key:ident).+ =  $value:expr)*) => {
-        $crate::invocation_span!(
-            level = $lvl,
-            prefix = $prefix,
-            id = $id,
-            name = format!("{} {}", $prefix, $target.short()),
-            rpc.service = ::tracing::field::display($target.service_name()),
-            rpc.method = ::tracing::field::display($target.handler_name()),
-            restate.invocation.target = ::tracing::field::display($target)
-            $(,$($key).+ = $value)*
-        )
-    };
-    (level= $lvl:expr, prefix= $prefix:expr, id= $id:expr, name= $name:expr, $($($key:ident).+ =  $value:expr),*) => {
+    (level= $lvl:expr, relation = $relation:expr, prefix= $prefix:expr, id= $id:expr, target= $target:expr, tags=($($($key:ident).+ = $value:expr),*), fields=($($field:ident = $field_value:expr),*)) => {
         {
+            use opentelemetry::KeyValue;
 
-            use tracing_opentelemetry::OpenTelemetrySpanExt;
-            let span = ::tracing::span!(
-                target: $crate::SERVICES_TRACING_TARGET,
-                $lvl,
-                $prefix,
-                otel.name = $name,
-                rpc.system = "restate",
-                restate.invocation.id = %$id,
-                restate.user.service = true
-                $(,$($key).+ = ::tracing::field::Empty)*
-            );
+            let mut attributes = vec![
+                KeyValue::new("rpc.service", $target.service_name().to_string()),
+                KeyValue::new("rpc.method", $target.handler_name().to_string()),
+                KeyValue::new("restate.invocation.target", $target.to_string()),
+            ];
 
             $(
-                span.record(stringify!($($key).+), $value);
+                attributes.push(KeyValue::new(stringify!($($key).+), $value));
             )*
+
+
+            $crate::invocation_span!(
+                level = $lvl,
+                relation = $relation,
+                prefix = $prefix,
+                id = $id,
+                name = format!("{} {}", $prefix, $target.short()),
+                attributes=attributes,
+                fields=($($field = $field_value),*)
+            )
+        }
+    };
+    (level= $lvl:expr, relation = $relation:expr, prefix= $prefix:expr, id= $id:expr, name= $name:expr, tags=($($($key:ident).+ = $value:expr),*), fields=($($field:ident = $field_value:expr),*)) => {
+        {
+            use opentelemetry::KeyValue;
+
+            let mut attributes = vec![];
+
+            $(
+                attributes.push(KeyValue::new(stringify!($($key).+), $value));
+            )*
+
+
+            $crate::invocation_span!(
+                level = $lvl,
+                relation = $relation,
+                prefix = $prefix,
+                id = $id,
+                name = format!("{} {}", $prefix, $name),
+                attributes=attributes,
+                fields=($($field = $field_value),*)
+            )
+        }
+    };
+    (level= $lvl:expr, relation=$relation:expr, prefix= $prefix:expr, id= $id:expr, name= $name:expr, attributes=$attributes:ident, fields=($($field:ident = $field_value:expr),*)) => {
+        {
+
+            // use tracing_opentelemetry::OpenTelemetrySpanExt;
+            use opentelemetry::{KeyValue, Context, trace::{Tracer, Link, TracerProvider, TraceContextExt}};
+            use restate_types::invocation::SpanRelation;
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+            let tracer = opentelemetry::global::tracer_provider()
+                .tracer_builder("services")
+                .build();
+
+            $attributes.push(KeyValue::new("restate.user.service", true));
+            $attributes.push(KeyValue::new("restate.invocation.id", $id.to_string()));
+
+            let builder = tracer
+                .span_builder($name)
+                $(.$field($field_value))*
+                .with_attributes($attributes);
+
+            let mut links = vec![Link::with_context(
+                ::tracing::Span::current()
+                    .context()
+                    .span()
+                    .span_context()
+                    .clone(),
+            )];
+
+            if let SpanRelation::Linked(ref ctx) = $relation {
+                links.push(Link::new(ctx.clone(), vec![KeyValue::new("restate.runtime", true)], 0));
+            }
+
+            let builder = builder.with_links(links);
+
+            let span = match $relation {
+                SpanRelation::None | SpanRelation::Linked(_) => builder.start(&tracer),
+                SpanRelation::Parent(ctx) => builder.start_with_context(&tracer,&Context::new().with_remote_span_context(ctx)),
+            };
 
             span
         }
@@ -344,22 +402,70 @@ macro_rules! invocation_span {
 /// info_invocation_span is a shortcut for [`invocation_span!`] with `Info` level
 #[macro_export]
 macro_rules! info_invocation_span {
-    (prefix= $prefix:expr, id= $id:expr, target= $target:expr $(,$($key:ident).+ =  $value:expr)*) => {
+    (relation=$relation:expr, prefix= $prefix:expr, id= $id:expr, target=$target:expr, tags=($($($key:ident).+ = $value:expr),*), fields=($($field:ident = $field_value:expr),*)) => {
         $crate::invocation_span!(
             level = ::tracing::Level::INFO,
+            relation = $relation,
             prefix = $prefix,
             id = $id,
-            target = $target
-            $(,$($key).+ = $value)*
+            target = $target,
+            tags=($($($key).+ = $value),*),
+            fields=($($field = $field_value),*)
         )
     };
-    (prefix= $prefix:expr, id= $id:expr, name= $name:expr $(,$($key:ident).+ =  $value:expr)*) => {
+    (relation=$relation:expr, prefix= $prefix:expr, id= $id:expr, target= $target:expr, tags=($($($key:ident).+ = $value:expr),*)) => {
         $crate::invocation_span!(
             level = ::tracing::Level::INFO,
+            relation = $relation,
             prefix = $prefix,
             id = $id,
-            name = $name
-            $(,$($key).+ = $value)*
+            target = $target,
+            tags = ($($($key).+ = $value),*),
+            fields = ()
         )
     };
+    (relation=$relation:expr, prefix= $prefix:expr, id= $id:expr, name=$name:expr, tags=($($($key:ident).+ = $value:expr),*), fields=($($field:ident = $field_value:expr),*)) => {
+        $crate::invocation_span!(
+            level = ::tracing::Level::INFO,
+            relation = $relation,
+            prefix = $prefix,
+            id = $id,
+            name = $name,
+            tags=($($($key).+ = $value),*),
+            fields=($($field = $field_value),*)
+        )
+    };
+    (relation=$relation:expr, prefix= $prefix:expr, id= $id:expr, name= $name:expr, tags=($($($key:ident).+ = $value:expr),*)) => {
+        $crate::invocation_span!(
+            level = ::tracing::Level::INFO,
+            relation = $relation,
+            prefix = $prefix,
+            id = $id,
+            name = $name,
+            tags = ($($($key).+ = $value),*),
+            fields = ()
+        )
+    };
+}
+
+#[cfg(test)]
+mod test {
+
+    use opentelemetry::trace::SpanId;
+    use restate_types::invocation::InvocationTarget;
+
+    #[test]
+    fn test_macro() {
+        let target = InvocationTarget::mock_virtual_object();
+
+        // verification of macro call syntax
+        let _span = super::info_invocation_span!(
+            relation = SpanRelation::None,
+            prefix = "aaa",
+            id = "hello",
+            target = target,
+            tags = (hello.world = 10, error = true),
+            fields = (with_span_id = SpanId::from(10))
+        );
+    }
 }
