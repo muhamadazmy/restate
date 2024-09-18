@@ -154,6 +154,20 @@ pub trait LogletReadStream: Stream<Item = Result<LogEntry<LogletOffset>, Operati
 
 pub type SendableLogletReadStream = Pin<Box<dyn LogletReadStream + Send>>;
 
+pub(crate) struct Resolver {
+    tx: oneshot::Sender<Result<LogletOffset, AppendError>>,
+}
+
+impl Resolver {
+    pub fn sealed(self) {
+        let _ = self.tx.send(Err(AppendError::Sealed));
+    }
+
+    pub fn offset(self, offset: LogletOffset) {
+        let _ = self.tx.send(Ok(offset));
+    }
+}
+
 pub struct LogletCommit {
     rx: oneshot::Receiver<Result<LogletOffset, AppendError>>,
 }
@@ -169,6 +183,12 @@ impl LogletCommit {
         let (tx, rx) = oneshot::channel();
         let _ = tx.send(Ok(offset));
         Self { rx }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn deferred() -> (Self, Resolver) {
+        let (tx, rx) = oneshot::channel();
+        (Self { rx }, Resolver { tx })
     }
 }
 
