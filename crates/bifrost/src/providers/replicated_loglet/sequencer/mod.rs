@@ -25,6 +25,7 @@ use restate_types::{
 
 use crate::loglet::{LogletCommit, Resolver};
 
+mod node;
 mod worker;
 
 #[derive(Debug, Default)]
