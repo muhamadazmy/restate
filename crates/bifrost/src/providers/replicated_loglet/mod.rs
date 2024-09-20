@@ -11,6 +11,8 @@
 pub(crate) mod metric_definitions;
 mod provider;
 pub mod replication;
+#[allow(dead_code)]
+pub mod sequencer;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;
 
