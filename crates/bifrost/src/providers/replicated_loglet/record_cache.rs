@@ -8,6 +8,14 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::{ops::RangeBounds, sync::Arc};
+
+use futures::stream::BoxStream;
+use restate_types::{
+    logs::{LogletOffset, Record},
+    replicated_loglet::ReplicatedLogletId,
+};
+
 /// A placeholder for a global record cache.
 ///
 /// This can be safely shared between all ReplicatedLoglet(s) and the LocalSequencers or the
@@ -22,4 +30,56 @@ impl RecordCache {
     pub fn new(_memory_budget_bytes: usize) -> Self {
         Self {}
     }
+
+    /// Append the next batch to the loglet_id cache.
+    ///
+    /// It's up the Sequencer to make sure records/batches are appended in the correct order.
+    pub(crate) fn append_records(&self, _loglet_id: ReplicatedLogletId, _records: Arc<[Record]>) {
+        todo!()
+    }
+
+    /// Release offset (inclusive) to readers.
+    ///
+    /// Any reader stream should receive all released batches.
+    pub(crate) fn release_records(&self, _loglet_id: ReplicatedLogletId, _offset: LogletOffset) {
+        todo!()
+    }
+
+    /// Read a range of records.
+    ///
+    /// A Gap can only appear as a first item in the returned
+    /// range.
+    ///
+    /// It's up the the caller to full fill the gap by other means
+    /// for example by reading directly from the log servers.
+    pub fn read_range<R>(&self, _range: R) -> Vec<CachedItem>
+    where
+        R: RangeBounds<LogletOffset>,
+    {
+        todo!()
+    }
+
+    /// Gets a read stream that starts from the given offset.
+    ///
+    /// The first item returned by the stream can be a gap
+    /// if the `from` offset is not available in the cache
+    /// anymore.
+    pub fn get_read_stream(
+        &self,
+        _loglet_id: ReplicatedLogletId,
+        _from: LogletOffset,
+    ) -> BoxStream<CachedItem> {
+        todo!()
+    }
+}
+
+pub enum CachedItem {
+    Gap {
+        from: LogletOffset,
+        to: LogletOffset,
+    },
+    Batch {
+        first_offset: LogletOffset,
+        records: Arc<[Record]>,
+    },
 }
