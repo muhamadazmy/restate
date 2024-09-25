@@ -39,9 +39,9 @@ pub enum SelectorStrategy {
 
 /// Spread selector is thread-safe and can be used concurrently.
 pub struct SpreadSelector {
-    nodeset: NodeSet,
+    pub nodeset: NodeSet,
     strategy: SelectorStrategy,
-    replication_property: ReplicationProperty,
+    pub replication_property: ReplicationProperty,
 }
 
 impl SpreadSelector {
