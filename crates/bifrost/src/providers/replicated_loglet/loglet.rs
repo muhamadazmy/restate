@@ -88,6 +88,7 @@ impl<T: TransportConnect> ReplicatedLoglet<T> {
                     networking.clone(),
                     logservers_rpc.store.clone(),
                     log_server_manager.clone(),
+                    record_cache.clone(),
                     known_global_tail.clone(),
                 ),
             }
