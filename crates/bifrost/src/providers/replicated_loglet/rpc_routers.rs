@@ -11,10 +11,27 @@
 // todo(asoli): remove once this is used
 #![allow(dead_code)]
 
-use restate_core::network::rpc_router::RpcRouter;
-use restate_core::network::MessageRouterBuilder;
-use restate_types::net::log_server::{GetLogletInfo, GetRecords, Release, Seal, Store, Trim};
-use restate_types::net::replicated_loglet::Append;
+use std::ops::Deref;
+use std::sync::Arc;
+
+use futures::stream::{FuturesUnordered, StreamExt};
+use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
+
+use restate_core::network::rpc_router::{RpcRouter, RpcToken};
+use restate_core::network::{
+    MessageRouterBuilder, NetworkError, Networking, Outgoing, TransportConnect, WeakConnection,
+};
+use restate_core::{task_center, ShutdownError, TaskKind};
+use restate_types::logs::Record;
+use restate_types::net::log_server::{
+    GetLogletInfo, GetRecords, Release, Seal, Status, Store, Trim,
+};
+use restate_types::net::replicated_loglet::{Append, Appended, CommonRequestHeader};
+use restate_types::GenerationalNodeId;
+
+use super::loglet::ReplicatedLoglet;
+use crate::loglet::{AppendError, LogletCommit, LogletCommitResolver};
 
 /// Used by replicated loglets to send requests and receive responses from log-servers
 /// Cloning this is cheap and all clones will share the same internal trackers.
@@ -55,15 +72,368 @@ impl LogServersRpc {
 /// Cloning this is cheap and all clones will share the same internal trackers.
 #[derive(Clone)]
 pub struct SequencersRpc {
-    pub append: RpcRouter<Append>,
+    stream: LazyRenewableAppendStream,
 }
 
 impl SequencersRpc {
     /// Registers all routers into the supplied message router. This ensures that
     /// responses are routed correctly.
     pub fn new(router_builder: &mut MessageRouterBuilder) -> Self {
-        let append = RpcRouter::new(router_builder);
+        let rpc_router = RpcRouter::new(router_builder);
 
-        Self { append }
+        Self {
+            stream: LazyRenewableAppendStream::new(rpc_router),
+        }
+    }
+
+    pub async fn append<T: TransportConnect>(
+        &self,
+        loglet: &ReplicatedLoglet<T>,
+        payload: Arc<[Record]>,
+    ) -> Result<LogletCommit, NetworkError> {
+        // loglet.networking()
+        let msg = Append {
+            header: CommonRequestHeader {
+                log_id: loglet.log_id(),
+                loglet_id: loglet.params().loglet_id,
+                segment_index: loglet.segment_index(),
+            },
+            payloads: Vec::from_iter(payload.iter().cloned()),
+        };
+
+        let mut stream = self.stream.get(loglet.networking()).await?;
+
+        let commit = loop {
+            // todo(azmy): avoid copying the message on retry
+            match stream.send(loglet.params().sequencer, msg.clone()).await {
+                Ok(token) => break token,
+                Err(err) => {
+                    match err {
+                        NetworkError::ConnectError(_)
+                        | NetworkError::ConnectionClosed
+                        | NetworkError::Timeout(_) => {
+                            // we retry to re-connect one time
+                            stream = self.stream.renew(loglet.networking(), &stream).await?;
+                        }
+                        err => return Err(err),
+                    }
+                }
+            }
+        };
+
+        Ok(commit)
+    }
+}
+
+/// RemoteSequencerStream represents a single open connection
+/// to remote leader sequencer.
+///
+///
+#[derive(Clone)]
+struct RemoteSequencerStream {
+    rpc_router: RpcRouter<Append>,
+    connection: WeakConnection,
+    tx: mpsc::UnboundedSender<RemoteSequencerWaitTask>,
+}
+
+impl RemoteSequencerStream {
+    fn new(
+        rpc_router: RpcRouter<Append>,
+        connection: WeakConnection,
+    ) -> Result<Self, ShutdownError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        task_center().spawn(
+            TaskKind::Disposable,
+            "remote-append-stream-",
+            None,
+            Self::handle_appended_responses(rx),
+        )?;
+
+        Ok(Self {
+            rpc_router,
+            connection,
+            tx,
+        })
+    }
+
+    /// Send append message to remote sequencer.
+    ///
+    /// It's up to the caller to send to retry on [`NetworkError`]
+    pub async fn send(
+        &self,
+        sequencer: GenerationalNodeId,
+        msg: Append,
+    ) -> Result<LogletCommit, NetworkError> {
+        if self.tx.is_closed() {
+            return Err(NetworkError::ConnectionClosed);
+        }
+
+        let outgoing = Outgoing::new(sequencer, msg).assign_connection(self.connection.clone());
+
+        let rpc_token = self
+            .rpc_router
+            .send_on_connection(outgoing)
+            .await
+            .map_err(|err| err.source)?;
+
+        let (commit, commit_resolver) = LogletCommit::deferred();
+        let task = RemoteSequencerWaitTask {
+            rpc_token,
+            commit_resolver,
+        };
+
+        // wait for response asynchronously
+        self.tx
+            .send(task)
+            .map_err(|_| NetworkError::ConnectionClosed)?;
+
+        Ok(commit)
+    }
+
+    /// Handle all [`Appended`] responses
+    ///
+    /// This task will run until the [`AppendStream`] is dropped. Once dropped
+    /// all pending commits will be resolved with an error. it's up to the enqueuer
+    /// to retry if needed.
+    async fn handle_appended_responses(
+        mut rx: mpsc::UnboundedReceiver<RemoteSequencerWaitTask>,
+    ) -> anyhow::Result<()> {
+        let mut waiting = FuturesUnordered::new();
+        let cancel = CancellationToken::new();
+
+        loop {
+            tokio::select! {
+                job = rx.recv() => {
+                    let job = match job {
+                        Some(job) => job,
+                        None => break,
+                    };
+
+                    waiting.push(Self::wait_and_resolve(cancel.clone(), job));
+                },
+                Some(result) = waiting.next() => {
+                    // this is mainly to drive the waiting for the appended responses.
+                    // but on first error we break from this loop because
+                    // it means there is an error on connection level and hence all
+                    // pending tasks must be cancelled
+                    if result.is_err() {
+                        // when we break here duo to connection error
+                        // all pending tasks will be resolved with retryable error.
+                        break;
+                    }
+                }
+            }
+        }
+
+        // close connection to stop any further appends
+        rx.close();
+        cancel.cancel();
+        // after cancellation all tasks should resolve immediately
+        while waiting.next().await.is_some() {}
+
+        Ok(())
+    }
+
+    async fn wait_and_resolve(
+        cancel: CancellationToken,
+        task: RemoteSequencerWaitTask,
+    ) -> Result<(), AppendStreamError> {
+        let RemoteSequencerWaitTask {
+            rpc_token,
+            commit_resolver,
+        } = task;
+
+        // wait for response or cancellation
+        let appended = tokio::select! {
+            incoming = rpc_token.recv() => {
+                // returning an error here will cancel the full stream and effectively
+                // cancel all resolvers waiting on the same connection
+                incoming.map_err(|_| AppendStreamError::ConnectionClosed)?.into_body()
+            },
+            _ = cancel.cancelled() => {
+                // if task is cancelled we assume its duo to closed connection
+                // we can resolve the waiting token
+                commit_resolver.error(AppendError::retryable(
+                    AppendStreamError::ConnectionClosed,
+                ));
+                return Ok(())
+            }
+        };
+
+        match appended.status {
+            Status::Ok => {
+                commit_resolver.offset(appended.first_offset);
+            }
+            Status::Sealed | Status::Sealing => {
+                commit_resolver.sealed();
+            }
+            Status::Disabled
+            | Status::Malformed
+            | Status::OutOfBounds
+            | Status::SequencerMismatch => {
+                commit_resolver.error(AppendError::terminal(AppendStreamError::Status(
+                    appended.status,
+                )));
+            }
+            Status::Dropped => {
+                commit_resolver.error(AppendError::retryable(AppendStreamError::Status(
+                    appended.status,
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct RemoteSequencerWaitTask {
+    rpc_token: RpcToken<Appended>,
+    commit_resolver: LogletCommitResolver,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum AppendStreamError {
+    #[error("connection closed")]
+    ConnectionClosed,
+    #[error("status {0:?}")]
+    Status(Status),
+}
+
+#[derive(Clone)]
+struct LazyRenewableAppendStream {
+    append: RpcRouter<Append>,
+    connection: Arc<Mutex<Option<RemoteSequencerStream>>>,
+}
+
+impl LazyRenewableAppendStream {
+    pub fn new(rpc_router: RpcRouter<Append>) -> Self {
+        Self {
+            append: rpc_router,
+            connection: Arc::default(),
+        }
+    }
+
+    async fn get<T: TransportConnect>(
+        &self,
+        networking: &Networking<T>,
+    ) -> Result<RemoteSequencerStream, NetworkError> {
+        let mut guard = self.connection.lock().await;
+        if let Some(stream) = guard.deref() {
+            return Ok(stream.clone());
+        }
+
+        let connection = networking
+            .node_connection(networking.metadata().my_node_id().into())
+            .await?;
+        let stream = RemoteSequencerStream::new(self.append.clone(), connection)?;
+
+        *guard = Some(stream.clone());
+
+        Ok(stream)
+    }
+
+    async fn renew<T: TransportConnect>(
+        &self,
+        networking: &Networking<T>,
+        old: &RemoteSequencerStream,
+    ) -> Result<RemoteSequencerStream, NetworkError> {
+        let mut guard = self.connection.lock().await;
+        let current = guard.as_ref().expect("connection has been initialized");
+
+        // stream has already been renewed
+        if old.connection != current.connection {
+            return Ok(current.clone());
+        }
+
+        let connection = networking
+            .node_connection(networking.metadata().my_node_id().into())
+            .await?;
+
+        let stream = RemoteSequencerStream::new(self.append.clone(), connection)?;
+
+        *guard = Some(stream.clone());
+
+        Ok(stream)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::Arc;
+
+    use restate_core::{
+        network::{rpc_router::RpcRouter, Handler, Incoming, MessageHandler, MockConnector},
+        TaskCenter, TaskCenterBuilder, TestCoreEnvBuilder,
+    };
+    use restate_types::{
+        logs::LogId,
+        net::{
+            log_server::Status,
+            replicated_loglet::{Append, Appended, CommonRequestHeader, CommonResponseHeader},
+        },
+    };
+
+    struct SequencerMockHandler;
+
+    impl MessageHandler for SequencerMockHandler {
+        type MessageType = Append;
+        async fn on_message(&self, msg: Incoming<Self::MessageType>) {
+            println!("append received");
+            let outgoing = msg.into_outgoing(Appended {
+                first_offset: 0.into(),
+                header: CommonResponseHeader {
+                    known_global_tail: None,
+                    sealed: Some(false),
+                    status: Status::Ok,
+                },
+            });
+
+            outgoing.send().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_setup() {
+        let (connector, receiver) = MockConnector::new(100);
+        let tc = TaskCenterBuilder::default()
+            .default_runtime_handle(tokio::runtime::Handle::current())
+            .ingress_runtime_handle(tokio::runtime::Handle::current())
+            .build()
+            .expect("task_center builds");
+        let connector = Arc::new(connector);
+
+        let mut builder =
+            TestCoreEnvBuilder::with_transport_connector(tc.clone(), Arc::clone(&connector))
+                .add_mock_nodes_config()
+                .add_message_handler(SequencerMockHandler);
+
+        let rpc: RpcRouter<Append> = RpcRouter::new(&mut builder.router_builder);
+
+        let test_env = builder.build().await;
+        test_env
+            .tc
+            .clone()
+            .run_in_scope("test", None, async {
+                let node_id = test_env.networking.my_node_id();
+
+                println!("sending request");
+                let response = rpc
+                    .call(
+                        &test_env.networking,
+                        node_id,
+                        Append {
+                            header: CommonRequestHeader {
+                                log_id: LogId::new(1),
+                                loglet_id: 1.into(),
+                                segment_index: 1.into(),
+                            },
+                            payloads: Vec::default(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+            })
+            .await;
     }
 }
