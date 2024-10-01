@@ -193,14 +193,6 @@ impl<T: TransportConnect> SequencerAppender<T> {
         let mut store_tasks = FuturesUnordered::new();
 
         for server in spread_servers {
-            // it is possible that we have visited this server
-            // in a previous wave. So we can short circuit here
-            // and just skip
-            if server.local_tail().latest_offset() > last_offset {
-                checker.set_attribute(server.node_id(), true);
-                continue;
-            }
-
             pending_servers.insert(server.node_id());
 
             let task = LogServerStoreTask {
@@ -249,14 +241,7 @@ impl<T: TransportConnect> SequencerAppender<T> {
                     continue;
                 }
                 StoreTaskStatus::Sealed(_) => {
-                    tracing::trace!(node_id=%server.node_id(), "node is sealed");
-                    continue;
-                }
-                StoreTaskStatus::AdvancedLocalTail(_) => {
-                    // node local tail is behind the batch first offset
-                    // question(azmy): we assume node has been replicated?
-                    checker.set_attribute(node_id, true);
-                    pending_servers.remove(&node_id);
+                    tracing::trace!(node_id=%server.node_id(), "store task cancelled duo to sealing");
                     continue;
                 }
                 StoreTaskStatus::Stored(stored) => stored,
@@ -272,7 +257,7 @@ impl<T: TransportConnect> SequencerAppender<T> {
                 }
                 _ => {
                     // todo(azmy): handle other status
-                    // note: we don't remove the node from the gray list
+                    // note: we don't remove the node from the pending list
                 }
             }
 
@@ -307,7 +292,6 @@ impl<T: TransportConnect> SequencerAppender<T> {
 
 enum StoreTaskStatus {
     Sealed(LogletOffset),
-    AdvancedLocalTail(LogletOffset),
     Stored(Stored),
     Error(NetworkError),
 }
@@ -353,23 +337,33 @@ impl<'a, T: TransportConnect> LogServerStoreTask<'a, T> {
         let server_local_tail = self
             .server
             .local_tail()
-            .wait_for_offset_or_seal(self.first_offset)
-            .await?;
+            .wait_for_offset_or_seal(self.first_offset);
 
-        match server_local_tail {
+        let global_tail = self
+            .sequencer_shared_state
+            .committed_tail
+            .wait_for_offset_or_seal(self.first_offset);
+
+        let tail_state = tokio::select! {
+            local_state = server_local_tail => {
+                local_state?
+            }
+            global_state = global_tail => {
+                global_state?
+            }
+        };
+
+        match tail_state {
             TailState::Sealed(offset) => return Ok(StoreTaskStatus::Sealed(offset)),
             TailState::Open(offset) => {
                 match offset.cmp(&self.first_offset) {
-                    Ordering::Equal => {
+                    Ordering::Equal | Ordering::Greater => {
                         // we ready to send our write
                     }
                     Ordering::Less => {
                         // this should never happen since we waiting
                         // for local tail!
                         unreachable!()
-                    }
-                    Ordering::Greater => {
-                        return Ok(StoreTaskStatus::AdvancedLocalTail(offset));
                     }
                 };
             }
