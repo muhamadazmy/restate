@@ -86,7 +86,7 @@ pub struct Appended {
     #[serde(flatten)]
     pub header: CommonResponseHeader,
     // INVALID if Status indicates that the append failed
-    first_offset: LogletOffset,
+    pub first_offset: LogletOffset,
 }
 
 impl Deref for Appended {
