@@ -54,6 +54,7 @@ impl<T: TransportConnect> Factory<T> {
             router_builder,
         );
 
+
         let logserver_rpc_routers = LogServersRpc::new(router_builder);
         let sequencer_rpc_routers = SequencersRpc::new(router_builder);
         // todo(asoli): Create a handler to answer to control plane monitoring questions

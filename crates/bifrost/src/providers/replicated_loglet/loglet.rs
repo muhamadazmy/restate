@@ -109,6 +109,22 @@ impl<T: TransportConnect> ReplicatedLoglet<T> {
             log_server_manager,
         })
     }
+
+    pub fn networking(&self) -> &Networking<T> {
+        &self.networking
+    }
+
+    pub fn params(&self) -> &ReplicatedLogletParams {
+        &self.my_params
+    }
+
+    pub fn log_id(&self) -> LogId {
+        self.log_id
+    }
+
+    pub fn segment_index(&self) -> SegmentIndex {
+        self.segment_index
+    }
 }
 
 #[derive(derive_more::Debug, derive_more::IsVariant)]
