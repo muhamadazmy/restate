@@ -126,7 +126,7 @@ impl SequencersRpc {
                 loglet_id: loglet.params().loglet_id,
                 segment_index: loglet.segment_index(),
             },
-            payloads: Vec::from_iter(payloads.iter().cloned()),
+            payloads: payloads.into(),
         };
 
         let commit_token = loop {
@@ -137,7 +137,6 @@ impl SequencersRpc {
                 .await
                 .unwrap();
 
-            // todo(azmy): avoid copying all records on retry
             match connection
                 .send(loglet.params().sequencer, permits, msg.clone())
                 .await
