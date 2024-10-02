@@ -55,15 +55,13 @@ impl LogServersRpc {
 /// Cloning this is cheap and all clones will share the same internal trackers.
 #[derive(Clone)]
 pub struct SequencersRpc {
-    pub append: RpcRouter<Append>,
+    pub(crate) rpc_router: RpcRouter<Append>,
 }
 
 impl SequencersRpc {
-    /// Registers all routers into the supplied message router. This ensures that
-    /// responses are routed correctly.
-    pub fn new(router_builder: &mut MessageRouterBuilder) -> Self {
-        let append = RpcRouter::new(router_builder);
-
-        Self { append }
+    pub fn new(builder: &mut MessageRouterBuilder) -> Self {
+        Self {
+            rpc_router: RpcRouter::new(builder),
+        }
     }
 }
