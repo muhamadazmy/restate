@@ -14,7 +14,6 @@ use std::ops::{Deref, DerefMut};
 
 use serde::{Deserialize, Serialize};
 
-use super::log_server::Status;
 use super::TargetName;
 use crate::logs::metadata::SegmentIndex;
 use crate::logs::{LogId, LogletOffset, Record, SequenceNumber, TailState};
@@ -28,6 +27,13 @@ define_rpc! {
     @response = Appended,
     @request_target = TargetName::ReplicatedLogletAppend,
     @response_target = TargetName::ReplicatedLogletAppended,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum SequencerStatus {
+    Ok,
+    Sealed,
+    Malformed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +50,7 @@ pub struct CommonRequestHeader {
 pub struct CommonResponseHeader {
     pub known_global_tail: Option<LogletOffset>,
     pub sealed: Option<bool>,
-    pub status: Status,
+    pub status: SequencerStatus,
 }
 
 impl CommonResponseHeader {
@@ -52,7 +58,7 @@ impl CommonResponseHeader {
         Self {
             known_global_tail: tail_state.map(|t| t.offset()),
             sealed: tail_state.map(|t| t.is_sealed()),
-            status: Status::Ok,
+            status: SequencerStatus::Ok,
         }
     }
 
@@ -60,7 +66,7 @@ impl CommonResponseHeader {
         Self {
             known_global_tail: None,
             sealed: None,
-            status: Status::Disabled,
+            status: SequencerStatus::Ok,
         }
     }
 }
@@ -87,7 +93,7 @@ pub struct Appended {
     #[serde(flatten)]
     pub header: CommonResponseHeader,
     // INVALID if Status indicates that the append failed
-    first_offset: LogletOffset,
+    pub first_offset: LogletOffset,
 }
 
 impl Deref for Appended {
@@ -119,7 +125,7 @@ impl Appended {
         }
     }
 
-    pub fn with_status(mut self, status: Status) -> Self {
+    pub fn with_status(mut self, status: SequencerStatus) -> Self {
         self.header.status = status;
         self
     }
