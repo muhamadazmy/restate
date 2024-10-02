@@ -165,7 +165,7 @@ impl<T: TransportConnect> SealSingleNode<T> {
     async fn do_seal(&self) -> Result<Incoming<Sealed>, RpcError<Seal>> {
         let request = Seal {
             loglet_id: self.loglet_id,
-            sequencer: self.sequencer.clone(),
+            sequencer: self.sequencer,
             known_global_tail: self.known_global_tail.latest_offset(),
         };
         trace!(loglet_id = %self.loglet_id, "Sending seal message to node {}", self.node_id);
