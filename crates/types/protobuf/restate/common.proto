@@ -61,6 +61,9 @@ enum TargetName {
   REPLICATED_LOGLET_APPEND = 22;
   REPLICATED_LOGLET_APPENDED = 23;
 
+  // ReplicatedLoglet
+  REPLICATED_LOGLET_GET_INFO = 24;
+  REPLICATED_LOGLET_INFO = 25;
 }
 
 enum NodeStatus {
