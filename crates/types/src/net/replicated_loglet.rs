@@ -11,6 +11,7 @@
 //! Defines messages between replicated loglet instances
 
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +83,7 @@ impl CommonResponseHeader {
 pub struct Append {
     #[serde(flatten)]
     pub header: CommonRequestHeader,
-    pub payloads: Vec<Record>,
+    pub payloads: Arc<[Record]>,
 }
 
 impl Append {
