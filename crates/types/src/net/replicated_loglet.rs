@@ -14,7 +14,6 @@ use std::ops::{Deref, DerefMut};
 
 use serde::{Deserialize, Serialize};
 
-use super::log_server::Status;
 use super::TargetName;
 use crate::logs::metadata::SegmentIndex;
 use crate::logs::{LogId, LogletOffset, Record, SequenceNumber, TailState};
@@ -27,6 +26,20 @@ define_rpc! {
     @response = Appended,
     @request_target = TargetName::ReplicatedLogletAppend,
     @response_target = TargetName::ReplicatedLogletAppended,
+}
+
+/// Status of sequencer response.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum SequencerStatus {
+    /// Ok is returned when request is accepted and processes
+    /// successfully. Hence response body is valid
+    Ok,
+    /// Sealed is returned when the sequencer cannot accept more
+    /// [`Append`] requests because it's sealed
+    Sealed,
+    /// Malformed means request was not accepted duo to bad request
+    /// body or invalid data.
+    Malformed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +56,7 @@ pub struct CommonRequestHeader {
 pub struct CommonResponseHeader {
     pub known_global_tail: Option<LogletOffset>,
     pub sealed: Option<bool>,
-    pub status: Status,
+    pub status: SequencerStatus,
 }
 
 impl CommonResponseHeader {
@@ -51,7 +64,7 @@ impl CommonResponseHeader {
         Self {
             known_global_tail: tail_state.map(|t| t.offset()),
             sealed: tail_state.map(|t| t.is_sealed()),
-            status: Status::Ok,
+            status: SequencerStatus::Ok,
         }
     }
 
@@ -59,7 +72,7 @@ impl CommonResponseHeader {
         Self {
             known_global_tail: None,
             sealed: None,
-            status: Status::Disabled,
+            status: SequencerStatus::Ok,
         }
     }
 }
@@ -77,7 +90,8 @@ impl Append {
         self.payloads
             .iter()
             .map(|p| p.estimated_encode_size())
-            .sum()
+            .sum::<usize>()
+            + size_of::<CommonRequestHeader>()
     }
 }
 
@@ -86,7 +100,7 @@ pub struct Appended {
     #[serde(flatten)]
     pub header: CommonResponseHeader,
     // INVALID if Status indicates that the append failed
-    first_offset: LogletOffset,
+    pub first_offset: LogletOffset,
 }
 
 impl Deref for Appended {
@@ -118,8 +132,34 @@ impl Appended {
         }
     }
 
-    pub fn with_status(mut self, status: Status) -> Self {
+    pub fn with_status(mut self, status: SequencerStatus) -> Self {
         self.header.status = status;
         self
     }
+}
+
+define_rpc! {
+    @request = GetSequencerInfo,
+    @response = SequencerInfo,
+    @request_target = TargetName::ReplicatedLogletGetInfo,
+    @response_target = TargetName::ReplicatedLogletInfo,
+}
+
+// ** APPEND
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetSequencerInfo {
+    #[serde(flatten)]
+    pub header: CommonRequestHeader,
+}
+
+impl GetSequencerInfo {
+    pub fn estimated_encode_size(&self) -> usize {
+        size_of::<CommonRequestHeader>()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequencerInfo {
+    #[serde(flatten)]
+    pub header: CommonResponseHeader,
 }
