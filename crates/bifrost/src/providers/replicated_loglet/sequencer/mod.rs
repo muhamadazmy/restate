@@ -35,6 +35,45 @@ use super::{
 use crate::loglet::{util::TailOffsetWatch, LogletCommit, OperationError};
 use appender::SequencerAppender;
 
+pub(crate) const RECORDS_ENQUEUED_COUNT: &str = "restate.sequencer.records_enqueued_count";
+pub(crate) const RECORDS_COMMITTED_COUNT: &str = "restate.sequencer.records_committed_count";
+pub(crate) const RECORDS_ENQUEUED_BYTES: &str = "restate.sequencer.records_enqueued_bytes";
+pub(crate) const RECORDS_COMMITTED_BYTES: &str = "restate.sequencer.records_committed_bytes";
+pub(crate) const LOG_SERVER_LATENCY: &str = "restate.sequencer.log_server_latency_ms";
+
+fn describe_metrics() {
+    use metrics::Unit;
+    metrics::describe_counter!(
+        RECORDS_ENQUEUED_COUNT,
+        Unit::Count,
+        "number of records enqueued for writing"
+    );
+
+    metrics::describe_counter!(
+        RECORDS_COMMITTED_COUNT,
+        Unit::Count,
+        "number of records committed"
+    );
+
+    metrics::describe_counter!(
+        RECORDS_ENQUEUED_BYTES,
+        Unit::Bytes,
+        "size of records enqueued for writing"
+    );
+
+    metrics::describe_counter!(
+        RECORDS_COMMITTED_BYTES,
+        Unit::Bytes,
+        "size of records committed"
+    );
+
+    metrics::describe_histogram!(
+        LOG_SERVER_LATENCY,
+        Unit::Milliseconds,
+        "latency of log servers as measured by the sequencer"
+    );
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SequencerError {
     #[error("loglet offset exhausted")]
@@ -108,6 +147,8 @@ impl<T: TransportConnect> Sequencer<T> {
         record_cache: RecordCache,
         global_tail: TailOffsetWatch,
     ) -> Self {
+        describe_metrics();
+
         let my_node_id = networking.my_node_id();
         let initial_tail = global_tail.latest_offset();
         // Leader sequencers start on an empty loglet offset range
@@ -187,6 +228,10 @@ impl<T: TransportConnect> Sequencer<T> {
             .await
             .unwrap();
 
+        metrics::counter!(RECORDS_ENQUEUED_COUNT).increment(payloads.len() as u64);
+        metrics::counter!(RECORDS_ENQUEUED_BYTES)
+            .increment(payloads.estimated_encode_size() as u64);
+
         // Why is this AclRel?
         // We are updating the next write offset and we want to make sure that after this call that
         // we observe if task_center()'s shutdown signal was set or not consistently across
@@ -232,6 +277,7 @@ impl<T: TransportConnect> Sequencer<T> {
 trait BatchExt {
     /// tail computes inflight tail after this batch is committed
     fn last_offset(&self, first_offset: LogletOffset) -> Result<LogletOffset, SequencerError>;
+    fn estimated_encode_size(&self) -> usize;
 }
 
 impl BatchExt for Arc<[Record]> {
@@ -242,5 +288,9 @@ impl BatchExt for Arc<[Record]> {
             .checked_add(len - 1)
             .map(LogletOffset::from)
             .ok_or(SequencerError::LogletOffsetExhausted)
+    }
+
+    fn estimated_encode_size(&self) -> usize {
+        self.iter().map(|r| r.estimated_encode_size()).sum()
     }
 }

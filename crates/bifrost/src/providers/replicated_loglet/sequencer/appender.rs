@@ -8,7 +8,11 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::{cmp::Ordering, sync::Arc, time::Duration};
+use std::{
+    cmp::Ordering,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::{sync::OwnedSemaphorePermit, time::timeout};
@@ -29,12 +33,13 @@ use restate_types::{
 };
 use tracing::instrument;
 
-use super::{BatchExt, SequencerSharedState};
+use super::{BatchExt, SequencerSharedState, RECORDS_COMMITTED_BYTES, RECORDS_COMMITTED_COUNT};
 use crate::{
     loglet::LogletCommitResolver,
     providers::replicated_loglet::{
         log_server_manager::{RemoteLogServer, RemoteLogServerManager},
         replication::NodeSetChecker,
+        sequencer::LOG_SERVER_LATENCY,
     },
 };
 
@@ -96,6 +101,7 @@ impl<T: TransportConnect> SequencerAppender<T> {
         fields(
             loglet_id=%self.sequencer_shared_state.loglet_id(),
             first_offset=%self.first_offset,
+            length=%self.records.len(),
         )
     )]
     pub async fn run(mut self) {
@@ -139,6 +145,7 @@ impl<T: TransportConnect> SequencerAppender<T> {
                     // since backoff can be None, or run out of iterations,
                     // but appender should never give up we fall back to fixed backoff
                     let delay = retry.next().unwrap_or(DEFAULT_BACKOFF_TIME);
+                    tracing::trace!(delay=?delay, "Wave failed! retrying after backoff");
 
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {},
@@ -157,6 +164,10 @@ impl<T: TransportConnect> SequencerAppender<T> {
         if is_cancelled {
             tracing::trace!("appender task cancelled");
         } else {
+            metrics::counter!(RECORDS_COMMITTED_COUNT).increment(self.records.len() as u64);
+            metrics::counter!(RECORDS_COMMITTED_BYTES)
+                .increment(self.records.estimated_encode_size() as u64);
+
             tracing::trace!("appender task completed");
         }
     }
@@ -183,6 +194,8 @@ impl<T: TransportConnect> SequencerAppender<T> {
             }
         };
 
+        tracing::trace!(gray_list=%gray_list, spread=%spread, "Sending store wave");
+
         let mut gray = false;
         let mut servers = Vec::with_capacity(spread.len());
         for id in spread {
@@ -191,7 +204,7 @@ impl<T: TransportConnect> SequencerAppender<T> {
             let server = match self.log_server_manager.get(id, &self.networking).await {
                 Ok(server) => server,
                 Err(err) => {
-                    tracing::error!("failed to connect to {}: {}", id, err);
+                    tracing::error!("Failed to connect to {}: {}", id, err);
                     gray = true;
                     gray_list.insert(id);
                     continue;
@@ -263,6 +276,8 @@ impl<T: TransportConnect> SequencerAppender<T> {
                     // timed out!
                     // none of the pending tasks has finished in time! we will assume all pending server
                     // are gray listed and try again
+                    tracing::warn!(pending=%pending_servers, "Timeout waiting on store response");
+
                     return SequencerAppenderState::Wave {
                         graylist: pending_servers,
                     };
@@ -275,11 +290,11 @@ impl<T: TransportConnect> SequencerAppender<T> {
             let response = match status {
                 StoreTaskStatus::Error(err) => {
                     // couldn't send store command to remote server
-                    tracing::error!(node_id=%server.node_id(), "failed to send batch to node {}", err);
+                    tracing::error!(node_id=%server.node_id(), "Failed to send batch to node {}", err);
                     continue;
                 }
                 StoreTaskStatus::Sealed(_) => {
-                    tracing::trace!(node_id=%server.node_id(), "store task cancelled duo to sealing");
+                    tracing::trace!(node_id=%server.node_id(), "Store task cancelled duo to sealing");
                     continue;
                 }
                 StoreTaskStatus::Stored(stored) => stored,
@@ -321,6 +336,7 @@ impl<T: TransportConnect> SequencerAppender<T> {
         if checker.check_write_quorum(|attr| *attr) {
             SequencerAppenderState::Done
         } else {
+            tracing::trace!("Spread checker did not reach a write quorum");
             SequencerAppenderState::Wave {
                 graylist: pending_servers,
             }
@@ -328,6 +344,7 @@ impl<T: TransportConnect> SequencerAppender<T> {
     }
 }
 
+#[derive(Debug)]
 enum StoreTaskStatus {
     Sealed(LogletOffset),
     Stored(Stored),
@@ -365,6 +382,23 @@ struct LogServerStoreTask<'a, T> {
 impl<'a, T: TransportConnect> LogServerStoreTask<'a, T> {
     async fn run(mut self) -> LogServerStoreTaskResult {
         let result = self.send().await;
+        match &result {
+            Ok(status) => {
+                tracing::trace!(
+                    log_server_id = %self.server.node_id(),
+                    result = ?status,
+                    "Got store result from log server"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    log_server_id = %self.server.node_id(),
+                    error = %err,
+                    "Got store error from log server"
+                )
+            }
+        }
+
         LogServerStoreTaskResult {
             server: self.server,
             status: result.into(),
@@ -447,9 +481,11 @@ impl<'a, T: TransportConnect> LogServerStoreTask<'a, T> {
 
         loop {
             let with_connection = msg.assign_connection(self.server.connection().clone());
-            match self.rpc_router.call_on_connection(with_connection).await {
-                Ok(incoming) => return Ok(incoming),
-                Err(RpcError::Shutdown(shutdown)) => return Err(NetworkError::Shutdown(shutdown)),
+            let wave_start_time = Instant::now();
+
+            let result = match self.rpc_router.call_on_connection(with_connection).await {
+                Ok(incoming) => Ok(incoming),
+                Err(RpcError::Shutdown(shutdown)) => Err(NetworkError::Shutdown(shutdown)),
                 Err(RpcError::SendError(err)) => {
                     msg = err.original.forget_connection();
 
@@ -459,12 +495,20 @@ impl<'a, T: TransportConnect> LogServerStoreTask<'a, T> {
                         | NetworkError::Timeout(_) => {
                             self.server_manager
                                 .renew(&mut self.server, self.networking)
-                                .await?
+                                .await?;
+                            // try again
+                            continue;
                         }
-                        _ => return Err(err.source),
+                        _ => Err(err.source),
                     }
                 }
-            }
+            };
+
+            let latency = Instant::now().duration_since(wave_start_time).as_millis() as f64;
+            metrics::histogram!(LOG_SERVER_LATENCY, "node_id" => self.server.node_id().to_string())
+                .record(latency);
+
+            return result;
         }
     }
 }
