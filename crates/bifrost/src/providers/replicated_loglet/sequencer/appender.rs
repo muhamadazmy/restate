@@ -8,7 +8,11 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::{cmp::Ordering, sync::Arc, time::Duration};
+use std::{
+    cmp::Ordering,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::{sync::OwnedSemaphorePermit, time::timeout};
@@ -29,12 +33,13 @@ use restate_types::{
 };
 use tracing::instrument;
 
-use super::{BatchExt, SequencerSharedState};
+use super::{BatchExt, SequencerSharedState, RECORDS_COMMITTED_BYTES, RECORDS_COMMITTED_COUNT};
 use crate::{
     loglet::LogletCommitResolver,
     providers::replicated_loglet::{
         log_server_manager::{RemoteLogServer, RemoteLogServerManager},
         replication::NodeSetChecker,
+        sequencer::LOG_SERVER_LATENCY,
     },
 };
 
@@ -159,6 +164,10 @@ impl<T: TransportConnect> SequencerAppender<T> {
         if is_cancelled {
             tracing::trace!("appender task cancelled");
         } else {
+            metrics::counter!(RECORDS_COMMITTED_COUNT).increment(self.records.len() as u64);
+            metrics::counter!(RECORDS_COMMITTED_BYTES)
+                .increment(self.records.estimated_encode_size() as u64);
+
             tracing::trace!("appender task completed");
         }
     }
@@ -472,9 +481,11 @@ impl<'a, T: TransportConnect> LogServerStoreTask<'a, T> {
 
         loop {
             let with_connection = msg.assign_connection(self.server.connection().clone());
-            match self.rpc_router.call_on_connection(with_connection).await {
-                Ok(incoming) => return Ok(incoming),
-                Err(RpcError::Shutdown(shutdown)) => return Err(NetworkError::Shutdown(shutdown)),
+            let wave_start_time = Instant::now();
+
+            let result = match self.rpc_router.call_on_connection(with_connection).await {
+                Ok(incoming) => Ok(incoming),
+                Err(RpcError::Shutdown(shutdown)) => Err(NetworkError::Shutdown(shutdown)),
                 Err(RpcError::SendError(err)) => {
                     msg = err.original.forget_connection();
 
@@ -484,12 +495,20 @@ impl<'a, T: TransportConnect> LogServerStoreTask<'a, T> {
                         | NetworkError::Timeout(_) => {
                             self.server_manager
                                 .renew(&mut self.server, self.networking)
-                                .await?
+                                .await?;
+                            // try again
+                            continue;
                         }
-                        _ => return Err(err.source),
+                        _ => Err(err.source),
                     }
                 }
-            }
+            };
+
+            let latency = Instant::now().duration_since(wave_start_time).as_millis() as f64;
+            metrics::histogram!(LOG_SERVER_LATENCY, "node_id" => self.server.node_id().to_string())
+                .record(latency);
+
+            return result;
         }
     }
 }
