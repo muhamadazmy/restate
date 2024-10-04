@@ -223,7 +223,7 @@ mod tests {
 
         let logserver_rpc = LogServersRpc::new(&mut node_env.router_builder);
         let sequencer_rpc = SequencersRpc::new(&mut node_env.router_builder);
-        let record_cache = RecordCache::new(1_000_000);
+        let record_cache = RecordCache::new(Some(1_000_000));
 
         let log_server = LogServerService::create(
             config.clone(),

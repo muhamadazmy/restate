@@ -237,6 +237,13 @@ pub struct ReplicatedLogletOptions {
     ///
     /// Retry policy for log server RPCs
     pub log_server_retry_policy: RetryPolicy,
+
+    /// records_cache_memory_budget_bytes
+    ///
+    /// Optional size of records cache in bytes.
+    /// If set to None, records cache will be disabled.
+    /// Defaults: 20M
+    pub records_cache_memory_budget_bytes: Option<usize>,
 }
 
 impl Default for ReplicatedLogletOptions {
@@ -257,6 +264,7 @@ impl Default for ReplicatedLogletOptions {
                 Some(10),
                 Some(Duration::from_millis(2000)),
             ),
+            records_cache_memory_budget_bytes: Some(20_000_000), // 20MB
         }
     }
 }
