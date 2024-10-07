@@ -30,7 +30,7 @@ define_rpc! {
 }
 
 /// Status of sequencer response.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SequencerStatus {
     /// Ok is returned when request is accepted and processes
     /// successfully. Hence response body is valid
@@ -41,6 +41,13 @@ pub enum SequencerStatus {
     /// Malformed means request was not accepted duo to bad request
     /// body or invalid data.
     Malformed,
+    /// Operation has been rejected, node is not a sequencer
+    NotSequencer,
+    /// This indicates that the operation cannot be accepted due to the offset being out of bounds.
+    /// For instance, if the Append call is for an unknown log-id or segment index.
+    OutOfBounds,
+    /// Generic error message.
+    Error(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
