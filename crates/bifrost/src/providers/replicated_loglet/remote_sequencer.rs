@@ -343,21 +343,36 @@ impl RemoteSequencerConnection {
             }
 
             // handle status of the response.
-            match appended.status {
+            match appended.header.status {
                 SequencerStatus::Ok => {
                     commit_resolver.offset(appended.first_offset);
                 }
-                SequencerStatus::Malformed => {
-                    // While the malformed status is non-terminal for the connection
-                    // (since only one request is malformed),
-                    // the AppendError for the caller is terminal
-                    commit_resolver.error(AppendError::terminal(Malformed));
-                }
+
                 SequencerStatus::Sealed => {
                     // A sealed status returns a terminal error since we can immediately cancel
                     // all inflight append jobs.
                     commit_resolver.sealed();
                     break AppendError::Sealed;
+                }
+                SequencerStatus::Malformed => {
+                    // While the malformed status is non-terminal for the connection
+                    // (since only one request is malformed),
+                    // the AppendError for the caller is terminal
+                    commit_resolver.error(AppendError::terminal(RemoteSequencerError::Malformed));
+                }
+                SequencerStatus::NotSequencer => {
+                    commit_resolver
+                        .error(AppendError::terminal(RemoteSequencerError::NotSequencer));
+                }
+                SequencerStatus::OutOfBounds => {
+                    commit_resolver
+                        .error(AppendError::retryable(RemoteSequencerError::OutOfBounds));
+                }
+                SequencerStatus::Error(err) => {
+                    // metadata should be updated by now (via networking layer)
+                    // so it's okay to ask for a retry
+                    commit_resolver
+                        .error(AppendError::retryable(RemoteSequencerError::Unknown(err)));
                 }
             }
         };
@@ -413,8 +428,16 @@ pub(crate) struct RemoteInflightAppend {
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
-#[error("Malformed request")]
-pub struct Malformed;
+pub enum RemoteSequencerError {
+    #[error("Malformed request")]
+    Malformed,
+    #[error("Remote node is not a sequencer")]
+    NotSequencer,
+    #[error("Out of bounds")]
+    OutOfBounds,
+    #[error("Unknown remote error: {0}")]
+    Unknown(String),
+}
 
 #[cfg(test)]
 mod test {
@@ -481,7 +504,7 @@ mod test {
                 header: CommonResponseHeader {
                     known_global_tail: None,
                     sealed: Some(false),
-                    status: self.reply_status,
+                    status: self.reply_status.clone(),
                 },
             });
             let delay = rand::thread_rng().gen_range(50..350);

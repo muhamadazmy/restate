@@ -120,6 +120,14 @@ impl<T: TransportConnect> ReplicatedLoglet<T> {
             log_server_manager,
         })
     }
+
+    pub(crate) fn sequencer(&self) -> Option<&Sequencer<T>> {
+        if let SequencerAccess::Local { ref handle } = self.sequencer {
+            Some(handle)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(derive_more::Debug, derive_more::IsVariant)]
