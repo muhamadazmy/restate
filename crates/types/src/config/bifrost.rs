@@ -237,6 +237,14 @@ pub struct ReplicatedLogletOptions {
     ///
     /// Retry policy for log server RPCs
     pub log_server_retry_policy: RetryPolicy,
+
+    /// # In-memory RecordCache memory limit
+    ///
+    /// Optional size of record cache in bytes.
+    /// If set to None, record cache will be disabled.
+    /// Defaults: 20M
+    #[cfg_attr(feature = "schemars", schemars(with = "NonZeroByteCount"))]
+    pub record_cache_memory_size: Option<NonZeroByteCount>,
 }
 
 impl Default for ReplicatedLogletOptions {
@@ -257,6 +265,9 @@ impl Default for ReplicatedLogletOptions {
                 Some(10),
                 Some(Duration::from_millis(2000)),
             ),
+            record_cache_memory_size: Some(NonZeroByteCount::new(
+                NonZeroUsize::new(20_000_000).unwrap(),
+            )), // 20MB
         }
     }
 }

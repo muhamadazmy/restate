@@ -213,7 +213,7 @@ impl<T: TransportConnect> Loglet for ReplicatedLoglet<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU8;
+    use std::num::{NonZeroU8, NonZeroUsize};
 
     use super::*;
 
@@ -251,7 +251,7 @@ mod tests {
 
         let logserver_rpc = LogServersRpc::new(&mut node_env.router_builder);
         let sequencer_rpc = SequencersRpc::new(&mut node_env.router_builder);
-        let record_cache = RecordCache::new(1_000_000);
+        let record_cache = RecordCache::new(Some(NonZeroUsize::new(1_000_000).unwrap()));
 
         let log_server = LogServerService::create(
             config.clone(),
