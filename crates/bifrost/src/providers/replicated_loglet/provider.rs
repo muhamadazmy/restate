@@ -132,16 +132,13 @@ impl<T: TransportConnect> ReplicatedLogletProvider<T> {
             sequencer_rpc_routers,
         }
     }
-}
 
-#[async_trait]
-impl<T: TransportConnect> LogletProvider for ReplicatedLogletProvider<T> {
-    async fn get_loglet(
+    pub fn get_replicated_loglet(
         &self,
         log_id: LogId,
         segment_index: SegmentIndex,
         params: &LogletParams,
-    ) -> Result<Arc<dyn Loglet>, Error> {
+    ) -> Result<Arc<ReplicatedLoglet<T>>, Error> {
         let loglet = match self.active_loglets.entry((log_id, segment_index)) {
             dashmap::Entry::Vacant(entry) => {
                 // NOTE: replicated-loglet expects params to be a `json` string.
@@ -176,6 +173,19 @@ impl<T: TransportConnect> LogletProvider for ReplicatedLogletProvider<T> {
             dashmap::Entry::Occupied(entry) => entry.get().clone(),
         };
 
+        Ok(loglet)
+    }
+}
+
+#[async_trait]
+impl<T: TransportConnect> LogletProvider for ReplicatedLogletProvider<T> {
+    async fn get_loglet(
+        &self,
+        log_id: LogId,
+        segment_index: SegmentIndex,
+        params: &LogletParams,
+    ) -> Result<Arc<dyn Loglet>, Error> {
+        let loglet = self.get_replicated_loglet(log_id, segment_index, params)?;
         Ok(loglet as Arc<dyn Loglet>)
     }
 
