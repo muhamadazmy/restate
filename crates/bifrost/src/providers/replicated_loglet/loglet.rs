@@ -31,6 +31,7 @@ use crate::providers::replicated_loglet::tasks::{FindTailTask, SealTask};
 
 use super::error::ReplicatedLogletError;
 use super::log_server_manager::RemoteLogServerManager;
+use super::metric_definitions::{BIFROST_RECORDS_ENQUEUED_BYTES, BIFROST_RECORDS_ENQUEUED_COUNT};
 use super::read_path::{ReadStreamTask, ReplicatedLogletReadStream};
 use super::record_cache::RecordCache;
 use super::remote_sequencer::RemoteSequencer;
@@ -171,6 +172,19 @@ impl<T: TransportConnect> Loglet for ReplicatedLoglet<T> {
     }
 
     async fn enqueue_batch(&self, payloads: Arc<[Record]>) -> Result<LogletCommit, OperationError> {
+        let labels = [
+            ("loglet_id", self.my_params.loglet_id.to_string()),
+            ("node_id", self.networking.my_node_id().to_string()),
+        ];
+
+        metrics::counter!(BIFROST_RECORDS_ENQUEUED_COUNT, &labels).increment(payloads.len() as u64);
+        metrics::counter!(BIFROST_RECORDS_ENQUEUED_BYTES, &labels).increment(
+            payloads
+                .iter()
+                .map(|r| r.estimated_encode_size())
+                .sum::<usize>() as u64,
+        );
+
         match self.sequencer {
             SequencerAccess::Local { ref handle } => handle.enqueue_batch(payloads).await,
             SequencerAccess::Remote { ref handle } => handle.append(payloads).await,
