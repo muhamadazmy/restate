@@ -20,6 +20,17 @@ pub(crate) const BIFROST_REPLICATED_READ_CACHE_FILTERED: &str =
 pub(crate) const BIFROST_REPLICATED_READ_TOTAL: &str =
     "restate.bifrost.replicatedloglet.read_record.total";
 
+pub(crate) const BIFROST_RECORDS_ENQUEUED_COUNT: &str =
+    "restate.bifrost.replicatedloglet.records_enqueued.total";
+pub(crate) const BIFROST_RECORDS_ENQUEUED_BYTES: &str =
+    "restate.bifrost.replicatedloglet.records_enqueued.bytes";
+
+pub(crate) const BIFROST_SEQ_RECORDS_COMMITTED_COUNT: &str =
+    "restate.bifrost.sequencer.records_committed.total";
+pub(crate) const BIFROST_SEQ_RECORDS_COMMITTED_BYTES: &str =
+    "restate.bifrost.sequencer.records_committed.bytes";
+pub(crate) const BIFROST_SEQ_STORE_DURATION: &str = "restate.bifrost.sequencer.store_duration.ms";
+
 pub(crate) fn describe_metrics() {
     describe_counter!(
         BIFROST_REPLICATED_APPEND,
@@ -43,5 +54,35 @@ pub(crate) fn describe_metrics() {
         BIFROST_REPLICATED_READ_TOTAL,
         Unit::Count,
         "Number of records read"
+    );
+
+    describe_counter!(
+        BIFROST_RECORDS_ENQUEUED_COUNT,
+        Unit::Count,
+        "Number of records enqueued for writing"
+    );
+
+    describe_counter!(
+        BIFROST_RECORDS_ENQUEUED_BYTES,
+        Unit::Bytes,
+        "Size of records enqueued for writing"
+    );
+
+    describe_counter!(
+        BIFROST_SEQ_RECORDS_COMMITTED_COUNT,
+        Unit::Count,
+        "Number of records committed"
+    );
+
+    describe_counter!(
+        BIFROST_SEQ_RECORDS_COMMITTED_BYTES,
+        Unit::Bytes,
+        "Size of records committed"
+    );
+
+    describe_histogram!(
+        BIFROST_SEQ_STORE_DURATION,
+        Unit::Milliseconds,
+        "Log server store duration in ms as measured by the sequencer"
     );
 }
