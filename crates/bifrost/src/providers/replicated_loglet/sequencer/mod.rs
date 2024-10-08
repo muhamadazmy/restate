@@ -27,13 +27,13 @@ use restate_types::{
     GenerationalNodeId,
 };
 
+use self::appender::SequencerAppender;
 use super::{
     log_server_manager::RemoteLogServerManager,
     record_cache::RecordCache,
     replication::spread_selector::{SelectorStrategy, SpreadSelector},
 };
 use crate::loglet::{util::TailOffsetWatch, LogletCommit, OperationError};
-use appender::SequencerAppender;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SequencerError {
@@ -232,6 +232,7 @@ impl<T: TransportConnect> Sequencer<T> {
 trait BatchExt {
     /// tail computes inflight tail after this batch is committed
     fn last_offset(&self, first_offset: LogletOffset) -> Result<LogletOffset, SequencerError>;
+    fn estimated_encode_size(&self) -> usize;
 }
 
 impl BatchExt for Arc<[Record]> {
@@ -242,5 +243,9 @@ impl BatchExt for Arc<[Record]> {
             .checked_add(len - 1)
             .map(LogletOffset::from)
             .ok_or(SequencerError::LogletOffsetExhausted)
+    }
+
+    fn estimated_encode_size(&self) -> usize {
+        self.iter().map(|r| r.estimated_encode_size()).sum()
     }
 }
