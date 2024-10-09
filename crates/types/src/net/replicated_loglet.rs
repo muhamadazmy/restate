@@ -30,7 +30,7 @@ define_rpc! {
 }
 
 /// Status of sequencer response.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SequencerStatus {
     /// Ok is returned when request is accepted and processes
     /// successfully. Hence response body is valid
@@ -38,9 +38,14 @@ pub enum SequencerStatus {
     /// Sealed is returned when the sequencer cannot accept more
     /// [`Append`] requests because it's sealed
     Sealed,
-    /// Malformed means request was not accepted duo to bad request
-    /// body or invalid data.
-    Malformed,
+    /// Invalid LogId or SegmentIndex
+    UnknownLoglet,
+    /// Operation has been rejected, node is not a sequencer
+    NotSequencer,
+    /// Sequencer is shutting down
+    Shutdown,
+    /// Generic error message.
+    Error(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
