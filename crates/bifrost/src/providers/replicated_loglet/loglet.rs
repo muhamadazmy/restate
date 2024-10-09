@@ -123,6 +123,14 @@ impl<T: TransportConnect> ReplicatedLoglet<T> {
             log_server_manager,
         })
     }
+
+    pub(crate) fn is_sequencer_local(&self) -> bool {
+        matches!(self.sequencer, SequencerAccess::Local { .. })
+    }
+
+    pub(crate) fn known_global_tail(&self) -> &TailOffsetWatch {
+        &self.known_global_tail
+    }
 }
 
 #[derive(derive_more::Debug, derive_more::IsVariant)]
