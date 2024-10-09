@@ -435,7 +435,7 @@ mod tests {
             known_archived: LogletOffset::INVALID,
             first_offset: LogletOffset::OLDEST,
             flags: StoreFlags::empty(),
-            payloads,
+            payloads: payloads.into(),
         };
         // add record at offset=1, no sequencer set.
         log_store
