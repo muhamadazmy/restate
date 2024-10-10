@@ -413,7 +413,6 @@ impl MaybeTerminalAppendError {
     }
 }
 
-//todo: inflight remote append
 pub(crate) struct RemoteInflightAppend {
     rpc_token: RpcToken<Appended>,
     commit_resolver: LogletCommitResolver,
