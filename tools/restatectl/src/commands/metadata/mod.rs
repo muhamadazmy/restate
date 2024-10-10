@@ -20,6 +20,7 @@ use restate_types::net::AdvertisedAddress;
 use restate_types::{flexbuffers_storage_encode_decode, Version, Versioned};
 
 mod get;
+mod logs;
 mod patch;
 
 #[derive(Run, Subcommand, Clone)]
@@ -28,6 +29,9 @@ pub enum Metadata {
     Get(get::GetValueOpts),
     /// Patch a value stored in the metadata store
     Patch(patch::PatchValueOpts),
+    /// Logs metadata manipulation
+    #[clap(subcommand)]
+    Logs(logs::Logs),
 }
 
 #[derive(Args, Clone, Debug)]

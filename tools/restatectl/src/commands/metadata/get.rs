@@ -11,6 +11,8 @@
 use bytestring::ByteString;
 use clap::Parser;
 use cling::{Collect, Run};
+use restate_types::storage::StorageDecode;
+use restate_types::Versioned;
 use tracing::debug;
 
 use restate_rocksdb::RocksDbManager;
@@ -25,40 +27,56 @@ use crate::environment::task_center::run_in_task_center;
 
 #[derive(Run, Parser, Collect, Clone, Debug)]
 #[clap()]
-#[cling(run = "get_value")]
+#[cling(run = "show_value")]
 pub struct GetValueOpts {
     #[clap(flatten)]
-    metadata: MetadataCommonOpts,
+    pub(crate) metadata: MetadataCommonOpts,
 
     /// The key to get
     #[arg(short, long)]
-    key: String,
+    pub(crate) key: String,
 }
 
-async fn get_value(opts: &GetValueOpts) -> anyhow::Result<()> {
-    let value = match opts.metadata.access_mode {
-        MetadataAccessMode::Remote => get_value_remote(opts).await?,
-        MetadataAccessMode::Direct => get_value_direct(opts).await?,
+pub(crate) async fn get_value<K, T>(opts: &MetadataCommonOpts, key: K) -> anyhow::Result<Option<T>>
+where
+    K: AsRef<str>,
+    T: Versioned + StorageDecode,
+{
+    let value = match opts.access_mode {
+        MetadataAccessMode::Remote => get_value_remote(opts, key).await?,
+        MetadataAccessMode::Direct => get_value_direct(opts, key).await?,
     };
 
-    let value = serde_json::to_string_pretty(&value).map_err(|e| anyhow::anyhow!(e))?;
-    println!("{}", value);
+    Ok(value)
+}
 
+pub(crate) async fn show_value(opts: &GetValueOpts) -> anyhow::Result<()> {
+    let value: Option<GenericMetadataValue> = get_value(&opts.metadata, &opts.key).await?;
+
+    serde_json::to_writer_pretty(std::io::stdout(), &value)?;
     Ok(())
 }
 
-async fn get_value_remote(opts: &GetValueOpts) -> anyhow::Result<Option<GenericMetadataValue>> {
-    let metadata_store_client = create_metadata_store_client(&opts.metadata).await?;
+async fn get_value_remote<K, T>(opts: &MetadataCommonOpts, key: K) -> anyhow::Result<Option<T>>
+where
+    K: AsRef<str>,
+    T: Versioned + StorageDecode,
+{
+    let metadata_store_client = create_metadata_store_client(opts).await?;
 
     metadata_store_client
-        .get(ByteString::from(opts.key.as_str()))
+        .get(ByteString::from(key.as_ref()))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to get value: {}", e))
 }
 
-async fn get_value_direct(opts: &GetValueOpts) -> anyhow::Result<Option<GenericMetadataValue>> {
+async fn get_value_direct<K, T>(opts: &MetadataCommonOpts, key: K) -> anyhow::Result<Option<T>>
+where
+    K: AsRef<str>,
+    T: Versioned + StorageDecode,
+{
     run_in_task_center(
-        opts.metadata.config_file.as_ref(),
+        opts.config_file.as_ref(),
         |config, task_center| async move {
             let rocksdb_manager =
                 RocksDbManager::init(Configuration::mapped_updateable(|c| &c.common));
@@ -75,8 +93,8 @@ async fn get_value_direct(opts: &GetValueOpts) -> anyhow::Result<Option<GenericM
             .await?;
             debug!("Metadata store client created");
 
-            let value: Option<GenericMetadataValue> = metadata_store_client
-                .get(ByteString::from(opts.key.as_str()))
+            let value = metadata_store_client
+                .get(ByteString::from(key.as_ref()))
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to get value: {}", e))?;
 
