@@ -19,7 +19,9 @@ use restate_types::errors::MaybeRetryableError;
 use tracing::trace;
 
 use restate_core::network::{Incoming, MessageRouterBuilder, Reciprocal, TransportConnect};
-use restate_core::{cancellation_watcher, task_center, Metadata, TaskKind};
+use restate_core::{
+    cancellation_watcher, task_center, Metadata, MetadataKind, SyncError, TargetVersion, TaskKind,
+};
 use restate_types::config::ReplicatedLogletOptions;
 use restate_types::logs::{LogletOffset, SequenceNumber};
 use restate_types::net::replicated_loglet::{
@@ -161,7 +163,40 @@ impl RequestPump {
         provider: &ReplicatedLogletProvider<T>,
         incoming: Incoming<Append>,
     ) {
+        let current_logs_version = provider.networking().metadata().logs_version();
+
+        let logs_version = incoming
+            .metadata_version()
+            .logs
+            .unwrap_or(current_logs_version);
+
         let (reciprocal, append) = incoming.split();
+
+        if logs_version > current_logs_version {
+            // if logs version is still in the future
+            // sync to this version (or newer)
+            if let Err(err) = provider
+                .networking()
+                .metadata()
+                .sync(MetadataKind::Logs, TargetVersion::Version(logs_version))
+                .await
+            {
+                match err {
+                    SyncError::Shutdown(_) => {
+                        return_error_status!(reciprocal, SequencerStatus::Shutdown);
+                    }
+                    SyncError::MetadataStore(err) => {
+                        return_error_status!(
+                            reciprocal,
+                            SequencerStatus::Error {
+                                retryable: true,
+                                message: err.to_string()
+                            }
+                        );
+                    }
+                }
+            }
+        }
 
         let loglet = match self.get_loglet(provider, &append.header).await {
             Ok(loglet) => loglet,
