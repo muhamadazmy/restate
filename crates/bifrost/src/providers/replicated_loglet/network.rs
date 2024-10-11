@@ -23,7 +23,8 @@ use restate_core::{cancellation_watcher, task_center, Metadata, TaskKind};
 use restate_types::config::ReplicatedLogletOptions;
 use restate_types::logs::{LogletOffset, SequenceNumber};
 use restate_types::net::replicated_loglet::{
-    Append, Appended, CommonRequestHeader, CommonResponseHeader, SequencerStatus,
+    Append, Appended, CommonRequestHeader, CommonResponseHeader, GetTailInfo, SequencerStatus,
+    TailInfo,
 };
 
 use super::error::ReplicatedLogletError;
@@ -76,6 +77,7 @@ macro_rules! return_error_status {
 pub struct RequestPump {
     metadata: Metadata,
     append_stream: MessageStream<Append>,
+    get_tail_info_stream: MessageStream<GetTailInfo>,
 }
 
 impl RequestPump {
@@ -87,9 +89,11 @@ impl RequestPump {
         // todo(asoli) read from opts
         let queue_length = 10;
         let append_stream = router_builder.subscribe_to_stream(queue_length);
+        let get_tail_info_stream = router_builder.subscribe_to_stream(queue_length);
         Self {
             metadata,
             append_stream,
+            get_tail_info_stream,
         }
     }
 
@@ -108,10 +112,51 @@ impl RequestPump {
                 Some(append) = self.append_stream.next() => {
                     self.handle_append(&provider, append).await;
                 }
+                Some(get_tail_info) = self.get_tail_info_stream.next() => {
+                    self.handle_get_tail_info(&provider, get_tail_info).await;
+                }
             }
         }
 
         Ok(())
+    }
+
+    async fn handle_get_tail_info<T: TransportConnect>(
+        &mut self,
+        provider: &ReplicatedLogletProvider<T>,
+        incoming: Incoming<GetTailInfo>,
+    ) {
+        let (reciprocal, body) = incoming.split();
+
+        let loglet = match self.get_loglet(provider, &body.header).await {
+            Ok(loglet) => loglet,
+            Err(err) => {
+                return_error_status!(reciprocal, err);
+            }
+        };
+
+        if !loglet.is_sequencer_local() {
+            return_error_status!(reciprocal, SequencerStatus::NotSequencer);
+        }
+
+        let tail = loglet.known_global_tail().get();
+        let tail_info = TailInfo {
+            header: CommonResponseHeader {
+                known_global_tail: Some(tail.offset()),
+                sealed: Some(tail.is_sealed()),
+                status: if tail.is_sealed() {
+                    SequencerStatus::Sealed
+                } else {
+                    SequencerStatus::Ok
+                },
+            },
+        };
+
+        let _ =
+            task_center().spawn_child(TaskKind::Disposable, "return-tail-info", None, async move {
+                reciprocal.prepare(tail_info).send().await?;
+                Ok(())
+            });
     }
 
     /// Infailable handle_append method
