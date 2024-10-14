@@ -12,6 +12,7 @@ mod describe_log;
 mod dump_log;
 mod gen_metadata;
 mod list_logs;
+mod seal_extend_chain;
 mod trim_log;
 
 use cling::prelude::*;
@@ -28,4 +29,6 @@ pub enum Log {
     Dump(dump_log::DumpLogOpts),
     /// Trim a log to a particular Log Sequence Number (LSN)
     Trim(trim_log::TrimLogOpts),
+    /// Seal and Extend chain
+    SealAndExtend(seal_extend_chain::SealAndExtendChainOpts),
 }
