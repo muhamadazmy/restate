@@ -9,6 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::str::FromStr;
 
 use bytestring::ByteString;
 use enum_map::Enum;
@@ -35,6 +36,7 @@ use crate::{flexbuffers_storage_encode_decode, Version, Versioned};
     Deserialize,
     derive_more::From,
     derive_more::Display,
+    derive_more::Into,
 )]
 #[repr(transparent)]
 #[serde(transparent)]
@@ -152,6 +154,20 @@ pub enum ProviderKind {
     /// Replicated loglet implementation. This requires log-server role to run on
     /// enough nodes in the cluster.
     Replicated,
+}
+
+impl FromStr for ProviderKind {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "local" => Ok(Self::Local),
+            #[cfg(any(test, feature = "memory-loglet"))]
+            "in-memory" | "inmemory" | "memory" => Ok(Self::InMemory),
+            #[cfg(feature = "replicated-loglet")]
+            "replicated" => Ok(Self::Replicated),
+            _ => Err("Unknown provider kind"),
+        }
+    }
 }
 
 impl LogletConfig {
