@@ -17,6 +17,7 @@ use anyhow::anyhow;
 use codederror::CodedError;
 use futures::future::OptionFuture;
 use futures::{Stream, StreamExt};
+use restate_types::logs::metadata::{LogletParams, ProviderKind, SegmentIndex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
@@ -154,6 +155,14 @@ enum ClusterControllerCommand {
         partition_id: PartitionId,
         response_tx: oneshot::Sender<anyhow::Result<SnapshotId>>,
     },
+    SealAndExtend {
+        log_id: LogId,
+        segment_index: Option<SegmentIndex>,
+        min_version: Version,
+        provider: ProviderKind,
+        params: LogletParams,
+        response_tx: oneshot::Sender<anyhow::Result<()>>,
+    },
 }
 
 pub struct ClusterControllerHandle {
@@ -200,6 +209,31 @@ impl ClusterControllerHandle {
             .tx
             .send(ClusterControllerCommand::CreateSnapshot {
                 partition_id,
+                response_tx: tx,
+            })
+            .await;
+
+        rx.await.map_err(|_| ShutdownError)
+    }
+
+    pub async fn seal_and_extend_chain(
+        &self,
+        log_id: LogId,
+        segment_index: Option<SegmentIndex>,
+        min_version: Version,
+        provider: ProviderKind,
+        params: LogletParams,
+    ) -> Result<anyhow::Result<()>, ShutdownError> {
+        let (tx, rx) = oneshot::channel();
+
+        let _ = self
+            .tx
+            .send(ClusterControllerCommand::SealAndExtend {
+                log_id,
+                segment_index,
+                min_version,
+                provider,
+                params,
                 response_tx: tx,
             })
             .await;
@@ -433,6 +467,20 @@ impl<T: TransportConnect> Service<T> {
                 info!(?partition_id, "Create snapshot command received");
                 self.create_partition_snapshot(partition_id, response_tx)
                     .await;
+            }
+            ClusterControllerCommand::SealAndExtend {
+                log_id,
+                segment_index,
+                min_version,
+                provider,
+                params,
+                response_tx,
+            } => {
+                info!(%log_id, ?segment_index, %provider, "Seal and extend chain");
+                let result = bifrost_admin
+                    .seal_and_extend_chain(log_id, segment_index, min_version, provider, params)
+                    .await;
+                let _ = response_tx.send(result.map_err(Into::into));
             }
         }
     }
