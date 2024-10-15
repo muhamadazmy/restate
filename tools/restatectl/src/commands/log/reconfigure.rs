@@ -1,0 +1,165 @@
+// Copyright (c) 2024 -  Restate Software, Inc., Restate GmbH.
+// All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
+use std::num::{NonZeroU32, NonZeroU8};
+
+use anyhow::Context;
+use cling::prelude::*;
+use tonic::codec::CompressionEncoding;
+use tonic::transport::Channel;
+
+use restate_admin::cluster_controller::protobuf::cluster_ctrl_svc_client::ClusterCtrlSvcClient;
+use restate_admin::cluster_controller::protobuf::{
+    ListLogsRequest, ProviderKind as ProtoProviderKind, SealAndExtendChainRequest,
+};
+use restate_types::logs::metadata::{Logs, ProviderKind};
+use restate_types::logs::LogId;
+use restate_types::protobuf::common::Version;
+use restate_types::replicated_loglet::{NodeSet, ReplicatedLogletParams, ReplicationProperty};
+use restate_types::storage::StorageCodec;
+use restate_types::{GenerationalNodeId, PlainNodeId};
+
+use crate::app::ConnectionInfo;
+use crate::util::grpc_connect;
+
+#[derive(Run, Parser, Collect, Clone, Debug)]
+#[cling(run = "reconfigure")]
+pub struct ReconfigureOpts {
+    /// LogId/Partition to seal and extend
+    #[clap(long)]
+    log_id: u32,
+    /// Option segment index to seal, chosen automatically if not provided.
+    #[clap(long)]
+    segment_index: Option<u32>,
+    /// Min metadata version
+    #[clap(long, default_value = "1")]
+    min_version: NonZeroU32,
+    /// Provider kind.
+    #[clap(long, default_value = "replicated")]
+    provider: ProviderKind,
+
+    /// Replication property
+    /// If not provided, it will be copied from the last segment if (and only if) it was
+    /// of replicated type.
+    #[clap(long)]
+    replication_factor: Option<NonZeroU8>,
+    /// A comma-separated list of the nodes in the nodeset. e.g. N1,N2,N4 or 1,2,3
+    /// If not provided, it will be copied from the last segment if (and only if) it was
+    /// of replicated type.
+    #[clap(long, value_delimiter=',', num_args = 0..)]
+    nodeset: Vec<PlainNodeId>,
+    /// The generational node id of the sequencer node, e.g. N1:1
+    /// If not provided, it will be copied from the last segment if (and only if) it was
+    /// of replicated type.
+    #[clap(long)]
+    sequencer: Option<GenerationalNodeId>,
+}
+
+async fn reconfigure(connection: &ConnectionInfo, opts: &ReconfigureOpts) -> anyhow::Result<()> {
+    let channel = grpc_connect(connection.cluster_controller.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "cannot connect to cluster controller at {}",
+                connection.cluster_controller
+            )
+        })?;
+
+    let mut client =
+        ClusterCtrlSvcClient::new(channel).accept_compressed(CompressionEncoding::Gzip);
+
+    let (provider, params) = match opts.provider {
+        ProviderKind::Local => (ProtoProviderKind::Local, rand::random::<u64>().to_string()),
+        #[cfg(any(test, feature = "memory-loglet"))]
+        ProviderKind::InMemory => (ProtoProviderKind::InMemory, String::default()),
+        #[cfg(feature = "replicated-loglet")]
+        ProviderKind::Replicated => (
+            ProtoProviderKind::Replicated,
+            replicated_loglet_params(&mut client, opts).await?,
+        ),
+        #[allow(unreachable_patterns)]
+        _ => anyhow::bail!("Provider kind is not supported"),
+    };
+
+    client
+        .seal_and_extend_chain(SealAndExtendChainRequest {
+            log_id: opts.log_id,
+            min_version: Some(Version {
+                value: opts.min_version.get(),
+            }),
+            provider: provider.into(),
+            segment_index: opts.segment_index,
+            params,
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn replicated_loglet_params(
+    client: &mut ClusterCtrlSvcClient<Channel>,
+    opts: &ReconfigureOpts,
+) -> anyhow::Result<String> {
+    let mut logs_resposne = client
+        .list_logs(ListLogsRequest {})
+        .await
+        .context("failed to get logs chain")?
+        .into_inner();
+
+    let logs = StorageCodec::decode::<Logs, _>(&mut logs_resposne.logs)?;
+    let chain = logs
+        .chain(&LogId::from(opts.log_id))
+        .with_context(|| format!("Unknown log id '{}'", opts.log_id))?;
+
+    let tail_index = opts.segment_index.unwrap_or(chain.tail_index().into());
+
+    // format is, log_id in the higher order u32, and segment_index in the lower
+    let loglet_id: u64 =
+        (u64::from(opts.log_id) << (size_of::<LogId>() * 8)) + u64::from(tail_index + 1);
+
+    let tail_segment = chain.tail();
+
+    let params = if tail_segment.config.kind == ProviderKind::Replicated {
+        let last_params =
+            ReplicatedLogletParams::deserialize_from(tail_segment.config.params.as_bytes())
+                .context("last segment params is invalid")?;
+
+        ReplicatedLogletParams {
+            loglet_id: loglet_id.into(),
+            nodeset: if opts.nodeset.is_empty() {
+                last_params.nodeset
+            } else {
+                NodeSet::from_iter(opts.nodeset.iter().cloned())
+            },
+            replication: ReplicationProperty::new(opts.replication_factor.unwrap_or_else(|| {
+                NonZeroU8::new(last_params.replication.num_copies())
+                    .expect("Valid replication factor of last segment")
+            })),
+            sequencer: opts.sequencer.unwrap_or(last_params.sequencer),
+            write_set: None,
+        }
+    } else {
+        ReplicatedLogletParams {
+            loglet_id: loglet_id.into(),
+            nodeset: if opts.nodeset.is_empty() {
+                anyhow::bail!("Missing nodeset. Nodeset is required if last segment is not of replicated type");
+            } else {
+                NodeSet::from_iter(opts.nodeset.iter().cloned())
+            },
+            replication: ReplicationProperty::new(
+                opts.replication_factor.context("Missing replication-factor. Replication factor is required if last segment is not of replicated type")?,
+            ),
+            sequencer: opts.sequencer.context("Missing sequencer. Sequencer is required if last segment is not of replicated type")?,
+            write_set: None,
+        }
+    };
+
+    params.serialize().map_err(Into::into)
+}
