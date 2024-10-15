@@ -16,18 +16,19 @@ use restate_admin::cluster_controller::protobuf::cluster_ctrl_svc_server::Cluste
 use restate_admin::cluster_controller::protobuf::{
     ClusterStateRequest, ClusterStateResponse, CreatePartitionSnapshotRequest,
     CreatePartitionSnapshotResponse, DescribeLogRequest, DescribeLogResponse, ListLogsRequest,
-    ListLogsResponse, ListNodesRequest, ListNodesResponse, TrimLogRequest,
+    ListLogsResponse, ListNodesRequest, ListNodesResponse, SealAndExtendChainRequest,
+    SealAndExtendChainResponse, TrimLogRequest,
 };
 use restate_admin::cluster_controller::ClusterControllerHandle;
 use restate_bifrost::{Bifrost, FindTailAttributes};
 use restate_metadata_store::MetadataStoreClient;
 use restate_types::identifiers::PartitionId;
-use restate_types::logs::metadata::Logs;
+use restate_types::logs::metadata::{Logs, ProviderKind, SegmentIndex};
 use restate_types::logs::{LogId, Lsn};
 use restate_types::metadata_store::keys::{BIFROST_CONFIG_KEY, NODES_CONFIG_KEY};
 use restate_types::nodes_config::NodesConfiguration;
 use restate_types::storage::{StorageCodec, StorageEncode};
-use restate_types::Versioned;
+use restate_types::{Version, Versioned};
 
 use crate::network_server::AdminDependencies;
 
@@ -200,6 +201,33 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
                 snapshot_id: snapshot_id.to_string(),
             })),
         }
+    }
+
+    async fn seal_and_extend_chain(
+        &self,
+        request: Request<SealAndExtendChainRequest>,
+    ) -> Result<Response<SealAndExtendChainResponse>, Status> {
+        let request = request.into_inner();
+        let kind: ProviderKind = request
+            .provider
+            .parse()
+            .map_err(|_| Status::invalid_argument("Provider type is not supported"))?;
+
+        self.controller_handle
+            .seal_and_extend_chain(
+                request.log_id.into(),
+                request.segment_index.map(SegmentIndex::from),
+                request
+                    .min_version
+                    .map(Version::from)
+                    .unwrap_or_else(|| Version::MIN),
+                kind,
+                request.params.into(),
+            )
+            .await
+            .map_err(|_| Status::aborted("Node is shutting down"))?
+            .map(|_| Response::new(SealAndExtendChainResponse::default()))
+            .map_err(|err| Status::internal(err.to_string()))
     }
 }
 
