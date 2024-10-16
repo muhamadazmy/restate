@@ -22,6 +22,7 @@ use restate_types::metadata_store::keys::BIFROST_CONFIG_KEY;
 use restate_types::Version;
 
 use crate::error::AdminError;
+use crate::loglet_wrapper::LogletWrapper;
 use crate::{Bifrost, Error, Result};
 
 /// Bifrost's Admin API
@@ -96,7 +97,7 @@ impl<'a> BifrostAdmin<'a> {
                 self.bifrost
                     .inner
                     .metadata
-                    .logs()
+                    .logs_ref()
                     .chain(&log_id)
                     .map(|c| c.tail_index())
             })
@@ -110,12 +111,12 @@ impl<'a> BifrostAdmin<'a> {
         Ok(())
     }
 
+    pub async fn writeable_loglet(&self, log_id: LogId) -> Result<LogletWrapper> {
+        self.inner.writeable_loglet(log_id).await
+    }
+
     #[instrument(level = "debug", skip(self), err)]
-    pub(crate) async fn seal(
-        &self,
-        log_id: LogId,
-        segment_index: SegmentIndex,
-    ) -> Result<TailState> {
+    pub async fn seal(&self, log_id: LogId, segment_index: SegmentIndex) -> Result<TailState> {
         self.bifrost.inner.fail_if_shutting_down()?;
         // first find the tail segment for this log.
         let loglet = self.bifrost.inner.writeable_loglet(log_id).await?;
