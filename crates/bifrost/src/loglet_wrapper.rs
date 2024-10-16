@@ -60,6 +60,10 @@ impl LogletWrapper {
         }
     }
 
+    pub fn base_lsn(&self) -> Lsn {
+        self.base_lsn
+    }
+    
     /// Panics if `tail_lsn` is lower than the loglet's `base_lsn`
     pub fn set_tail_lsn(&mut self, tail_lsn: Lsn) {
         debug_assert!(tail_lsn >= self.base_lsn);
