@@ -10,6 +10,7 @@
 
 use super::QueryEngineOptions;
 use crate::cluster_controller::ReplicationStrategy;
+use crate::retries::RetryPolicy;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::net::SocketAddr;
@@ -64,6 +65,12 @@ pub struct AdminOptions {
     /// The default replication strategy to be used by the cluster controller to schedule partition
     /// processors.
     pub default_replication_strategy: ReplicationStrategy,
+
+    /// # Log Controller error retry policy
+    ///
+    /// The retry policy for log controller when it has
+    /// issue committing a reconfiguration
+    pub log_controller_error_retry_policy: RetryPolicy,
 }
 
 impl AdminOptions {
@@ -93,6 +100,12 @@ impl Default for AdminOptions {
             log_trim_interval: Some(Duration::from_secs(60 * 60).into()),
             log_trim_threshold: 1000,
             default_replication_strategy: ReplicationStrategy::OnAllNodes,
+            log_controller_error_retry_policy: RetryPolicy::exponential(
+                Duration::from_millis(10),
+                2.0,
+                Some(15),
+                Some(Duration::from_secs(5)),
+            ),
         }
     }
 }
