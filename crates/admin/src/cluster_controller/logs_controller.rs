@@ -13,6 +13,7 @@ use std::iter;
 use std::num::NonZeroU8;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rand::prelude::IteratorRandom;
 use rand::{thread_rng, RngCore};
@@ -43,12 +44,15 @@ use restate_types::partition_table::PartitionTable;
 use restate_types::replicated_loglet::{
     NodeSet, ReplicatedLogletId, ReplicatedLogletParams, ReplicationProperty,
 };
+use restate_types::retries::RetryPolicy;
 use restate_types::{logs, GenerationalNodeId, NodeId, PlainNodeId, Version, Versioned};
 
 use crate::cluster_controller::observed_cluster_state::ObservedClusterState;
 use crate::cluster_controller::scheduler;
 
 type Result<T, E = LogsControllerError> = std::result::Result<T, E>;
+
+const FALLBACK_MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum LogsControllerError {
@@ -496,6 +500,25 @@ impl TryFrom<&LogletConfig> for LogletConfiguration {
     }
 }
 
+#[derive(
+    Default, Eq, PartialEq, PartialOrd, Ord, Clone, Copy, derive_more::From, derive_more::Into,
+)]
+struct AttemptsCounter(u8);
+
+impl AttemptsCounter {
+    const FIRST: AttemptsCounter = AttemptsCounter(0);
+
+    fn next(self) -> AttemptsCounter {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+impl From<AttemptsCounter> for usize {
+    fn from(value: AttemptsCounter) -> Self {
+        value.0 as usize
+    }
+}
+
 /// Effects used by [`LogsControllerInner`] to signal required actions to the [`LogsController`]. Often those
 /// effects require an asynchronous operation whose result is reported back via an [`Event`].
 enum Effect {
@@ -503,11 +526,13 @@ enum Effect {
     WriteLogs {
         logs: Arc<Logs>,
         previous_version: Version,
+        attempt: AttemptsCounter,
     },
     /// Seal the given segment of the given [`LogId`].
     Seal {
         log_id: LogId,
         segment_index: SegmentIndex,
+        attempt: AttemptsCounter,
     },
 }
 
@@ -520,6 +545,7 @@ enum Event {
     WriteLogsFailed {
         logs: Arc<Logs>,
         previous_version: Version,
+        attempt: AttemptsCounter,
     },
     /// Found a newer [`Logs`] version.
     NewLogs,
@@ -533,6 +559,7 @@ enum Event {
     SealFailed {
         log_id: LogId,
         segment_index: SegmentIndex,
+        attempt: AttemptsCounter,
     },
 }
 
@@ -610,6 +637,7 @@ impl LogsControllerInner {
                 effects.push(Effect::WriteLogs {
                     logs: Arc::clone(&logs),
                     previous_version: self.current_logs.version(),
+                    attempt: AttemptsCounter::default(),
                 });
                 // we already update the current logs but will wait until we learn whether the write
                 // was successful or not. If not, then we'll reset our internal state wrt the new
@@ -633,6 +661,7 @@ impl LogsControllerInner {
                     segment_index: log_state
                         .current_segment_index()
                         .expect("expect a valid segment"),
+                    attempt: AttemptsCounter::default(),
                 })
             }
         }
@@ -694,14 +723,15 @@ impl LogsControllerInner {
             Event::WriteLogsFailed {
                 logs,
                 previous_version: expected_version,
+                attempt,
             } => {
                 // Filter out out-dated log write attempts
                 if Some(logs.version()) == self.logs_write_in_progress {
-                    // todo debounce to avoid busy loop
                     // todo what if it doesn't work again? Maybe stepping down as the leader
                     effects.push(Effect::WriteLogs {
                         logs,
                         previous_version: expected_version,
+                        attempt: attempt.next(),
                     });
                 }
             }
@@ -718,14 +748,15 @@ impl LogsControllerInner {
             Event::SealFailed {
                 log_id,
                 segment_index,
+                attempt,
             } => {
                 if matches!(self.logs_state.get(&log_id), Some(LogState::Sealing { segment_index: current_segment_index, ..}) if segment_index == *current_segment_index)
                 {
-                    // todo debounce to avoid busy loop
                     // todo what if it doesn't work again? Maybe stepping down as the leader
                     effects.push(Effect::Seal {
                         log_id,
                         segment_index,
+                        attempt: attempt.next(),
                     })
                 }
             }
@@ -846,6 +877,7 @@ pub struct LogsController {
     async_operations: JoinSet<Event>,
     tail_updates_tx: watch::Sender<Arc<LogsTailUpdates>>,
     in_flight_refresh_tails: Option<TaskHandle<()>>,
+    retry_policy: RetryPolicy,
 }
 
 impl LogsController {
@@ -879,6 +911,13 @@ impl LogsController {
             async_operations: JoinSet::default(),
             tail_updates_tx,
             in_flight_refresh_tails: None,
+            //todo(azmy): make configurable
+            retry_policy: RetryPolicy::exponential(
+                Duration::from_millis(10),
+                2.0,
+                Some(15),
+                Some(Duration::from_secs(5)),
+            ),
         })
     }
 
@@ -991,14 +1030,16 @@ impl LogsController {
                 Effect::WriteLogs {
                     logs,
                     previous_version,
+                    attempt,
                 } => {
-                    self.write_logs(previous_version, logs);
+                    self.write_logs(previous_version, logs, attempt);
                 }
                 Effect::Seal {
                     log_id,
                     segment_index,
+                    attempt,
                 } => {
-                    self.seal_log(log_id, segment_index);
+                    self.seal_log(log_id, segment_index, attempt);
                 }
             }
         }
@@ -1006,13 +1047,22 @@ impl LogsController {
         self.effects = Some(effects);
     }
 
-    fn write_logs(&mut self, previous_version: Version, logs: Arc<Logs>) {
+    fn write_logs(&mut self, previous_version: Version, logs: Arc<Logs>, attempt: AttemptsCounter) {
         let tc = task_center().clone();
         let metadata_store_client = self.metadata_store_client.clone();
         let metadata_writer = self.metadata_writer.clone();
+        let retry_policy = self.retry_policy.clone();
 
         self.async_operations.spawn(async move {
             tc.run_in_scope("logs-controller-write-logs", None, async {
+                if attempt > AttemptsCounter::FIRST {
+                    let delay = retry_policy
+                        .iter()
+                        .nth(usize::from(attempt) - 1)
+                        .unwrap_or(FALLBACK_MAX_RETRY_DELAY);
+                    tokio::time::sleep(delay).await;
+                }
+
                 if let Err(err) = metadata_store_client
                     .put(
                         BIFROST_CONFIG_KEY.clone(),
@@ -1040,6 +1090,7 @@ impl LogsController {
                                     Event::WriteLogsFailed {
                                         logs,
                                         previous_version,
+                                        attempt,
                                     }
                                 }
                             }
@@ -1049,6 +1100,7 @@ impl LogsController {
                             Event::WriteLogsFailed {
                                 logs,
                                 previous_version,
+                                attempt
                             }
                         }
                     };
@@ -1064,13 +1116,23 @@ impl LogsController {
         });
     }
 
-    fn seal_log(&mut self, log_id: LogId, segment_index: SegmentIndex) {
+    fn seal_log(&mut self, log_id: LogId, segment_index: SegmentIndex, attempt: AttemptsCounter) {
         let tc = task_center().clone();
         let bifrost = self.bifrost.clone();
         let metadata_store_client = self.metadata_store_client.clone();
         let metadata_writer = self.metadata_writer.clone();
+        let retry_policy = self.retry_policy.clone();
+
         self.async_operations.spawn(async move {
             tc.run_in_scope("logs-controller-seal-log", None, async {
+                if attempt > AttemptsCounter::FIRST {
+                    let delay = retry_policy
+                        .iter()
+                        .nth(usize::from(attempt) - 1)
+                        .unwrap_or(FALLBACK_MAX_RETRY_DELAY);
+                    tokio::time::sleep(delay).await;
+                }
+
                 let bifrost_admin =
                     BifrostAdmin::new(&bifrost, &metadata_writer, &metadata_store_client);
 
@@ -1086,6 +1148,7 @@ impl LogsController {
                             Event::SealFailed {
                                 log_id,
                                 segment_index,
+                                attempt,
                             }
                         }
                     }
@@ -1094,6 +1157,7 @@ impl LogsController {
                         Event::SealFailed {
                             log_id,
                             segment_index,
+                            attempt,
                         }
                     }
                 }
