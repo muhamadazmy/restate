@@ -16,9 +16,9 @@ use tracing::{debug, info};
 use restate_admin::cluster_controller::protobuf::cluster_ctrl_svc_server::ClusterCtrlSvc;
 use restate_admin::cluster_controller::protobuf::{
     ClusterStateRequest, ClusterStateResponse, CreatePartitionSnapshotRequest,
-    CreatePartitionSnapshotResponse, DescribeLogRequest, DescribeLogResponse, ListLogsRequest,
-    ListLogsResponse, ListNodesRequest, ListNodesResponse, SealAndExtendChainRequest,
-    SealAndExtendChainResponse, TrimLogRequest,
+    CreatePartitionSnapshotResponse, DescribeLogRequest, DescribeLogResponse, FindTailRequest,
+    FindTailResponse, ListLogsRequest, ListLogsResponse, ListNodesRequest, ListNodesResponse,
+    SealAndExtendChainRequest, SealAndExtendChainResponse, TailState, TrimLogRequest,
 };
 use restate_admin::cluster_controller::ClusterControllerHandle;
 use restate_bifrost::{Bifrost, BifrostAdmin};
@@ -229,6 +229,61 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
             .await
             .map(|_| Response::new(SealAndExtendChainResponse::default()))
             .map_err(|err| Status::internal(err.to_string()))
+    }
+
+    async fn find_tail(
+        &self,
+        request: Request<FindTailRequest>,
+    ) -> Result<Response<FindTailResponse>, Status> {
+        let request = request.into_inner();
+        let log_id: LogId = request.log_id.into();
+
+        let logs = self.get_logs().await?;
+        let Some(chain) = logs.chain(&log_id) else {
+            return Err(Status::not_found("No log with given id"));
+        };
+
+        let tail = chain.tail();
+
+        let admin = BifrostAdmin::new(
+            &self.bifrost_handle,
+            &self.metadata_writer,
+            &self.metadata_store_client,
+        );
+
+        let writable_loglet = admin
+            .writeable_loglet(request.log_id.into())
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        if writable_loglet.segment_index() != tail.index() {
+            // slim chances but can happen if there was an
+            // ongoing update.
+            return Err(Status::failed_precondition(
+                "Log segment mismatch. Possible log reconfiguration in progress",
+            ));
+        }
+
+        let tail_state = writable_loglet
+            .find_tail()
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        let response = FindTailResponse {
+            segment_indext: tail.index().into(),
+            base_lsn: tail.base_lsn.into(),
+            tail_state: if tail_state.is_sealed() {
+                TailState::Sealed
+            } else {
+                TailState::Open
+            }
+            .into(),
+            log_id: log_id.into(),
+            tail_offset: tail_state.offset().into(),
+            tail_lsn: tail.tail_lsn.map(Into::into),
+        };
+
+        Ok(Response::new(response))
     }
 }
 
