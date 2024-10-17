@@ -725,7 +725,6 @@ impl LogsControllerInner {
             } => {
                 // Filter out out-dated log write attempts
                 if Some(logs.version()) == self.logs_write_in_progress {
-                    // todo debounce to avoid busy loop
                     // todo what if it doesn't work again? Maybe stepping down as the leader
                     effects.push(Effect::WriteLogs {
                         logs,
@@ -751,7 +750,6 @@ impl LogsControllerInner {
             } => {
                 if matches!(self.logs_state.get(&log_id), Some(LogState::Sealing { segment_index: current_segment_index, ..}) if segment_index == *current_segment_index)
                 {
-                    // todo debounce to avoid busy loop
                     // todo what if it doesn't work again? Maybe stepping down as the leader
                     effects.push(Effect::Seal {
                         log_id,
@@ -812,9 +810,6 @@ impl LogsControllerInner {
                         },
                     );
                 }
-                // todo how to figure out whether a previous logs controller instance has started
-                //  sealing a loglet? Can we ask the log servers about it? Should we periodically
-                //  check via bifrost?
             }
         }
 
