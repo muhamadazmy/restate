@@ -10,6 +10,7 @@
 
 use super::QueryEngineOptions;
 use crate::cluster_controller::ReplicationStrategy;
+use crate::retries::RetryPolicy;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::net::SocketAddr;
