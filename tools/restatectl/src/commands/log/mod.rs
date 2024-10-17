@@ -10,10 +10,13 @@
 
 mod describe_log;
 mod dump_log;
+mod find_tail;
 mod gen_metadata;
 mod list_logs;
 mod reconfigure;
 mod trim_log;
+
+use std::{ops::RangeInclusive, str::FromStr};
 
 use cling::prelude::*;
 
@@ -32,4 +35,58 @@ pub enum Log {
     /// Reconfigure a log by sealing the tail segment
     /// and extending the chain with a new one
     Reconfigure(reconfigure::ReconfigureOpts),
+    /// Find and show tail state of a log
+    FindTail(find_tail::FindTailOpts),
+}
+
+#[derive(Parser, Collect, Clone, Debug)]
+struct LogIdRange {
+    from: u32,
+    to: u32,
+}
+
+impl LogIdRange {
+    fn new(from: u32, to: u32) -> anyhow::Result<Self> {
+        if from > to {
+            anyhow::bail!(
+                "Invalid log id range: {}..{}, start must be <= end range",
+                from,
+                to
+            )
+        } else {
+            Ok(LogIdRange { from, to })
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u32> {
+        self.from..=self.to
+    }
+}
+
+impl IntoIterator for LogIdRange {
+    type IntoIter = RangeInclusive<u32>;
+    type Item = u32;
+    fn into_iter(self) -> Self::IntoIter {
+        self.from..=self.to
+    }
+}
+
+impl FromStr for LogIdRange {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split("-").collect();
+        match parts.len() {
+            1 => {
+                let n = parts[0].parse()?;
+                Ok(LogIdRange::new(n, n)?)
+            }
+            2 => {
+                let from = parts[0].parse()?;
+                let to = parts[1].parse()?;
+                Ok(LogIdRange::new(from, to)?)
+            }
+            _ => anyhow::bail!("Invalid log id or log range: {}", s),
+        }
+    }
 }

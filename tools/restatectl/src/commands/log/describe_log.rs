@@ -8,9 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::str::FromStr;
-
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use cling::prelude::*;
 use itertools::Itertools;
 use tonic::codec::CompressionEncoding;
@@ -29,52 +27,9 @@ use restate_types::storage::StorageCodec;
 use crate::app::ConnectionInfo;
 use crate::util::grpc_connect;
 
-#[derive(Parser, Collect, Clone, Debug)]
-struct LogIdRange {
-    from: u32,
-    to: u32,
-}
-
-impl LogIdRange {
-    fn new(from: u32, to: u32) -> anyhow::Result<Self> {
-        if from > to {
-            Err(anyhow!(
-                "Invalid log id range: {}..{}, start must be <= end range",
-                from,
-                to
-            ))
-        } else {
-            Ok(LogIdRange { from, to })
-        }
-    }
-
-    fn iter(&self) -> impl Iterator<Item = u32> {
-        self.from..=self.to
-    }
-}
-
-impl FromStr for LogIdRange {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split("-").collect();
-        match parts.len() {
-            1 => {
-                let n = parts[0].parse()?;
-                Ok(LogIdRange::new(n, n)?)
-            }
-            2 => {
-                let from = parts[0].parse()?;
-                let to = parts[1].parse()?;
-                Ok(LogIdRange::new(from, to)?)
-            }
-            _ => Err(anyhow!("Invalid log id or log range: {}", s)),
-        }
-    }
-}
+use super::LogIdRange;
 
 #[derive(Run, Parser, Collect, Clone, Debug)]
-#[clap()]
 #[cling(run = "describe_logs")]
 pub struct DescribeLogIdOpts {
     /// The log id(s) to describe
