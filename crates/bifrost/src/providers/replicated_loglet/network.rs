@@ -235,7 +235,7 @@ impl RequestPump {
             }
         };
 
-        let task = WaitAppendedTask {
+        let task = WaitCommittedTask {
             reciprocal,
             loglet_commit,
             global_tail: global_tail.clone(),
@@ -356,13 +356,13 @@ impl From<ReplicatedLogletError> for SequencerStatus {
     }
 }
 
-struct WaitAppendedTask {
+struct WaitCommittedTask {
     loglet_commit: LogletCommit,
-    reciprocal: Reciprocal,
+    reciprocal: Reciprocal<Appended>,
     global_tail: TailOffsetWatch,
 }
 
-impl WaitAppendedTask {
+impl WaitCommittedTask {
     async fn run(self) -> anyhow::Result<()> {
         let appended = match self.loglet_commit.await {
             Ok(offset) => Appended {
