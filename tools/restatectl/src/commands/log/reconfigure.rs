@@ -18,6 +18,7 @@ use tonic::transport::Channel;
 
 use restate_admin::cluster_controller::protobuf::cluster_ctrl_svc_client::ClusterCtrlSvcClient;
 use restate_admin::cluster_controller::protobuf::{ListLogsRequest, SealAndExtendChainRequest};
+use restate_cli_util::{c_eprintln, c_println};
 use restate_types::logs::metadata::{Logs, ProviderKind, SegmentIndex};
 use restate_types::logs::LogId;
 use restate_types::protobuf::common::Version;
