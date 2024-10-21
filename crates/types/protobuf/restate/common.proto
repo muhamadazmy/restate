@@ -11,10 +11,7 @@ syntax = "proto3";
 
 package restate.common;
 
-enum ProtocolVersion {
-  ProtocolVersion_UNKNOWN = 0;
-  FLEXBUFFERS = 1;
-}
+enum ProtocolVersion { ProtocolVersion_UNKNOWN = 0; FLEXBUFFERS = 1; }
 
 message NodeId {
   uint32 id = 1;
@@ -33,9 +30,7 @@ message Version { uint32 value = 1; }
 // The handle name or type tag of the message. For every target there must be
 // exactly one message handler implementation.
 enum TargetName {
-  TargetName_UNKNOWN = 0;
-  METADATA_MANAGER = 1;
-  INGRESS = 2;
+  TargetName_UNKNOWN = 0; METADATA_MANAGER = 1; INGRESS = 2;
   LOCAL_METADATA_STORE = 3;
   LOCAL_METADATA_STORE_CLIENT = 4;
   ATTACH_REQUEST = 5;
@@ -69,13 +64,15 @@ enum TargetName {
   // Partition Processor
   PARTITION_CREATE_SNAPSHOT_REQUEST = 50;
   PARTITION_CREATE_SNAPSHOT_RESPONSE = 51;
+  // Node
+  NODE_GET_NODE_STATE_REQUEST = 60;
+  NODE_GET_NODE_STATE_RESPONSE = 61;
 }
 
 // ** Health & Per-role Status
 
 enum NodeStatus {
-  NodeStatus_UNKNOWN = 0;
-  ALIVE = 1;
+  NodeStatus_UNKNOWN = 0; ALIVE = 1;
   // The node is not fully running yet.
   STARTING_UP = 2;
   // The node is performing a graceful shutdown.
@@ -83,27 +80,22 @@ enum NodeStatus {
 }
 
 enum WorkerStatus {
-  WorkerStatus_UNKNOWN = 0;
-  WorkerStatus_READY = 1;
+  WorkerStatus_UNKNOWN = 0; WorkerStatus_READY = 1;
   WorkerStatus_STARTING_UP = 2;
 }
 
 enum AdminStatus {
-  AdminStatus_UNKNOWN = 0;
-  AdminStatus_READY = 1;
-  AdminStatus_STARTING_UP = 2;
+  AdminStatus_UNKNOWN = 0; AdminStatus_READY = 1; AdminStatus_STARTING_UP = 2;
 }
 
 enum LogServerStatus {
-  LogServerStatus_UNKNOWN = 0;
-  LogServerStatus_READY = 1;
+  LogServerStatus_UNKNOWN = 0; LogServerStatus_READY = 1;
   LogServerStatus_STARTING_UP = 2;
   LogServerStatus_FAILSAFE = 3;
   LogServerStatus_STOPPING = 4;
 }
 
 enum MetadataServerStatus {
-  MetadataServerStatus_UNKNOWN = 0;
-  MetadataServerStatus_READY = 1;
+  MetadataServerStatus_UNKNOWN = 0; MetadataServerStatus_READY = 1;
   MetadataServerStatus_STARTING_UP = 2;
 }
