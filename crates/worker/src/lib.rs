@@ -21,6 +21,7 @@ mod subscription_controller;
 mod subscription_integration;
 
 use codederror::CodedError;
+use restate_core::worker_api::ProcessorsManagerHandle;
 use tokio::sync::oneshot;
 
 pub use crate::subscription_controller::SubscriptionController;
@@ -193,6 +194,10 @@ impl<T: TransportConnect> Worker<T> {
 
     pub fn storage_query_context(&self) -> &QueryContext {
         &self.storage_query_context
+    }
+
+    pub fn parition_processor_manager_handle(&self) -> ProcessorsManagerHandle {
+        self.partition_processor_manager.handle()
     }
 
     pub async fn run(self, all_partitions_started_rx: oneshot::Receiver<()>) -> anyhow::Result<()> {
