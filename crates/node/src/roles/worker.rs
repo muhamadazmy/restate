@@ -9,6 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use codederror::CodedError;
+use restate_core::worker_api::ProcessorsManagerHandle;
 use tokio::sync::oneshot;
 
 use restate_bifrost::Bifrost;
@@ -92,6 +93,10 @@ impl<T: TransportConnect> WorkerRole<T> {
         .await?;
 
         Ok(WorkerRole { worker, metadata })
+    }
+
+    pub fn parition_processor_manager_handle(&self) -> ProcessorsManagerHandle {
+        self.worker.parition_processor_manager_handle()
     }
 
     pub fn storage_query_context(&self) -> &QueryContext {
