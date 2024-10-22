@@ -289,6 +289,9 @@ impl<T: TransportConnect> Service<T> {
         let mut logs = self.metadata.updateable_logs_metadata();
         let mut partition_table = self.metadata.updateable_partition_table();
         let mut nodes_config = self.metadata.updateable_nodes_config();
+        let mut find_logs_tail_interval =
+            time::interval(configuration.admin.log_tail_update_interval.into());
+        find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         self.health_status.update(AdminStatus::Ready);
 
@@ -298,6 +301,9 @@ impl<T: TransportConnect> Service<T> {
                     // Ignore error if system is shutting down
                     let _ = self.cluster_state_refresher.schedule_refresh();
                 },
+                _ = find_logs_tail_interval.tick() => {
+                    logs_controller.find_logs_tail();
+                }
                 _ = OptionFuture::from(self.log_trim_interval.as_mut().map(|interval| interval.tick())) => {
                     let result = self.trim_logs(bifrost_admin).await;
 
@@ -673,6 +679,7 @@ mod tests {
 
     use googletest::assert_that;
     use googletest::matchers::eq;
+    use restate_types::net::node::{GetNodeState, NodeStateResponse};
     use test_log::test;
 
     use restate_bifrost::Bifrost;
@@ -684,9 +691,7 @@ mod tests {
     use restate_types::identifiers::PartitionId;
     use restate_types::live::Live;
     use restate_types::logs::{LogId, Lsn, SequenceNumber};
-    use restate_types::net::partition_processor_manager::{
-        ControlProcessors, GetProcessorsState, ProcessorsStateResponse,
-    };
+    use restate_types::net::partition_processor_manager::ControlProcessors;
     use restate_types::net::AdvertisedAddress;
     use restate_types::nodes_config::{LogServerConfig, NodeConfig, NodesConfiguration, Role};
     use restate_types::{GenerationalNodeId, Version};
@@ -751,7 +756,7 @@ mod tests {
     }
 
     impl MessageHandler for PartitionProcessorStatusHandler {
-        type MessageType = GetProcessorsState;
+        type MessageType = GetNodeState;
 
         async fn on_message(&self, msg: Incoming<Self::MessageType>) {
             if self.block_list.contains(msg.peer()) {
@@ -764,7 +769,9 @@ mod tests {
             };
 
             let state = [(PartitionId::MIN, partition_processor_status)].into();
-            let response = msg.to_rpc_response(ProcessorsStateResponse { state });
+            let response = msg.to_rpc_response(NodeStateResponse {
+                paritions_processor_state: Some(state),
+            });
 
             // We are not really sending something back to target, we just need to provide a known
             // node_id. The response will be sent to a handler running on the very same node.
