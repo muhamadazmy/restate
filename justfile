@@ -119,6 +119,8 @@ run *flags: (_target-installed target)
     cargo run {{ _target-option }} {{ flags }}
 
 test: (_target-installed target)
+    # remove possible old test ports
+    rm -rf /tmp/restate_test_ports
     cargo nextest run {{ _target-option }} --all-features --target-dir target/tests
 
 test-package package *flags:
