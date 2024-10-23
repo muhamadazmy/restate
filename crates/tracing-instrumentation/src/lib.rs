@@ -15,9 +15,10 @@ mod pretty;
 use crate::exporter::ResourceModifyingSpanExporter;
 use crate::pretty::PrettyFields;
 use opentelemetry::trace::{TraceError, TracerProvider};
-use opentelemetry::KeyValue;
+use opentelemetry::{global, KeyValue};
 use opentelemetry_contrib::trace::exporter::jaeger_json::JaegerJsonExporter;
 use opentelemetry_otlp::{SpanExporterBuilder, WithExportConfig};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::BatchSpanProcessor;
 use pretty::Pretty;
 use restate_types::config::{CommonOptions, LogFormat};
@@ -192,6 +193,8 @@ where
         .tracer_builder("opentelemetry-otlp")
         .with_version(env!("CARGO_PKG_VERSION"))
         .build();
+
+    global::set_text_map_propagator(TraceContextPropagator::new());
 
     Ok(Some(
         tracing_opentelemetry::layer()
