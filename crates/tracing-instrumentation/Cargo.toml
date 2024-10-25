@@ -9,6 +9,11 @@ publish = false
 
 [features]
 default = []
+# if enabled, each "crate" will show up
+# as it's own service in collectors like `jaeger`
+# if not (default) all traces will instead
+# show up under one service `restate-server`
+service_per_crate = []
 
 options_schema = ["dep:schemars"]
 rt-tokio = ["dep:tokio"]
@@ -23,7 +28,10 @@ futures = { workspace = true }
 nu-ansi-term = "0.46.0"
 once_cell = { workspace = true }
 opentelemetry = { workspace = true }
-opentelemetry-contrib = { version = "0.16.0", features = ["jaeger_json_exporter", "rt-tokio"] }
+opentelemetry-contrib = { version = "0.16.0", features = [
+    "jaeger_json_exporter",
+    "rt-tokio",
+] }
 opentelemetry-otlp = { version = "0.17.0" }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 opentelemetry-semantic-conventions = "0.16.0"
