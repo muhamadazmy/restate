@@ -12,6 +12,7 @@ mod manager;
 
 pub use manager::{MetadataManager, TargetVersion};
 pub use restate_types::net::metadata::MetadataKind;
+use tracing::instrument;
 
 use std::sync::{Arc, OnceLock};
 
@@ -175,6 +176,7 @@ impl Metadata {
     }
 
     /// Returns when the metadata kind is at the provided version (or newer)
+    #[instrument(level = "debug", skip(self))]
     pub async fn wait_for_version(
         &self,
         metadata_kind: MetadataKind,
