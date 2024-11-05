@@ -24,7 +24,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time;
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, debug_span, info, instrument, trace, warn, Instrument};
+use tracing::{debug, debug_span, error, info, instrument, trace, warn, Instrument};
 
 use restate_bifrost::Bifrost;
 use restate_core::network::rpc_router::{RpcError, RpcRouter};
@@ -357,6 +357,10 @@ impl MultiplexedInvokerStatusReader {
     fn push(&mut self, key_range: RangeInclusive<PartitionKey>, reader: ChannelStatusReader) {
         self.readers.write().push((key_range, reader));
     }
+
+    fn remove(&mut self, key_range: &RangeInclusive<PartitionKey>) {
+        self.readers.write().retain(|elem| &elem.0 != key_range);
+    }
 }
 
 impl StatusHandle for MultiplexedInvokerStatusReader {
@@ -644,6 +648,14 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
                 self.running_partition_processors
                     .insert(partition_id, ProcessorStatus::Started(state));
             }
+            ProcessorEvent::Stopped { error } => {
+                error!(%partition_id, %error, "Partition processor exited");
+                if let Some(ProcessorStatus::Started(status)) =
+                    self.running_partition_processors.remove(&partition_id)
+                {
+                    self.invokers_status_reader.remove(&status.key_range);
+                }
+            }
         }
     }
 
@@ -916,6 +928,7 @@ struct ManagerEvent {
 
 enum ProcessorEvent {
     Started(StartedProcessorStatus),
+    Stopped { error: anyhow::Error },
 }
 
 enum ProcessorStatus {
@@ -1007,17 +1020,18 @@ impl SpawnPartitionProcessorTask {
             {
                 let options = options.clone();
                 let key_range = self.key_range.clone();
-                move || async move {
-                    let partition_store = self
-                        .partition_store_manager
-                        .open_partition_store(
-                            self.partition_id,
-                            key_range,
-                            OpenMode::CreateIfMissing,
-                            &options.storage.rocksdb,
-                        )
-                        .await?;
+                let events = self.events.clone();
+                let partition_store = self
+                    .partition_store_manager
+                    .open_partition_store(
+                        self.partition_id,
+                        key_range,
+                        OpenMode::CreateIfMissing,
+                        &options.storage.rocksdb,
+                    )
+                    .await?;
 
+                move || async move {
                     tc.spawn_child(
                         TaskKind::SystemService,
                         invoker_name,
@@ -1025,7 +1039,7 @@ impl SpawnPartitionProcessorTask {
                         invoker.run(invoker_config),
                     )?;
 
-                    pp_builder
+                    if let Err(err) = pp_builder
                         .build::<ProtobufRawEntryCodec>(
                             tc,
                             self.bifrost,
@@ -1035,6 +1049,16 @@ impl SpawnPartitionProcessorTask {
                         .await?
                         .run()
                         .await
+                    {
+                        let _ = events
+                            .send(ManagerEvent {
+                                partition_id: self.partition_id,
+                                event: ProcessorEvent::Stopped { error: err },
+                            })
+                            .await;
+                    }
+
+                    Ok(())
                 }
             },
         );
