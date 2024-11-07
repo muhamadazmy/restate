@@ -269,12 +269,13 @@ mod state_machine {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::time::Duration;
     use tokio_util::sync::ReusableBoxFuture;
     use tracing::{debug, trace};
 
     use restate_storage_api::outbox_table::OutboxMessage;
+    use restate_types::config::Configuration;
     use restate_types::message::MessageIndex;
+    use restate_types::retries::{RetryIter, RetryPolicy};
     use restate_wal_protocol::Envelope;
 
     use crate::partition::shuffle;
