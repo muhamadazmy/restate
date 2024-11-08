@@ -10,26 +10,21 @@
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
-use anyhow::Context;
 use futures::future::OptionFuture;
 use futures::stream::StreamExt;
-use futures::Stream;
 use metrics::gauge;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, debug_span, error, info, instrument, trace, warn, Instrument};
+use tracing::{debug, debug_span, error, instrument, trace, warn, Instrument};
 
 use restate_bifrost::Bifrost;
-use restate_core::network::rpc_router::{RpcError, RpcRouter};
-use restate_core::network::{Incoming, MessageRouterBuilder};
-use restate_core::network::{MessageHandler, Networking, TransportConnect};
+use restate_core::network::MessageHandler;
+use restate_core::network::{Incoming, MessageRouterBuilder, MessageStream};
 use restate_core::worker_api::{ProcessorsManagerCommand, ProcessorsManagerHandle};
 use restate_core::{cancellation_watcher, task_center, Metadata, ShutdownError, TaskId, TaskKind};
 use restate_core::{RuntimeError, TaskCenter};
@@ -52,8 +47,6 @@ use restate_types::live::LiveLoad;
 use restate_types::logs::Lsn;
 use restate_types::logs::SequenceNumber;
 use restate_types::metadata_store::keys::partition_processor_epoch_key;
-use restate_types::net::cluster_controller::AttachRequest;
-use restate_types::net::cluster_controller::{Action, AttachResponse};
 use restate_types::net::metadata::MetadataKind;
 use restate_types::net::partition_processor::{
     PartitionProcessorRpcError, PartitionProcessorRpcRequest,
@@ -81,7 +74,7 @@ use crate::partition::invoker_storage_reader::InvokerStorageReader;
 use crate::partition::PartitionProcessorControlCommand;
 use crate::PartitionProcessorBuilder;
 
-pub struct PartitionProcessorManager<T> {
+pub struct PartitionProcessorManager {
     task_center: TaskCenter,
     health_status: HealthStatus<WorkerStatus>,
     updateable_config: Live<Configuration>,
@@ -91,16 +84,11 @@ pub struct PartitionProcessorManager<T> {
     metadata: Metadata,
     metadata_store_client: MetadataStoreClient,
     partition_store_manager: PartitionStoreManager,
-    attach_router: RpcRouter<AttachRequest>,
-    incoming_update_processors:
-        Pin<Box<dyn Stream<Item = Incoming<ControlProcessors>> + Send + Sync + 'static>>,
-    incoming_partition_processor_rpc:
-        Pin<Box<dyn Stream<Item = Incoming<PartitionProcessorRpcRequest>> + Send + Sync + 'static>>,
-    networking: Networking<T>,
+    incoming_update_processors: MessageStream<ControlProcessors>,
+    incoming_partition_processor_rpc: MessageStream<PartitionProcessorRpcRequest>,
     bifrost: Bifrost,
     rx: mpsc::Receiver<ProcessorsManagerCommand>,
     tx: mpsc::Sender<ProcessorsManagerCommand>,
-    latest_attach_response: Option<(GenerationalNodeId, AttachResponse)>,
 
     persisted_lsns_rx: Option<watch::Receiver<BTreeMap<PartitionId, Lsn>>>,
     invokers_status_reader: MultiplexedInvokerStatusReader,
@@ -117,14 +105,6 @@ pub enum Error {
     PartitionProcessorBusy,
     #[error(transparent)]
     InvokerBuild(#[from] BuildError),
-}
-
-#[derive(Debug, thiserror::Error)]
-enum AttachError {
-    #[error("No cluster controller found in nodes configuration")]
-    NoClusterController,
-    #[error(transparent)]
-    ShutdownError(#[from] ShutdownError),
 }
 
 struct StartedProcessorStatus {
@@ -389,7 +369,7 @@ impl StatusHandle for MultiplexedInvokerStatusReader {
     }
 }
 
-impl<T: TransportConnect> PartitionProcessorManager<T> {
+impl PartitionProcessorManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         task_center: TaskCenter,
@@ -399,10 +379,8 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
         metadata_store_client: MetadataStoreClient,
         partition_store_manager: PartitionStoreManager,
         router_builder: &mut MessageRouterBuilder,
-        networking: Networking<T>,
         bifrost: Bifrost,
     ) -> Self {
-        let attach_router = RpcRouter::new(router_builder);
         let incoming_update_processors = router_builder.subscribe_to_stream(2);
         let incoming_partition_processor_rpc = router_builder.subscribe_to_stream(128);
 
@@ -418,12 +396,9 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
             partition_store_manager,
             incoming_update_processors,
             incoming_partition_processor_rpc,
-            networking,
             bifrost,
-            attach_router,
             rx,
             tx,
-            latest_attach_response: None,
             persisted_lsns_rx: None,
             invokers_status_reader: MultiplexedInvokerStatusReader::default(),
             pending_control_processors: None,
@@ -442,64 +417,11 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
         PartitionProcessorManagerMessageHandler::new(self.handle())
     }
 
-    async fn attach(&mut self) -> Result<Incoming<AttachResponse>, AttachError> {
-        loop {
-            // We try to get the admin node on every retry since it might change between retries.
-            let admin_node = self
-                .metadata
-                .nodes_config_ref()
-                .get_admin_node()
-                .ok_or(AttachError::NoClusterController)?
-                .current_generation;
-
-            debug!(
-                "Attempting to attach to cluster controller '{}'",
-                admin_node
-            );
-            if admin_node == self.metadata.my_node_id() {
-                // If this node is running the cluster controller, we need to wait a little to give cluster
-                // controller time to start up. This is only done to reduce the chances of observing
-                // connection errors in log. Such logs are benign since we retry, but it's still not nice
-                // to print, specially in a single-node setup.
-                trace!("This node is the cluster controller, giving cluster controller service time to start");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-
-            match self
-                .attach_router
-                .call(&self.networking, admin_node, AttachRequest::default())
-                .await
-            {
-                Ok(response) => return Ok(response),
-                Err(RpcError::Shutdown(e)) => return Err(AttachError::ShutdownError(e)),
-                Err(e) => {
-                    warn!(
-                        "Failed to send attach message to cluster controller: {}, retrying....",
-                        e
-                    );
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    }
-
     pub async fn run(mut self) -> anyhow::Result<()> {
         let shutdown = cancellation_watcher();
         tokio::pin!(shutdown);
 
         let (processor_mgr_event_tx, mut processor_mgr_event_rx) = mpsc::channel(128);
-
-        // Initial attach
-        let response = tokio::time::timeout(Duration::from_secs(10), self.attach())
-            .await
-            .context("Timeout waiting to attach to a cluster controller")??;
-
-        let from = *response.peer();
-        let msg = response.into_body();
-        self.apply_plan(&msg.actions, processor_mgr_event_tx.clone())
-            .await?;
-        self.latest_attach_response = Some((from, msg));
-        info!("Plan applied from attaching to controller {}", from);
 
         let (persisted_lsns_tx, persisted_lsns_rx) = watch::channel(BTreeMap::default());
         self.persisted_lsns_rx = Some(persisted_lsns_rx);
@@ -647,6 +569,7 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
                     .push(state.key_range.clone(), state.status_reader.clone());
                 self.running_partition_processors
                     .insert(partition_id, ProcessorStatus::Started(state));
+                gauge!(NUM_ACTIVE_PARTITIONS).increment(1);
             }
             ProcessorEvent::StartFailed(err) => {
                 error!(%partition_id, error=%err, "Starting partition processor failed");
@@ -662,6 +585,7 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
                 {
                     self.invokers_status_reader.remove(&status.key_range);
                 }
+                gauge!(NUM_ACTIVE_PARTITIONS).decrement(1);
             }
         }
     }
@@ -847,48 +771,6 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
             }
         }
 
-        Ok(())
-    }
-
-    #[instrument(skip_all)]
-    async fn apply_plan(&mut self, actions: &[Action], events: EventSender) -> Result<(), Error> {
-        for action in actions {
-            match action {
-                Action::RunPartition(action) => {
-                    #[allow(clippy::map_entry)]
-                    if !self
-                        .running_partition_processors
-                        .contains_key(&action.partition_id)
-                    {
-                        let starting_task = self.start_partition_processor_task(
-                            action.partition_id,
-                            action.key_range_inclusive.clone().into(),
-                            action.mode,
-                            events.clone(),
-                        );
-
-                        // note: We starting each task on it's own thread due to an issue that shows up on MacOS
-                        // where spawning many tasks of this kind causes a lock contention in tokio which leads to
-                        // starvation of the event loop.
-                        let handle = self.task_center.spawn_blocking_unmanaged(
-                            "starting-partition-processor",
-                            Some(action.partition_id),
-                            starting_task.run().instrument(debug_span!("starting_partition_processor", partition_id=%action.partition_id)),
-                        );
-
-                        self.running_partition_processors
-                            .insert(action.partition_id, ProcessorStatus::Starting(handle));
-                    } else {
-                        debug!(
-                            "Partition processor for partition id '{}' is already running.",
-                            action.partition_id
-                        );
-                    }
-                }
-            }
-        }
-
-        gauge!(NUM_ACTIVE_PARTITIONS).set(self.running_partition_processors.len() as f64);
         Ok(())
     }
 
