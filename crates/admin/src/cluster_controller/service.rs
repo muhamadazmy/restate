@@ -15,11 +15,13 @@ use std::time::Duration;
 use anyhow::anyhow;
 use codederror::CodedError;
 use futures::future::OptionFuture;
+use itertools::Itertools;
+use restate_types::nodes_config::NodesConfiguration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tonic::codec::CompressionEncoding;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use restate_bifrost::{Bifrost, BifrostAdmin};
 use restate_core::metadata_store::{retry_on_network_error, MetadataStoreClient};
@@ -312,16 +314,13 @@ impl<T: TransportConnect> Service<T> {
                     }
                 }
                 Ok(cluster_state) = cluster_state_watcher.next_cluster_state() => {
-                    let nodes_config = &nodes_config.live_load();
-                    observed_cluster_state.update(&cluster_state);
-                    logs_controller.on_observed_cluster_state_update(
-                        nodes_config,
-                        &observed_cluster_state, SchedulingPlanNodeSetSelectorHints::from(&scheduler))?;
-                    scheduler.on_observed_cluster_state(
-                        &observed_cluster_state,
-                        nodes_config,
-                        LogsBasedPartitionProcessorPlacementHints::from(&logs_controller))
-                    .await?;
+                    self.on_cluster_state_update(
+                        nodes_config.live_load(),
+                        &mut observed_cluster_state,
+                        &cluster_state,
+                        &mut logs_controller,
+                        &mut scheduler,
+                    ).await?;
                 }
                 result = logs_controller.run_async_operations() => {
                     result?;
@@ -354,6 +353,49 @@ impl<T: TransportConnect> Service<T> {
                 }
             }
         }
+    }
+
+    async fn on_cluster_state_update(
+        &self,
+        nodes_config: &NodesConfiguration,
+        observed_cluster_state: &mut ObservedClusterState,
+        cluster_state: &ClusterState,
+        logs_controller: &mut LogsController,
+        scheduler: &mut Scheduler<T>,
+    ) -> anyhow::Result<()> {
+        // update observed cluster state anyway
+        observed_cluster_state.update(cluster_state);
+
+        let maybe_leader = nodes_config
+            .get_admin_nodes()
+            .filter(|node| observed_cluster_state.is_node_alive(node.current_generation))
+            .map(|node| node.current_generation.as_plain())
+            .sorted()
+            .next();
+
+        if maybe_leader.is_some_and(|admin_id| admin_id != self.metadata.my_node_id().as_plain()) {
+            // I am not admin, nothing to do
+            return Ok(());
+        }
+        //else I am admin or for some reason no admin was found (None)
+
+        trace!("Acting like a cluster controller");
+
+        logs_controller.on_observed_cluster_state_update(
+            nodes_config,
+            observed_cluster_state,
+            SchedulingPlanNodeSetSelectorHints::from(scheduler as &Scheduler<T>),
+        )?;
+
+        scheduler
+            .on_observed_cluster_state(
+                observed_cluster_state,
+                nodes_config,
+                LogsBasedPartitionProcessorPlacementHints::from(logs_controller as &LogsController),
+            )
+            .await?;
+
+        Ok(())
     }
 
     async fn init_partition_table(&mut self) -> anyhow::Result<()> {
