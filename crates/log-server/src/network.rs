@@ -93,6 +93,7 @@ impl RequestPump {
         self,
         health_status: HealthStatus<LogServerStatus>,
         log_store: S,
+        state_map: LogletStateMap,
         _storage_state: StorageState,
     ) -> anyhow::Result<()>
     where
@@ -112,11 +113,6 @@ impl RequestPump {
         } = self;
 
         let mut shutdown = std::pin::pin!(cancellation_watcher());
-
-        // optimization to fetch all known loglets from disk
-        let mut state_map = LogletStateMap::load_all(&log_store)
-            .await
-            .context("cannot load loglet state map from logstore")?;
 
         let mut loglet_workers =
             HashMap::with_capacity_and_hasher(DEFAULT_WRITERS_CAPACITY, Xxh3Builder::default());
@@ -153,7 +149,7 @@ impl RequestPump {
                         get_digest.body().header.loglet_id,
                         &log_store,
                         &task_center,
-                        &mut state_map,
+                        &state_map,
                         &mut loglet_workers,
                     ).await?;
                     Self::on_get_digest(worker, get_digest);
@@ -165,7 +161,7 @@ impl RequestPump {
                         wait_for_tail.body().header.loglet_id,
                         &log_store,
                         &task_center,
-                        &mut state_map,
+                        &state_map,
                         &mut loglet_workers,
                     ).await?;
                     Self::on_wait_for_tail(worker, wait_for_tail);
@@ -177,7 +173,7 @@ impl RequestPump {
                         release.body().header.loglet_id,
                         &log_store,
                         &task_center,
-                        &mut state_map,
+                        &state_map,
                         &mut loglet_workers,
                     ).await?;
                     Self::on_release(worker, release);
@@ -189,7 +185,7 @@ impl RequestPump {
                         seal.body().header.loglet_id,
                         &log_store,
                         &task_center,
-                        &mut state_map,
+                        &state_map,
                         &mut loglet_workers,
                     ).await?;
                     Self::on_seal(worker, seal);
@@ -201,7 +197,7 @@ impl RequestPump {
                         get_loglet_info.body().header.loglet_id,
                         &log_store,
                         &task_center,
-                        &mut state_map,
+                        &state_map,
                         &mut loglet_workers,
                     ).await?;
                     Self::on_get_loglet_info(worker, get_loglet_info);
@@ -213,7 +209,7 @@ impl RequestPump {
                         get_records.body().header.loglet_id,
                         &log_store,
                         &task_center,
-                        &mut state_map,
+                        &state_map,
                         &mut loglet_workers,
                     ).await?;
                     Self::on_get_records(worker, get_records);
@@ -225,7 +221,7 @@ impl RequestPump {
                         trim.body().header.loglet_id,
                         &log_store,
                         &task_center,
-                        &mut state_map,
+                        &state_map,
                         &mut loglet_workers,
                     ).await?;
                     Self::on_trim(worker, trim);
@@ -237,7 +233,7 @@ impl RequestPump {
                         store.body().header.loglet_id,
                         &log_store,
                         &task_center,
-                        &mut state_map,
+                        &state_map,
                         &mut loglet_workers,
                     ).await?;
                     Self::on_store(worker, store);
@@ -334,7 +330,7 @@ impl RequestPump {
         loglet_id: ReplicatedLogletId,
         log_store: &S,
         task_center: &TaskCenter,
-        state_map: &mut LogletStateMap,
+        state_map: &LogletStateMap,
         loglet_workers: &'a mut LogletWorkerMap,
     ) -> anyhow::Result<&'a LogletWorkerHandle> {
         if let hash_map::Entry::Vacant(e) = loglet_workers.entry(loglet_id) {

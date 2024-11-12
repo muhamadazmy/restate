@@ -10,14 +10,12 @@
 
 pub mod codec;
 mod error;
-#[cfg(feature = "replicated-loglet")]
 pub mod log_server;
 pub mod metadata;
 pub mod node;
 pub mod partition_processor;
 pub mod partition_processor_manager;
 pub mod remote_query_scanner;
-#[cfg(feature = "replicated-loglet")]
 pub mod replicated_loglet;
 
 // re-exports for convenience
