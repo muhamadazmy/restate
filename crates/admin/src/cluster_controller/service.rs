@@ -15,19 +15,18 @@ use std::time::Duration;
 use anyhow::anyhow;
 use codederror::CodedError;
 use futures::future::OptionFuture;
-use futures::StreamExt;
+use itertools::Itertools;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tonic::codec::CompressionEncoding;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use restate_bifrost::{Bifrost, BifrostAdmin};
 use restate_core::metadata_store::{retry_on_network_error, MetadataStoreClient};
 use restate_core::network::rpc_router::RpcRouter;
 use restate_core::network::{
-    Incoming, MessageRouterBuilder, MessageStream, NetworkSender, NetworkServerBuilder, Networking,
-    TransportConnect,
+    MessageRouterBuilder, NetworkSender, NetworkServerBuilder, Networking, TransportConnect,
 };
 use restate_core::{
     cancellation_watcher, Metadata, MetadataWriter, ShutdownError, TargetVersion, TaskCenter,
@@ -40,9 +39,9 @@ use restate_types::identifiers::{PartitionId, SnapshotId};
 use restate_types::live::Live;
 use restate_types::logs::{LogId, Lsn, SequenceNumber};
 use restate_types::metadata_store::keys::PARTITION_TABLE_KEY;
-use restate_types::net::cluster_controller::{AttachRequest, AttachResponse};
 use restate_types::net::metadata::MetadataKind;
 use restate_types::net::partition_processor_manager::CreateSnapshotRequest;
+use restate_types::nodes_config::NodesConfiguration;
 use restate_types::partition_table::PartitionTable;
 use restate_types::protobuf::common::AdminStatus;
 use restate_types::{GenerationalNodeId, Version};
@@ -69,7 +68,6 @@ pub struct Service<T> {
     metadata: Metadata,
     networking: Networking<T>,
     bifrost: Bifrost,
-    incoming_messages: MessageStream<AttachRequest>,
     cluster_state_refresher: ClusterStateRefresher<T>,
     processor_manager_client: PartitionProcessorManagerClient<Networking<T>>,
     command_tx: mpsc::Sender<ClusterControllerCommand>,
@@ -100,7 +98,6 @@ where
         metadata_writer: MetadataWriter,
         metadata_store_client: MetadataStoreClient,
     ) -> Self {
-        let incoming_messages = router_builder.subscribe_to_stream(10);
         let (command_tx, command_rx) = mpsc::channel(2);
 
         let cluster_state_refresher = ClusterStateRefresher::new(
@@ -140,7 +137,6 @@ where
             metadata,
             networking,
             bifrost,
-            incoming_messages,
             cluster_state_refresher,
             metadata_writer,
             metadata_store_client,
@@ -318,26 +314,26 @@ impl<T: TransportConnect> Service<T> {
                     }
                 }
                 Ok(cluster_state) = cluster_state_watcher.next_cluster_state() => {
-                    let nodes_config = &nodes_config.live_load();
                     observed_cluster_state.update(&cluster_state);
-                    logs_controller.on_observed_cluster_state_update(
-                        nodes_config,
-                        &observed_cluster_state, SchedulingPlanNodeSetSelectorHints::from(&scheduler))?;
-                    scheduler.on_observed_cluster_state(
-                        &observed_cluster_state,
-                        nodes_config,
-                        LogsBasedPartitionProcessorPlacementHints::from(&logs_controller))
-                    .await?;
+
+                    if self.is_active_controller(nodes_config.live_load(), &observed_cluster_state) {
+                        self.on_cluster_state_update(
+                            nodes_config.live_load(),
+                            &observed_cluster_state,
+                            &mut logs_controller,
+                            &mut scheduler,
+                        ).await?;
+                    }
                 }
                 result = logs_controller.run_async_operations() => {
                     result?;
                 }
-                Ok(_) = logs_watcher.changed() => {
+                Ok(_) = logs_watcher.changed(), if self.is_active_controller(nodes_config.live_load(), &observed_cluster_state) => {
                     logs_controller.on_logs_update(self.metadata.logs_ref())?;
                     // tell the scheduler about potentially newly provisioned logs
                     scheduler.on_logs_update(logs.live_load(), partition_table.live_load()).await?
                 }
-                Ok(_) = partition_table_watcher.changed() => {
+                Ok(_) = partition_table_watcher.changed(), if self.is_active_controller(nodes_config.live_load(), &observed_cluster_state) => {
                     let partition_table = partition_table.live_load();
                     let logs = logs.live_load();
 
@@ -345,10 +341,9 @@ impl<T: TransportConnect> Service<T> {
                     scheduler.on_logs_update(logs, partition_table).await?;
                 }
                 Some(cmd) = self.command_rx.recv() => {
+                    // note: This branch is safe to enable on passive CCs
+                    // since it works only as a gateway to leader PPs
                     self.on_cluster_cmd(cmd, bifrost_admin).await;
-                }
-                Some(message) = self.incoming_messages.next() => {
-                    self.on_attach_request(&mut scheduler, message).await?;
                 }
                 _ = config_watcher.changed() => {
                     debug!("Updating the cluster controller settings.");
@@ -363,6 +358,48 @@ impl<T: TransportConnect> Service<T> {
                 }
             }
         }
+    }
+
+    fn is_active_controller(
+        &self,
+        nodes_config: &NodesConfiguration,
+        observed_cluster_state: &ObservedClusterState,
+    ) -> bool {
+        let maybe_leader = nodes_config
+            .get_admin_nodes()
+            .filter(|node| observed_cluster_state.is_node_alive(node.current_generation))
+            .map(|node| node.current_generation.as_plain())
+            .sorted()
+            .next();
+
+        // assume active if no leader CC (None) or self holds the smallest plain node id with role admin
+        !maybe_leader.is_some_and(|admin_id| admin_id != self.metadata.my_node_id().as_plain())
+    }
+
+    async fn on_cluster_state_update(
+        &self,
+        nodes_config: &NodesConfiguration,
+        observed_cluster_state: &ObservedClusterState,
+        logs_controller: &mut LogsController,
+        scheduler: &mut Scheduler<T>,
+    ) -> anyhow::Result<()> {
+        trace!("Acting like a cluster controller");
+
+        logs_controller.on_observed_cluster_state_update(
+            nodes_config,
+            observed_cluster_state,
+            SchedulingPlanNodeSetSelectorHints::from(scheduler as &Scheduler<T>),
+        )?;
+
+        scheduler
+            .on_observed_cluster_state(
+                observed_cluster_state,
+                nodes_config,
+                LogsBasedPartitionProcessorPlacementHints::from(logs_controller as &LogsController),
+            )
+            .await?;
+
+        Ok(())
     }
 
     async fn init_partition_table(&mut self) -> anyhow::Result<()> {
@@ -542,26 +579,6 @@ impl<T: TransportConnect> Service<T> {
                     .await;
             }
         }
-    }
-
-    async fn on_attach_request(
-        &self,
-        scheduler: &mut Scheduler<T>,
-        request: Incoming<AttachRequest>,
-    ) -> Result<(), ShutdownError> {
-        let actions = scheduler.on_attach_node(request.peer()).await?;
-        self.task_center.spawn(
-            TaskKind::Disposable,
-            "attachment-response",
-            None,
-            async move {
-                Ok(request
-                    .to_rpc_response(AttachResponse { actions })
-                    .send()
-                    .await?)
-            },
-        )?;
-        Ok(())
     }
 }
 

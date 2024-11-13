@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rand::seq::IteratorRandom;
-use tracing::{debug, trace};
+use tracing::debug;
 use xxhash_rust::xxh3::Xxh3Builder;
 
 use restate_core::metadata_store::{
@@ -28,13 +28,12 @@ use restate_types::identifiers::PartitionId;
 use restate_types::logs::metadata::Logs;
 use restate_types::logs::LogId;
 use restate_types::metadata_store::keys::SCHEDULING_PLAN_KEY;
-use restate_types::net::cluster_controller::Action;
 use restate_types::net::partition_processor_manager::{
     ControlProcessor, ControlProcessors, ProcessorCommand,
 };
 use restate_types::nodes_config::NodesConfiguration;
 use restate_types::partition_table::PartitionTable;
-use restate_types::{GenerationalNodeId, NodeId, PlainNodeId, Versioned};
+use restate_types::{NodeId, PlainNodeId, Versioned};
 
 use crate::cluster_controller::logs_controller;
 use crate::cluster_controller::observed_cluster_state::ObservedClusterState;
@@ -125,15 +124,6 @@ impl<T: TransportConnect> Scheduler<T> {
         })
     }
 
-    pub async fn on_attach_node(
-        &mut self,
-        node: &GenerationalNodeId,
-    ) -> Result<Vec<Action>, ShutdownError> {
-        trace!(node = %node, "Node is attaching to cluster");
-        // the convergence loop will make sure that the node receives its instructions
-        Ok(Vec::new())
-    }
-
     pub async fn on_observed_cluster_state(
         &mut self,
         observed_cluster_state: &ObservedClusterState,
@@ -144,8 +134,8 @@ impl<T: TransportConnect> Scheduler<T> {
         let alive_workers = observed_cluster_state
             .alive_nodes
             .keys()
-            .cloned()
             .filter(|node_id| nodes_config.has_worker_role(node_id))
+            .cloned()
             .collect();
 
         self.update_scheduling_plan(&alive_workers, nodes_config, placement_hints)
