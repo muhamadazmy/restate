@@ -134,8 +134,8 @@ impl<T: TransportConnect> Scheduler<T> {
         let alive_workers = observed_cluster_state
             .alive_nodes
             .keys()
-            .cloned()
             .filter(|node_id| nodes_config.has_worker_role(node_id))
+            .cloned()
             .collect();
 
         self.update_scheduling_plan(&alive_workers, nodes_config, placement_hints)
