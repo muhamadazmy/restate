@@ -1,0 +1,7 @@
+**/.idea
+docker/Dockerfile
+**/target
+!target/debug/restate-server
+target
+restate.tar
+charts
