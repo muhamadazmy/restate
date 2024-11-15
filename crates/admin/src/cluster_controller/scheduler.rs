@@ -134,8 +134,8 @@ impl<T: TransportConnect> Scheduler<T> {
         let alive_workers = observed_cluster_state
             .alive_nodes
             .keys()
-            .cloned()
             .filter(|node_id| nodes_config.has_worker_role(node_id))
+            .cloned()
             .collect();
 
         self.update_scheduling_plan(&alive_workers, nodes_config, placement_hints)
@@ -153,6 +153,7 @@ impl<T: TransportConnect> Scheduler<T> {
         &mut self,
         logs: &Logs,
         partition_table: &PartitionTable,
+        is_active_controller: bool,
     ) -> Result<(), Error> {
         let mut builder = self.scheduling_plan.clone().into_builder();
 
@@ -174,6 +175,10 @@ impl<T: TransportConnect> Scheduler<T> {
                         )
                     }
                 }
+            }
+
+            if !is_active_controller {
+                break;
             }
 
             if let Some(scheduling_plan) = builder.build_if_modified() {
