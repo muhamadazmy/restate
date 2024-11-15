@@ -288,6 +288,7 @@ impl<T: TransportConnect> Service<T> {
 
         let mut logs_watcher = self.metadata.watch(MetadataKind::Logs);
         let mut partition_table_watcher = self.metadata.watch(MetadataKind::PartitionTable);
+        let mut nodes_watcher = self.metadata.watch(MetadataKind::NodesConfiguration);
         let mut logs = self.metadata.updateable_logs_metadata();
         let mut partition_table = self.metadata.updateable_partition_table();
         let mut nodes_config = self.metadata.updateable_nodes_config();
@@ -344,6 +345,10 @@ impl<T: TransportConnect> Service<T> {
                     // note: This branch is safe to enable on passive CCs
                     // since it works only as a gateway to leader PPs
                     self.on_cluster_cmd(cmd, bifrost_admin).await;
+                },
+                _ = nodes_watcher.changed() => {
+                    // if nodes changes we need to try again in
+                    // our leadership state has changed
                 }
                 _ = config_watcher.changed() => {
                     debug!("Updating the cluster controller settings.");
