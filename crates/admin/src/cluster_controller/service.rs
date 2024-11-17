@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use codederror::CodedError;
 use futures::future::OptionFuture;
+use itertools::Itertools;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
@@ -32,7 +33,7 @@ use restate_core::{
     TaskKind,
 };
 use restate_types::cluster::cluster_state::{AliveNode, ClusterState, NodeState};
-use restate_types::config::{AdminOptions, Configuration};
+use restate_types::config::{AdminOptions, ConfigWatch, Configuration};
 use restate_types::health::HealthStatus;
 use restate_types::identifiers::{PartitionId, SnapshotId};
 use restate_types::live::Live;
@@ -44,7 +45,7 @@ use restate_types::partition_table::PartitionTable;
 use restate_types::protobuf::common::AdminStatus;
 use restate_types::{GenerationalNodeId, Version};
 
-use super::cluster_state_refresher::ClusterStateRefresher;
+use super::cluster_state_refresher::{ClusterStateRefresher, ClusterStateWatcher};
 use super::grpc_svc_handler::ClusterCtrlSvcHandler;
 use super::protobuf::cluster_ctrl_svc_server::ClusterCtrlSvcServer;
 use crate::cluster_controller::logs_controller::{
@@ -77,6 +78,8 @@ pub struct Service<T> {
     heartbeat_interval: Interval,
     log_trim_interval: Option<Interval>,
     log_trim_threshold: Lsn,
+
+    observed_cluster_state: ObservedClusterState,
 }
 
 impl<T> Service<T>
@@ -144,6 +147,7 @@ where
             heartbeat_interval,
             log_trim_interval,
             log_trim_threshold,
+            observed_cluster_state: ObservedClusterState::default(),
         }
     }
 
@@ -236,6 +240,13 @@ impl ClusterControllerHandle {
     }
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum ClusterControllerStatus {
+    Passive,
+    Active,
+    Shutdown,
+}
+
 impl<T: TransportConnect> Service<T> {
     pub fn handle(&self) -> ClusterControllerHandle {
         ClusterControllerHandle {
@@ -243,8 +254,48 @@ impl<T: TransportConnect> Service<T> {
         }
     }
 
-    pub async fn run(mut self) -> anyhow::Result<()> {
-        self.init_partition_table().await?;
+    fn cluster_controller_status(&self) -> ClusterControllerStatus {
+        let nodes_config = self.metadata.nodes_config_ref();
+        let maybe_active = nodes_config
+            .get_admin_nodes()
+            .filter(|node| {
+                self.observed_cluster_state
+                    .is_node_alive(node.current_generation)
+            })
+            .map(|node| node.current_generation.as_plain())
+            .sorted()
+            .next();
+
+        // A Cluster Controller is active if the node holds the smallest plain Node ID in the cluster
+
+        let maybe_active =
+            !maybe_active.is_some_and(|admin_id| admin_id != self.metadata.my_node_id().as_plain());
+
+        if maybe_active {
+            // If there is another node that holds the same node id but higher generation we should actually
+            // shutdown
+            if nodes_config
+                .find_node_by_id(self.metadata.my_node_id().as_plain())
+                .expect("node must exist")
+                .current_generation
+                == self.metadata.my_node_id()
+            {
+                ClusterControllerStatus::Active
+            } else {
+                // there is another instance running with higher generation
+                ClusterControllerStatus::Shutdown
+            }
+        } else {
+            ClusterControllerStatus::Passive
+        }
+    }
+
+    async fn passive(
+        &mut self,
+        config_watcher: &mut ConfigWatch,
+        cluster_state_watcher: &mut ClusterStateWatcher,
+    ) -> anyhow::Result<ClusterControllerStatus> {
+        let mut shutdown = std::pin::pin!(cancellation_watcher());
 
         let bifrost_admin = BifrostAdmin::new(
             &self.bifrost,
@@ -252,16 +303,51 @@ impl<T: TransportConnect> Service<T> {
             &self.metadata_store_client,
         );
 
-        let mut shutdown = std::pin::pin!(cancellation_watcher());
-        let mut config_watcher = Configuration::watcher();
-        let mut cluster_state_watcher = self.cluster_state_refresher.cluster_state_watcher();
+        loop {
+            tokio::select! {
+                _ = self.heartbeat_interval.tick() => {
+                    // Ignore error if system is shutting down
+                    let _ = self.cluster_state_refresher.schedule_refresh();
+                },
+                Ok(cluster_state) = cluster_state_watcher.next_cluster_state() => {
+                    self.observed_cluster_state.update(&cluster_state);
+                }
+                Some(cmd) = self.command_rx.recv() => {
+                    // it is still safe to handle cluster commands as a passive CC
+                    self.on_cluster_cmd(cmd, bifrost_admin).await;
+                }
+                _ = config_watcher.changed() => {
+                    debug!("Updating the cluster controller settings.");
+                    let options = &self.configuration.live_load().admin;
 
-        self.task_center.spawn_child(
-            TaskKind::SystemService,
-            "cluster-controller-metadata-sync",
-            None,
-            sync_cluster_controller_metadata(self.metadata.clone()),
-        )?;
+                    self.heartbeat_interval = Self::create_heartbeat_interval(options);
+                    (self.log_trim_interval, self.log_trim_threshold) = Self::create_log_trim_interval(options);
+                }
+                _ = &mut shutdown => {
+                    self.health_status.update(AdminStatus::Unknown);
+                    return Ok(ClusterControllerStatus::Shutdown);
+                }
+            }
+
+            let status = self.cluster_controller_status();
+            if status != ClusterControllerStatus::Passive {
+                return Ok(status);
+            }
+        }
+    }
+
+    async fn active(
+        &mut self,
+        config_watcher: &mut ConfigWatch,
+        cluster_state_watcher: &mut ClusterStateWatcher,
+    ) -> anyhow::Result<ClusterControllerStatus> {
+        let mut shutdown = std::pin::pin!(cancellation_watcher());
+
+        let bifrost_admin = BifrostAdmin::new(
+            &self.bifrost,
+            &self.metadata_writer,
+            &self.metadata_store_client,
+        );
 
         let configuration = self.configuration.live_load();
 
@@ -281,8 +367,6 @@ impl<T: TransportConnect> Service<T> {
             self.metadata_writer.clone(),
         )
         .await?;
-
-        let mut observed_cluster_state = ObservedClusterState::default();
 
         let mut logs_watcher = self.metadata.watch(MetadataKind::Logs);
         let mut partition_table_watcher = self.metadata.watch(MetadataKind::PartitionTable);
@@ -313,12 +397,12 @@ impl<T: TransportConnect> Service<T> {
                 }
                 Ok(cluster_state) = cluster_state_watcher.next_cluster_state() => {
                     let nodes_config = &nodes_config.live_load();
-                    observed_cluster_state.update(&cluster_state);
+                    self.observed_cluster_state.update(&cluster_state);
                     logs_controller.on_observed_cluster_state_update(
                         nodes_config,
-                        &observed_cluster_state, SchedulingPlanNodeSetSelectorHints::from(&scheduler))?;
+                        &self.observed_cluster_state, SchedulingPlanNodeSetSelectorHints::from(&scheduler))?;
                     scheduler.on_observed_cluster_state(
-                        &observed_cluster_state,
+                        &self.observed_cluster_state,
                         nodes_config,
                         LogsBasedPartitionProcessorPlacementHints::from(&logs_controller))
                     .await?;
@@ -350,8 +434,46 @@ impl<T: TransportConnect> Service<T> {
                 }
                 _ = &mut shutdown => {
                     self.health_status.update(AdminStatus::Unknown);
-                    return Ok(());
+                    return Ok(ClusterControllerStatus::Shutdown);
                 }
+            }
+
+            let status = self.cluster_controller_status();
+            if status != ClusterControllerStatus::Active {
+                return Ok(status);
+            }
+        }
+    }
+
+    pub async fn run(mut self) -> anyhow::Result<()> {
+        self.init_partition_table().await?;
+
+        let mut config_watcher = Configuration::watcher();
+        let mut cluster_state_watcher = self.cluster_state_refresher.cluster_state_watcher();
+
+        self.task_center.spawn_child(
+            TaskKind::SystemService,
+            "cluster-controller-metadata-sync",
+            None,
+            sync_cluster_controller_metadata(self.metadata.clone()),
+        )?;
+
+        let mut status = ClusterControllerStatus::Passive;
+
+        self.health_status.update(AdminStatus::Ready);
+        loop {
+            status = match status {
+                ClusterControllerStatus::Passive => {
+                    debug!("Cluster Controller running in passive mode");
+                    self.passive(&mut config_watcher, &mut cluster_state_watcher)
+                        .await?
+                }
+                ClusterControllerStatus::Active => {
+                    debug!("Cluster Controller running in active mode");
+                    self.active(&mut config_watcher, &mut cluster_state_watcher)
+                        .await?
+                }
+                ClusterControllerStatus::Shutdown => return Ok(()),
             }
         }
     }
