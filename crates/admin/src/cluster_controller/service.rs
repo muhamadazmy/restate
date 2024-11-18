@@ -32,8 +32,10 @@ use restate_core::{
     cancellation_watcher, Metadata, MetadataWriter, ShutdownError, TargetVersion, TaskCenter,
     TaskKind,
 };
-use restate_types::cluster::cluster_state::{AliveNode, ClusterState, NodeState};
-use restate_types::config::{AdminOptions, ConfigWatch, Configuration};
+use restate_types::cluster::cluster_state::{
+    AliveNode, ClusterState, ClusterStateWatch, NodeState,
+};
+use restate_types::config::{AdminOptions, CommonOptions, ConfigWatch, Configuration};
 use restate_types::health::HealthStatus;
 use restate_types::identifiers::{PartitionId, SnapshotId};
 use restate_types::live::Live;
@@ -45,7 +47,6 @@ use restate_types::partition_table::PartitionTable;
 use restate_types::protobuf::common::AdminStatus;
 use restate_types::{GenerationalNodeId, Version};
 
-use super::cluster_state_refresher::{ClusterStateRefresher, ClusterStateWatcher};
 use super::grpc_svc_handler::ClusterCtrlSvcHandler;
 use super::protobuf::cluster_ctrl_svc_server::ClusterCtrlSvcServer;
 use crate::cluster_controller::logs_controller::{
@@ -67,7 +68,6 @@ pub struct Service<T> {
     metadata: Metadata,
     networking: Networking<T>,
     bifrost: Bifrost,
-    cluster_state_refresher: ClusterStateRefresher<T>,
     processor_manager_client: PartitionProcessorManagerClient<Networking<T>>,
     command_tx: mpsc::Sender<ClusterControllerCommand>,
     command_rx: mpsc::Receiver<ClusterControllerCommand>,
@@ -80,6 +80,7 @@ pub struct Service<T> {
     log_trim_threshold: Lsn,
 
     observed_cluster_state: ObservedClusterState,
+    cluster_state_watch: ClusterStateWatch,
 }
 
 impl<T> Service<T>
@@ -98,21 +99,15 @@ where
         server_builder: &mut NetworkServerBuilder,
         metadata_writer: MetadataWriter,
         metadata_store_client: MetadataStoreClient,
+        cluster_state_watch: ClusterStateWatch,
     ) -> Self {
         let (command_tx, command_rx) = mpsc::channel(2);
-
-        let cluster_state_refresher = ClusterStateRefresher::new(
-            task_center.clone(),
-            metadata.clone(),
-            networking.clone(),
-            router_builder,
-        );
 
         let processor_manager_client =
             PartitionProcessorManagerClient::new(networking.clone(), router_builder);
 
         let options = configuration.live_load();
-        let heartbeat_interval = Self::create_heartbeat_interval(&options.admin);
+        let heartbeat_interval = Self::create_heartbeat_interval(&options.common);
         let (log_trim_interval, log_trim_threshold) =
             Self::create_log_trim_interval(&options.admin);
 
@@ -138,7 +133,6 @@ where
             metadata,
             networking,
             bifrost,
-            cluster_state_refresher,
             metadata_writer,
             metadata_store_client,
             processor_manager_client,
@@ -148,10 +142,11 @@ where
             log_trim_interval,
             log_trim_threshold,
             observed_cluster_state: ObservedClusterState::default(),
+            cluster_state_watch,
         }
     }
 
-    fn create_heartbeat_interval(options: &AdminOptions) -> Interval {
+    fn create_heartbeat_interval(options: &CommonOptions) -> Interval {
         let mut heartbeat_interval = time::interval_at(
             Instant::now() + options.heartbeat_interval.into(),
             options.heartbeat_interval.into(),
@@ -176,7 +171,7 @@ where
 
 #[derive(Debug)]
 enum ClusterControllerCommand {
-    GetClusterState(oneshot::Sender<Arc<ClusterState>>),
+    GetClusterState(oneshot::Sender<ClusterState>),
     TrimLog {
         log_id: LogId,
         trim_point: Lsn,
@@ -193,7 +188,7 @@ pub struct ClusterControllerHandle {
 }
 
 impl ClusterControllerHandle {
-    pub async fn get_cluster_state(&self) -> Result<Arc<ClusterState>, ShutdownError> {
+    pub async fn get_cluster_state(&self) -> Result<ClusterState, ShutdownError> {
         let (tx, rx) = oneshot::channel();
         // ignore the error, we own both tx and rx at this point.
         let _ = self
@@ -295,7 +290,6 @@ impl<T: TransportConnect> Service<T> {
     async fn passive(
         &mut self,
         config_watcher: &mut ConfigWatch,
-        cluster_state_watcher: &mut ClusterStateWatcher,
     ) -> anyhow::Result<ClusterControllerState> {
         let mut shutdown = std::pin::pin!(cancellation_watcher());
 
@@ -305,14 +299,12 @@ impl<T: TransportConnect> Service<T> {
             &self.metadata_store_client,
         );
 
+        self.cluster_state_watch.mark_changed();
+
         loop {
             tokio::select! {
-                _ = self.heartbeat_interval.tick() => {
-                    // Ignore error if system is shutting down
-                    let _ = self.cluster_state_refresher.schedule_refresh();
-                },
-                Ok(cluster_state) = cluster_state_watcher.next_cluster_state() => {
-                    self.observed_cluster_state.update(&cluster_state);
+                _ = self.cluster_state_watch.changed() => {
+                    self.observed_cluster_state.update(&self.cluster_state_watch.borrow());
                 }
                 Some(cmd) = self.command_rx.recv() => {
                     // it is still safe to handle cluster commands as a passive CC
@@ -320,10 +312,10 @@ impl<T: TransportConnect> Service<T> {
                 }
                 _ = config_watcher.changed() => {
                     debug!("Updating the cluster controller settings.");
-                    let options = &self.configuration.live_load().admin;
+                    let options = &self.configuration.live_load();
 
-                    self.heartbeat_interval = Self::create_heartbeat_interval(options);
-                    (self.log_trim_interval, self.log_trim_threshold) = Self::create_log_trim_interval(options);
+                    self.heartbeat_interval = Self::create_heartbeat_interval(&options.common);
+                    (self.log_trim_interval, self.log_trim_threshold) = Self::create_log_trim_interval(&options.admin);
                 }
                 _ = &mut shutdown => {
                     self.health_status.update(AdminStatus::Unknown);
@@ -341,7 +333,6 @@ impl<T: TransportConnect> Service<T> {
     async fn active(
         &mut self,
         config_watcher: &mut ConfigWatch,
-        cluster_state_watcher: &mut ClusterStateWatcher,
     ) -> anyhow::Result<ClusterControllerState> {
         let mut shutdown = std::pin::pin!(cancellation_watcher());
 
@@ -380,13 +371,10 @@ impl<T: TransportConnect> Service<T> {
         find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         self.health_status.update(AdminStatus::Ready);
+        self.cluster_state_watch.mark_changed();
 
         loop {
             tokio::select! {
-                _ = self.heartbeat_interval.tick() => {
-                    // Ignore error if system is shutting down
-                    let _ = self.cluster_state_refresher.schedule_refresh();
-                },
                 _ = find_logs_tail_interval.tick() => {
                     logs_controller.find_logs_tail();
                 }
@@ -397,9 +385,9 @@ impl<T: TransportConnect> Service<T> {
                         warn!("Could not trim the logs. This can lead to increased disk usage: {err}");
                     }
                 }
-                Ok(cluster_state) = cluster_state_watcher.next_cluster_state() => {
+                _ = self.cluster_state_watch.changed() => {
+                    self.observed_cluster_state.update(&self.cluster_state_watch.borrow());
                     let nodes_config = &nodes_config.live_load();
-                    self.observed_cluster_state.update(&cluster_state);
                     logs_controller.on_observed_cluster_state_update(
                         nodes_config,
                         &self.observed_cluster_state, SchedulingPlanNodeSetSelectorHints::from(&scheduler))?;
@@ -429,10 +417,10 @@ impl<T: TransportConnect> Service<T> {
                 }
                 _ = config_watcher.changed() => {
                     debug!("Updating the cluster controller settings.");
-                    let options = &self.configuration.live_load().admin;
+                    let options = &self.configuration.live_load();
 
-                    self.heartbeat_interval = Self::create_heartbeat_interval(options);
-                    (self.log_trim_interval, self.log_trim_threshold) = Self::create_log_trim_interval(options);
+                    self.heartbeat_interval = Self::create_heartbeat_interval(&options.common);
+                    (self.log_trim_interval, self.log_trim_threshold) = Self::create_log_trim_interval(&options.admin);
                 }
                 _ = &mut shutdown => {
                     self.health_status.update(AdminStatus::Unknown);
@@ -451,7 +439,6 @@ impl<T: TransportConnect> Service<T> {
         self.init_partition_table().await?;
 
         let mut config_watcher = Configuration::watcher();
-        let mut cluster_state_watcher = self.cluster_state_refresher.cluster_state_watcher();
 
         self.task_center.spawn_child(
             TaskKind::SystemService,
@@ -467,13 +454,11 @@ impl<T: TransportConnect> Service<T> {
             state = match state {
                 ClusterControllerState::Passive => {
                     debug!("Cluster Controller running in passive mode");
-                    self.passive(&mut config_watcher, &mut cluster_state_watcher)
-                        .await?
+                    self.passive(&mut config_watcher).await?
                 }
                 ClusterControllerState::Active => {
                     debug!("Cluster Controller running in active mode");
-                    self.active(&mut config_watcher, &mut cluster_state_watcher)
-                        .await?
+                    self.active(&mut config_watcher).await?
                 }
                 ClusterControllerState::Shutdown => return Ok(()),
             }
@@ -516,7 +501,7 @@ impl<T: TransportConnect> Service<T> {
         &self,
         bifrost_admin: BifrostAdmin<'_>,
     ) -> Result<(), restate_bifrost::Error> {
-        let cluster_state = self.cluster_state_refresher.get_cluster_state();
+        let cluster_state = self.cluster_state_watch.borrow().clone();
 
         let mut persisted_lsns_per_partition: BTreeMap<
             PartitionId,
@@ -579,7 +564,7 @@ impl<T: TransportConnect> Service<T> {
         partition_id: PartitionId,
         response_tx: oneshot::Sender<anyhow::Result<SnapshotId>>,
     ) {
-        let cluster_state = self.cluster_state_refresher.get_cluster_state();
+        let cluster_state = self.cluster_state_watch.borrow();
 
         // For now, we just pick the leader node since we know that every partition is likely to
         // have one. We'll want to update the algorithm to be smart about scheduling snapshot tasks
@@ -634,7 +619,7 @@ impl<T: TransportConnect> Service<T> {
     ) {
         match command {
             ClusterControllerCommand::GetClusterState(tx) => {
-                let _ = tx.send(self.cluster_state_refresher.get_cluster_state());
+                let _ = tx.send(self.cluster_state_watch.borrow().clone());
             }
             ClusterControllerCommand::TrimLog {
                 log_id,
@@ -752,7 +737,7 @@ mod tests {
         FailingConnector, Incoming, MessageHandler, MockPeerConnection, NetworkServerBuilder,
     };
     use restate_core::{NoOpMessageHandler, TaskKind, TestCoreEnv, TestCoreEnvBuilder};
-    use restate_types::cluster::cluster_state::PartitionProcessorStatus;
+    use restate_types::cluster::cluster_state::{ClusterState, PartitionProcessorStatus};
     use restate_types::config::{AdminOptions, Configuration};
     use restate_types::health::HealthStatus;
     use restate_types::identifiers::PartitionId;
@@ -763,6 +748,7 @@ mod tests {
     use restate_types::net::AdvertisedAddress;
     use restate_types::nodes_config::{LogServerConfig, NodeConfig, NodesConfiguration, Role};
     use restate_types::{GenerationalNodeId, Version};
+    use tokio::sync::watch;
 
     #[test(tokio::test)]
     async fn manual_log_trim() -> anyhow::Result<()> {
@@ -775,6 +761,7 @@ mod tests {
             .with_factory(memory_loglet::Factory::default());
         let bifrost = bifrost_svc.handle();
 
+        let (_tx, rx) = watch::channel(ClusterState::empty());
         let svc = Service::new(
             Live::from_value(Configuration::default()),
             HealthStatus::default(),
@@ -786,6 +773,7 @@ mod tests {
             &mut NetworkServerBuilder::default(),
             builder.metadata_writer.clone(),
             builder.metadata_store_client.clone(),
+            rx,
         );
         let svc_handle = svc.handle();
 
@@ -1085,6 +1073,7 @@ mod tests {
 
         let mut server_builder = NetworkServerBuilder::default();
 
+        let (_tx, rx) = watch::channel(ClusterState::empty());
         let svc = Service::new(
             Live::from_value(config),
             HealthStatus::default(),
@@ -1096,6 +1085,7 @@ mod tests {
             &mut server_builder,
             builder.metadata_writer.clone(),
             builder.metadata_store_client.clone(),
+            rx,
         );
 
         let mut nodes_config = NodesConfiguration::new(Version::MIN, "test-cluster".to_owned());
