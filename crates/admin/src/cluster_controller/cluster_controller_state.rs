@@ -22,7 +22,7 @@ use restate_bifrost::{Bifrost, BifrostAdmin};
 use restate_core::metadata_store::MetadataStoreClient;
 use restate_core::network::TransportConnect;
 use restate_core::{Metadata, MetadataWriter};
-use restate_types::cluster::cluster_state::{AliveNode, NodeState};
+use restate_types::cluster::cluster_state::{AliveNode, ClusterStateWatch, NodeState};
 use restate_types::config::{AdminOptions, Configuration};
 use restate_types::identifiers::PartitionId;
 use restate_types::live::Live;
@@ -31,7 +31,6 @@ use restate_types::net::metadata::MetadataKind;
 use restate_types::partition_table::PartitionTable;
 use restate_types::{GenerationalNodeId, Version};
 
-use super::cluster_state_refresher::ClusterStateWatcher;
 use crate::cluster_controller::logs_controller::{
     LogsBasedPartitionProcessorPlacementHints, LogsController,
 };
@@ -93,7 +92,7 @@ pub(crate) struct Leader<T> {
     log_trim_interval: Option<Interval>,
     logs_controller: LogsController,
     scheduler: Scheduler<T>,
-    cluster_state_watcher: ClusterStateWatcher,
+    cluster_state_watch: ClusterStateWatch,
     logs: Live<Logs>,
     log_trim_threshold: Lsn,
 }
@@ -129,7 +128,7 @@ where
             time::interval(configuration.admin.log_tail_update_interval.into());
         find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        let leader = Leader {
+        let mut leader = Leader {
             metadata: service.metadata.clone(),
             bifrost: service.bifrost.clone(),
             metadata_store_client: service.metadata_store_client.clone(),
@@ -138,7 +137,7 @@ where
             nodes_config: service.metadata.updateable_nodes_config(),
             partition_table: service.metadata.updateable_partition_table(),
             partition_table_watcher: service.metadata.watch(MetadataKind::PartitionTable),
-            cluster_state_watcher: service.cluster_state_refresher.cluster_state_watcher(),
+            cluster_state_watch: service.cluster_state_watch.clone(),
             find_logs_tail_interval,
             log_trim_interval,
             log_trim_threshold,
@@ -146,6 +145,11 @@ where
             logs_controller,
             scheduler,
         };
+
+        // mark both logs watcher and partition table watcher as changed to
+        // force updating the scheduler and logs_controller
+        leader.logs_watcher.mark_changed();
+        leader.partition_table_watcher.mark_changed();
 
         Ok(leader)
     }
@@ -218,7 +222,7 @@ where
         &self,
         bifrost_admin: BifrostAdmin<'_>,
     ) -> Result<(), restate_bifrost::Error> {
-        let cluster_state = self.cluster_state_watcher.current();
+        let cluster_state = self.cluster_state_watch.borrow().clone();
 
         let mut persisted_lsns_per_partition: BTreeMap<
             PartitionId,
