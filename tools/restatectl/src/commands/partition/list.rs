@@ -103,6 +103,7 @@ pub async fn list_partitions(
     let mut max_epoch_per_partition: HashMap<u32, u64> = HashMap::new();
     for (node_id, node_state) in cluster_state.nodes {
         match node_state.state.expect("node state is set") {
+            node_state::State::Schrodinger(_) => {}
             node_state::State::Dead(dead_node) => {
                 dead_nodes.insert(PlainNodeId::from(node_id), dead_node);
             }
