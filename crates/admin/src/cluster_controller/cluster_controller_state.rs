@@ -128,7 +128,7 @@ where
             time::interval(configuration.admin.log_tail_update_interval.into());
         find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        let leader = Leader {
+        let mut leader = Leader {
             metadata: service.metadata.clone(),
             bifrost: service.bifrost.clone(),
             metadata_store_client: service.metadata_store_client.clone(),
@@ -145,6 +145,11 @@ where
             logs_controller,
             scheduler,
         };
+
+        // mark both logs watcher and partition table watcher as changed to
+        // force updating the scheduler and logs_controller
+        leader.logs_watcher.mark_changed();
+        leader.partition_table_watcher.mark_changed();
 
         Ok(leader)
     }
