@@ -8,6 +8,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use tonic::Code;
+
 use restate_types::net::{CodecError, MIN_SUPPORTED_PROTOCOL_VERSION};
 use restate_types::nodes_config::NodesConfigError;
 use restate_types::GenerationalNodeId;
@@ -47,7 +49,7 @@ pub enum NetworkError {
     #[error("protocol error: {0}")]
     ProtocolError(#[from] ProtocolError),
     #[error("cannot connect: {} {}", tonic::Status::code(.0), tonic::Status::message(.0))]
-    ConnectError(#[from] tonic::Status),
+    ConnectError(tonic::Status),
     #[error("new node generation exists: {0}")]
     OldPeerGeneration(String),
     #[error("connection lost to peer {0}")]
@@ -56,10 +58,21 @@ pub enum NetworkError {
     Unavailable(String),
     #[error("failed syncing metadata: {0}")]
     Metadata(#[from] SyncError),
+    #[error("remote metadata version mismatch: {0}")]
+    RemoteVersionMismatch(String),
     #[error("network channel is full and sending would block")]
     Full,
 }
 
+impl From<tonic::Status> for NetworkError {
+    fn from(value: tonic::Status) -> Self {
+        if value.code() == Code::FailedPrecondition {
+            Self::RemoteVersionMismatch(value.message().into())
+        } else {
+            Self::ConnectError(value)
+        }
+    }
+}
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
     #[error("handshake failed: {0}")]
@@ -102,6 +115,9 @@ impl From<NetworkError> for tonic::Status {
             NetworkError::Timeout(e) => tonic::Status::deadline_exceeded(e),
             NetworkError::OldPeerGeneration(e) => tonic::Status::already_exists(e),
             NetworkError::ConnectError(s) => s,
+            NetworkError::UnknownNode(err @ NodesConfigError::GenerationMismatch { .. }) => {
+                tonic::Status::failed_precondition(err.to_string())
+            }
             e => tonic::Status::internal(e.to_string()),
         }
     }
