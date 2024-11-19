@@ -245,7 +245,7 @@ where
                             .insert(*generational_node_id, lsn);
                     }
                 }
-                NodeState::Dead(_) => {
+                NodeState::Dead(_) | NodeState::Schrodinger(_) => {
                     // nothing to do
                 }
             }
