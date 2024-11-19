@@ -15,7 +15,10 @@ use std::time::Duration;
 use anyhow::anyhow;
 use codederror::CodedError;
 use futures::future::OptionFuture;
-use tokio::sync::{mpsc, oneshot};
+use itertools::Itertools;
+use restate_types::logs::metadata::Logs;
+use restate_types::nodes_config::NodesConfiguration;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tonic::codec::CompressionEncoding;
@@ -44,7 +47,7 @@ use restate_types::partition_table::PartitionTable;
 use restate_types::protobuf::common::AdminStatus;
 use restate_types::{GenerationalNodeId, Version};
 
-use super::cluster_state_refresher::ClusterStateRefresher;
+use super::cluster_state_refresher::{ClusterStateRefresher, ClusterStateWatcher};
 use super::grpc_svc_handler::ClusterCtrlSvcHandler;
 use super::protobuf::cluster_ctrl_svc_server::ClusterCtrlSvcServer;
 use crate::cluster_controller::logs_controller::{
@@ -75,8 +78,8 @@ pub struct Service<T> {
     metadata_writer: MetadataWriter,
     metadata_store_client: MetadataStoreClient,
     heartbeat_interval: Interval,
-    log_trim_interval: Option<Interval>,
-    log_trim_threshold: Lsn,
+
+    observed_cluster_state: ObservedClusterState,
 }
 
 impl<T> Service<T>
@@ -110,8 +113,6 @@ where
 
         let options = configuration.live_load();
         let heartbeat_interval = Self::create_heartbeat_interval(&options.admin);
-        let (log_trim_interval, log_trim_threshold) =
-            Self::create_log_trim_interval(&options.admin);
 
         // Registering ClusterCtrlSvc grpc service to network server
         server_builder.register_grpc_service(
@@ -142,8 +143,7 @@ where
             command_tx,
             command_rx,
             heartbeat_interval,
-            log_trim_interval,
-            log_trim_threshold,
+            observed_cluster_state: ObservedClusterState::default(),
         }
     }
 
@@ -156,18 +156,18 @@ where
 
         heartbeat_interval
     }
+}
 
-    fn create_log_trim_interval(options: &AdminOptions) -> (Option<Interval>, Lsn) {
-        let log_trim_interval = options.log_trim_interval.map(|interval| {
-            let mut interval = tokio::time::interval(interval.into());
-            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            interval
-        });
+fn create_log_trim_interval(options: &AdminOptions) -> (Option<Interval>, Lsn) {
+    let log_trim_interval = options.log_trim_interval.map(|interval| {
+        let mut interval = tokio::time::interval(interval.into());
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        interval
+    });
 
-        let log_trim_threshold = Lsn::new(options.log_trim_threshold);
+    let log_trim_threshold = Lsn::new(options.log_trim_threshold);
 
-        (log_trim_interval, log_trim_threshold)
-    }
+    (log_trim_interval, log_trim_threshold)
 }
 
 #[derive(Debug)]
@@ -243,16 +243,98 @@ impl<T: TransportConnect> Service<T> {
         }
     }
 
+    async fn next_cluster_state(
+        &self,
+        state: &mut ClusterControllerState<T>,
+    ) -> anyhow::Result<()> {
+        let nodes_config = self.metadata.nodes_config_ref();
+        let maybe_active = nodes_config
+            .get_admin_nodes()
+            .filter(|node| {
+                self.observed_cluster_state
+                    .is_node_alive(node.current_generation)
+            })
+            .map(|node| node.current_generation.as_plain())
+            .sorted()
+            .next();
+
+        // A Cluster Controller is active if the node holds the smallest PlainNodeID
+        // If no other node was found to take leadership, we assume leadership
+
+        let is_leader = match maybe_active {
+            None => true,
+            Some(leader) => leader == self.metadata.my_node_id().as_plain(),
+        };
+
+        match (is_leader, &state) {
+            (true, ClusterControllerState::Leader(_))
+            | (false, ClusterControllerState::Follower) => {
+                // nothing to do
+            }
+            (true, ClusterControllerState::Follower) => {
+                debug!("Cluster controller switching to leader mode");
+                *state = ClusterControllerState::Leader(self.create_leader().await?);
+            }
+            (false, ClusterControllerState::Leader(_)) => {
+                debug!("Cluster controller switching to follower mode");
+                *state = ClusterControllerState::Follower;
+            }
+        };
+
+        Ok(())
+    }
+
+    async fn create_leader<'a>(&self) -> anyhow::Result<Leader<T>> {
+        let configuration = self.configuration.pinned();
+
+        let scheduler = Scheduler::init(
+            &configuration,
+            self.task_center.clone(),
+            self.metadata_store_client.clone(),
+            self.networking.clone(),
+        )
+        .await?;
+
+        let logs_controller = LogsController::init(
+            &configuration,
+            self.metadata.clone(),
+            self.bifrost.clone(),
+            self.metadata_store_client.clone(),
+            self.metadata_writer.clone(),
+        )
+        .await?;
+
+        let (log_trim_interval, log_trim_threshold) =
+            create_log_trim_interval(&configuration.admin);
+
+        let mut find_logs_tail_interval =
+            time::interval(configuration.admin.log_tail_update_interval.into());
+        find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        let leader = Leader {
+            metadata: self.metadata.clone(),
+            bifrost: self.bifrost.clone(),
+            metadata_store_client: self.metadata_store_client.clone(),
+            metadata_writer: self.metadata_writer.clone(),
+            logs_watcher: self.metadata.watch(MetadataKind::Logs),
+            nodes_config: self.metadata.updateable_nodes_config(),
+            partition_table: self.metadata.updateable_partition_table(),
+            partition_table_watcher: self.metadata.watch(MetadataKind::PartitionTable),
+            cluster_state_watcher: self.cluster_state_refresher.cluster_state_watcher(),
+            find_logs_tail_interval,
+            log_trim_interval,
+            log_trim_threshold,
+            logs: self.metadata.updateable_logs_metadata(),
+            logs_controller,
+            scheduler,
+        };
+
+        Ok(leader)
+    }
+
     pub async fn run(mut self) -> anyhow::Result<()> {
         self.init_partition_table().await?;
 
-        let bifrost_admin = BifrostAdmin::new(
-            &self.bifrost,
-            &self.metadata_writer,
-            &self.metadata_store_client,
-        );
-
-        let mut shutdown = std::pin::pin!(cancellation_watcher());
         let mut config_watcher = Configuration::watcher();
         let mut cluster_state_watcher = self.cluster_state_refresher.cluster_state_watcher();
 
@@ -263,35 +345,15 @@ impl<T: TransportConnect> Service<T> {
             sync_cluster_controller_metadata(self.metadata.clone()),
         )?;
 
-        let configuration = self.configuration.live_load();
+        let mut shutdown = std::pin::pin!(cancellation_watcher());
 
-        let mut scheduler = Scheduler::init(
-            configuration,
-            self.task_center.clone(),
-            self.metadata_store_client.clone(),
-            self.networking.clone(),
-        )
-        .await?;
+        let bifrost_admin = BifrostAdmin::new(
+            &self.bifrost,
+            &self.metadata_writer,
+            &self.metadata_store_client,
+        );
 
-        let mut logs_controller = LogsController::init(
-            configuration,
-            self.metadata.clone(),
-            self.bifrost.clone(),
-            self.metadata_store_client.clone(),
-            self.metadata_writer.clone(),
-        )
-        .await?;
-
-        let mut observed_cluster_state = ObservedClusterState::default();
-
-        let mut logs_watcher = self.metadata.watch(MetadataKind::Logs);
-        let mut partition_table_watcher = self.metadata.watch(MetadataKind::PartitionTable);
-        let mut logs = self.metadata.updateable_logs_metadata();
-        let mut partition_table = self.metadata.updateable_partition_table();
-        let mut nodes_config = self.metadata.updateable_nodes_config();
-        let mut find_logs_tail_interval =
-            time::interval(configuration.admin.log_tail_update_interval.into());
-        find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut state: ClusterControllerState<T> = ClusterControllerState::Follower;
 
         self.health_status.update(AdminStatus::Ready);
 
@@ -301,56 +363,28 @@ impl<T: TransportConnect> Service<T> {
                     // Ignore error if system is shutting down
                     let _ = self.cluster_state_refresher.schedule_refresh();
                 },
-                _ = find_logs_tail_interval.tick() => {
-                    logs_controller.find_logs_tail();
-                }
-                _ = OptionFuture::from(self.log_trim_interval.as_mut().map(|interval| interval.tick())) => {
-                    let result = self.trim_logs(bifrost_admin).await;
-
-                    if let Err(err) = result {
-                        warn!("Could not trim the logs. This can lead to increased disk usage: {err}");
-                    }
-                }
                 Ok(cluster_state) = cluster_state_watcher.next_cluster_state() => {
-                    let nodes_config = &nodes_config.live_load();
-                    observed_cluster_state.update(&cluster_state);
-                    logs_controller.on_observed_cluster_state_update(
-                        nodes_config,
-                        &observed_cluster_state, SchedulingPlanNodeSetSelectorHints::from(&scheduler))?;
-                    scheduler.on_observed_cluster_state(
-                        &observed_cluster_state,
-                        nodes_config,
-                        LogsBasedPartitionProcessorPlacementHints::from(&logs_controller))
-                    .await?;
-                }
-                result = logs_controller.run_async_operations() => {
-                    result?;
-                }
-                Ok(_) = logs_watcher.changed() => {
-                    logs_controller.on_logs_update(self.metadata.logs_ref())?;
-                    // tell the scheduler about potentially newly provisioned logs
-                    scheduler.on_logs_update(logs.live_load(), partition_table.live_load()).await?
-                }
-                Ok(_) = partition_table_watcher.changed() => {
-                    let partition_table = partition_table.live_load();
-                    let logs = logs.live_load();
+                    self.observed_cluster_state.update(&cluster_state);
+                    self.next_cluster_state(&mut state).await?;
 
-                    logs_controller.on_partition_table_update(partition_table);
-                    scheduler.on_logs_update(logs, partition_table).await?;
+                    state.on_observed_cluster_state(&self.observed_cluster_state).await?;
                 }
                 Some(cmd) = self.command_rx.recv() => {
+                    // it is still safe to handle cluster commands as a passive CC
                     self.on_cluster_cmd(cmd, bifrost_admin).await;
                 }
                 _ = config_watcher.changed() => {
                     debug!("Updating the cluster controller settings.");
-                    let options = &self.configuration.live_load().admin;
-
-                    self.heartbeat_interval = Self::create_heartbeat_interval(options);
-                    (self.log_trim_interval, self.log_trim_threshold) = Self::create_log_trim_interval(options);
+                    let configuration = self.configuration.live_load();
+                    self.heartbeat_interval = Self::create_heartbeat_interval(&configuration.admin);
+                    state.reconfigure(configuration);
+                }
+                result = state.run() => {
+                    result?
                 }
                 _ = &mut shutdown => {
                     self.health_status.update(AdminStatus::Unknown);
-                    return Ok(());
+                    anyhow::bail!(ShutdownError);
                 }
             }
         }
@@ -387,67 +421,6 @@ impl<T: TransportConnect> Service<T> {
 
         Ok(())
     }
-
-    async fn trim_logs(
-        &self,
-        bifrost_admin: BifrostAdmin<'_>,
-    ) -> Result<(), restate_bifrost::Error> {
-        let cluster_state = self.cluster_state_refresher.get_cluster_state();
-
-        let mut persisted_lsns_per_partition: BTreeMap<
-            PartitionId,
-            BTreeMap<GenerationalNodeId, Lsn>,
-        > = BTreeMap::default();
-
-        for node_state in cluster_state.nodes.values() {
-            match node_state {
-                NodeState::Alive(AliveNode {
-                    generational_node_id,
-                    partitions,
-                    ..
-                }) => {
-                    for (partition_id, partition_processor_status) in partitions.iter() {
-                        let lsn = partition_processor_status
-                            .last_persisted_log_lsn
-                            .unwrap_or(Lsn::INVALID);
-                        persisted_lsns_per_partition
-                            .entry(*partition_id)
-                            .or_default()
-                            .insert(*generational_node_id, lsn);
-                    }
-                }
-                NodeState::Dead(_) => {
-                    // nothing to do
-                }
-            }
-        }
-
-        for (partition_id, persisted_lsns) in persisted_lsns_per_partition.into_iter() {
-            let log_id = LogId::from(partition_id);
-
-            // todo: Remove once Restate nodes can share partition processor snapshots
-            // only try to trim if we know about the persisted lsns of all known nodes; otherwise we
-            // risk that a node cannot fully replay the log; this assumes that no new nodes join the
-            // cluster after the first trimming has happened
-            if persisted_lsns.len() >= cluster_state.nodes.len() {
-                let min_persisted_lsn = persisted_lsns.into_values().min().unwrap_or(Lsn::INVALID);
-                // trim point is before the oldest record
-                let current_trim_point = bifrost_admin.get_trim_point(log_id).await?;
-
-                if min_persisted_lsn >= current_trim_point + self.log_trim_threshold {
-                    debug!(
-                    "Automatic trim log '{log_id}' for all records before='{min_persisted_lsn}'"
-                );
-                    bifrost_admin.trim(log_id, min_persisted_lsn).await?
-                }
-            } else {
-                warn!("Stop automatically trimming log '{log_id}' because not all nodes are running a partition processor applying this log.");
-            }
-        }
-
-        Ok(())
-    }
-
     /// Triggers a snapshot creation for the given partition by issuing an RPC
     /// to the node hosting the active leader.
     async fn create_partition_snapshot(
@@ -533,6 +506,194 @@ impl<T: TransportConnect> Service<T> {
                     .await;
             }
         }
+    }
+}
+
+enum ClusterControllerState<T> {
+    Follower,
+    Leader(Leader<T>),
+}
+
+impl<T> ClusterControllerState<T>
+where
+    T: TransportConnect,
+{
+    async fn run(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Follower => {
+                futures::future::pending::<()>().await;
+                Ok(())
+            }
+            Self::Leader(leader) => leader.run().await,
+        }
+    }
+
+    async fn on_observed_cluster_state(
+        &mut self,
+        observed_cluster_state: &ObservedClusterState,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Follower => Ok(()),
+            Self::Leader(leader) => {
+                leader
+                    .on_observed_cluster_state(observed_cluster_state)
+                    .await
+            }
+        }
+    }
+
+    fn reconfigure(&mut self, configuration: &Configuration) {
+        match self {
+            Self::Follower => {}
+            Self::Leader(leader) => leader.reconfigure(configuration),
+        }
+    }
+}
+
+struct Leader<T> {
+    metadata: Metadata,
+    bifrost: Bifrost,
+    metadata_store_client: MetadataStoreClient,
+    metadata_writer: MetadataWriter,
+    logs_watcher: watch::Receiver<Version>,
+    partition_table_watcher: watch::Receiver<Version>,
+    partition_table: Live<PartitionTable>,
+    nodes_config: Live<NodesConfiguration>,
+    find_logs_tail_interval: Interval,
+    log_trim_interval: Option<Interval>,
+    logs_controller: LogsController,
+    scheduler: Scheduler<T>,
+    cluster_state_watcher: ClusterStateWatcher,
+    logs: Live<Logs>,
+    log_trim_threshold: Lsn,
+}
+
+impl<T> Leader<T>
+where
+    T: TransportConnect,
+{
+    async fn on_observed_cluster_state(
+        &mut self,
+        observed_cluster_state: &ObservedClusterState,
+    ) -> anyhow::Result<()> {
+        let nodes_config = &self.nodes_config.live_load();
+        self.logs_controller.on_observed_cluster_state_update(
+            nodes_config,
+            observed_cluster_state,
+            SchedulingPlanNodeSetSelectorHints::from(&self.scheduler),
+        )?;
+        self.scheduler
+            .on_observed_cluster_state(
+                observed_cluster_state,
+                nodes_config,
+                LogsBasedPartitionProcessorPlacementHints::from(&self.logs_controller),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    fn reconfigure(&mut self, configuration: &Configuration) {
+        (self.log_trim_interval, self.log_trim_threshold) =
+            create_log_trim_interval(&configuration.admin);
+    }
+
+    async fn run(&mut self) -> anyhow::Result<()> {
+        let bifrost_admin = BifrostAdmin::new(
+            &self.bifrost,
+            &self.metadata_writer,
+            &self.metadata_store_client,
+        );
+
+        loop {
+            tokio::select! {
+                _ = self.find_logs_tail_interval.tick() => {
+                    self.logs_controller.find_logs_tail();
+                }
+                _ = OptionFuture::from(self.log_trim_interval.as_mut().map(|interval| interval.tick())) => {
+                    let result = self.trim_logs(bifrost_admin).await;
+
+                    if let Err(err) = result {
+                        warn!("Could not trim the logs. This can lead to increased disk usage: {err}");
+                    }
+                }
+                result = self.logs_controller.run_async_operations() => {
+                    result?;
+                }
+                Ok(_) = self.logs_watcher.changed() => {
+                    self.logs_controller.on_logs_update(self.metadata.logs_ref())?;
+                    // tell the scheduler about potentially newly provisioned logs
+                    self.scheduler.on_logs_update(self.logs.live_load(), self.partition_table.live_load()).await?
+                }
+                Ok(_) = self.partition_table_watcher.changed() => {
+                    let partition_table = self.partition_table.live_load();
+                    let logs = self.logs.live_load();
+
+                    self.logs_controller.on_partition_table_update(partition_table);
+                    self.scheduler.on_logs_update(logs, partition_table).await?;
+                }
+            }
+        }
+    }
+
+    async fn trim_logs(
+        &self,
+        bifrost_admin: BifrostAdmin<'_>,
+    ) -> Result<(), restate_bifrost::Error> {
+        let cluster_state = self.cluster_state_watcher.current();
+
+        let mut persisted_lsns_per_partition: BTreeMap<
+            PartitionId,
+            BTreeMap<GenerationalNodeId, Lsn>,
+        > = BTreeMap::default();
+
+        for node_state in cluster_state.nodes.values() {
+            match node_state {
+                NodeState::Alive(AliveNode {
+                    generational_node_id,
+                    partitions,
+                    ..
+                }) => {
+                    for (partition_id, partition_processor_status) in partitions.iter() {
+                        let lsn = partition_processor_status
+                            .last_persisted_log_lsn
+                            .unwrap_or(Lsn::INVALID);
+                        persisted_lsns_per_partition
+                            .entry(*partition_id)
+                            .or_default()
+                            .insert(*generational_node_id, lsn);
+                    }
+                }
+                NodeState::Dead(_) => {
+                    // nothing to do
+                }
+            }
+        }
+
+        for (partition_id, persisted_lsns) in persisted_lsns_per_partition.into_iter() {
+            let log_id = LogId::from(partition_id);
+
+            // todo: Remove once Restate nodes can share partition processor snapshots
+            // only try to trim if we know about the persisted lsns of all known nodes; otherwise we
+            // risk that a node cannot fully replay the log; this assumes that no new nodes join the
+            // cluster after the first trimming has happened
+            if persisted_lsns.len() >= cluster_state.nodes.len() {
+                let min_persisted_lsn = persisted_lsns.into_values().min().unwrap_or(Lsn::INVALID);
+                // trim point is before the oldest record
+                let current_trim_point = bifrost_admin.get_trim_point(log_id).await?;
+
+                if min_persisted_lsn >= current_trim_point + self.log_trim_threshold {
+                    debug!(
+                    "Automatic trim log '{log_id}' for all records before='{min_persisted_lsn}'"
+                );
+                    bifrost_admin.trim(log_id, min_persisted_lsn).await?
+                }
+            } else {
+                warn!("Stop automatically trimming log '{log_id}' because not all nodes are running a partition processor applying this log.");
+            }
+        }
+
+        Ok(())
     }
 }
 
