@@ -21,6 +21,7 @@ use serde_with::serde_as;
 use restate_serde_util::{NonZeroByteCount, SerdeableHeaderHashMap};
 
 use super::{AwsOptions, HttpOptions, PerfStatsLevel, RocksDbOptions};
+use crate::cluster_controller::ClusterConfigurationSeed;
 use crate::net::{AdvertisedAddress, BindAddress};
 use crate::nodes_config::Role;
 use crate::retries::RetryPolicy;
@@ -75,6 +76,15 @@ pub struct CommonOptions {
     /// Address that other nodes will use to connect to this node. Default is `http://127.0.0.1:5122/`
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub advertised_address: AdvertisedAddress,
+
+    /// # Cluster configuration seed
+    ///
+    /// This configuration is used to populate the cluster configuration on
+    /// bootstrap. If `allow-bootstrap` is not enabled, cluster-configuration-seed
+    /// is not used.
+    ///
+    /// After bootstrapping changes to this configuration has no effect.
+    pub cluster_configuration_seed: ClusterConfigurationSeed,
 
     /// # Partitions
     ///
@@ -225,12 +235,6 @@ pub struct CommonOptions {
     ///
     /// The retry policy for node network error
     pub network_error_retry_policy: RetryPolicy,
-
-    /// # Automatically provision number of configured partitions
-    ///
-    /// If this option is set to `false`, then one needs to manually write a partition table to
-    /// the metadata store. Without a partition table, the cluster will not start.
-    pub auto_provision_partitions: bool,
 }
 
 static HOSTNAME: Lazy<String> = Lazy::new(|| {
@@ -385,7 +389,7 @@ impl Default for CommonOptions {
                 Some(15),
                 Some(Duration::from_secs(5)),
             ),
-            auto_provision_partitions: true,
+            cluster_configuration_seed: ClusterConfigurationSeed::default(),
         }
     }
 }

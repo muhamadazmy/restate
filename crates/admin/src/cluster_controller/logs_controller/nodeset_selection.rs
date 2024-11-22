@@ -14,6 +14,7 @@ use rand::prelude::IteratorRandom;
 use rand::Rng;
 use tracing::trace;
 
+use restate_types::cluster_controller::NodeSetSelectionStrategy;
 use restate_types::nodes_config::NodesConfiguration;
 use restate_types::replicated_loglet::{LocationScope, NodeSet, ReplicationProperty};
 
@@ -170,29 +171,6 @@ fn nodeset_size_range(
     };
 
     (nodeset_min_size, nodeset_target_size)
-}
-
-/// Nodeset selection strategy for picking cluster members to host replicated logs. Note that this
-/// concerns loglet replication configuration across storage servers during log bootstrap or cluster
-/// reconfiguration, for example when expanding capacity.
-///
-/// It is expected that the Bifrost data plane will deal with short-term server unavailability.
-/// Therefore, we can afford to aim high with our nodeset selections and optimise for maximum
-/// possible fault tolerance. It is the data plane's responsibility to achieve availability within
-/// this nodeset during periods of individual node downtime.
-///
-/// Finally, nodeset selection is orthogonal to log sequencer placement.
-#[cfg(feature = "replicated-loglet")]
-#[derive(Debug, Clone, Default)]
-pub enum NodeSetSelectionStrategy {
-    /// Selects an optimal nodeset size based on the replication factor. The nodeset size is at
-    /// least 2f+1, calculated by working backwards from a replication factor of f+1. If there are
-    /// more nodes available in the cluster, the strategy will use them.
-    ///
-    /// This strategy will never suggest a nodeset smaller than 2f+1, thus ensuring that there is
-    /// always plenty of fault tolerance built into the loglet. This is a safe default choice.
-    #[default]
-    StrictFaultTolerantGreedy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
