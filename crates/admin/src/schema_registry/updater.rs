@@ -1,4 +1,4 @@
-// Copyright (c) 2024 - Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -24,10 +24,10 @@ use restate_types::schema::invocation_target::{
     InputRules, InputValidationRule, InvocationTargetMetadata, OutputContentTypeRule, OutputRules,
     DEFAULT_IDEMPOTENCY_RETENTION, DEFAULT_WORKFLOW_COMPLETION_RETENTION,
 };
-use restate_types::schema::openapi::ServiceOpenAPI;
 use restate_types::schema::service::{HandlerSchemas, ServiceLocation, ServiceSchemas};
 use restate_types::schema::subscriptions::{
-    EventReceiverServiceType, Sink, Source, Subscription, SubscriptionValidator,
+    EventInvocationTargetTemplate, EventReceiverServiceType, Sink, Source, Subscription,
+    SubscriptionValidator,
 };
 use restate_types::schema::Schema;
 use std::collections::hash_map::Entry;
@@ -41,13 +41,18 @@ use tracing::{info, warn};
 pub struct SchemaUpdater {
     schema_information: Schema,
     modified: bool,
+    experimental_feature_kafka_ingress_next: bool,
 }
 
-impl From<Schema> for SchemaUpdater {
-    fn from(schema_information: Schema) -> Self {
+impl SchemaUpdater {
+    pub(crate) fn new(
+        schema_information: Schema,
+        experimental_feature_kafka_ingress_next: bool,
+    ) -> Self {
         Self {
             schema_information,
             modified: false,
+            experimental_feature_kafka_ingress_next,
         }
     }
 }
@@ -141,7 +146,6 @@ impl SchemaUpdater {
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
-            let openapi = ServiceOpenAPI::infer(service_name.as_ref(), service_type, &handlers);
 
             // For the time being when updating we overwrite existing data
             let service_schema = if let Some(existing_service) =
@@ -197,7 +201,7 @@ impl SchemaUpdater {
                 service_schemas.ty = service_type;
                 service_schemas.handlers = handlers;
                 service_schemas.location.latest_deployment = deployment_id;
-                service_schemas.service_openapi = openapi;
+                service_schemas.service_openapi_cache = Default::default();
                 service_schemas.documentation = service.documentation;
                 service_schemas.metadata = service.metadata;
 
@@ -219,7 +223,7 @@ impl SchemaUpdater {
                     },
                     inactivity_timeout: None,
                     abort_timeout: None,
-                    service_openapi: openapi,
+                    service_openapi_cache: Default::default(),
                     documentation: service.documentation,
                     metadata: service.metadata,
                 }
@@ -350,25 +354,56 @@ impl SchemaUpdater {
                         ))
                     })?;
 
-                let ty = match handler_schemas.target_meta.target_ty {
-                    InvocationTargetType::Workflow(WorkflowHandlerType::Workflow) => {
-                        EventReceiverServiceType::Workflow
+                if self.experimental_feature_kafka_ingress_next {
+                    Sink::Invocation {
+                        event_invocation_target_template: match handler_schemas
+                            .target_meta
+                            .target_ty
+                        {
+                            InvocationTargetType::Service => {
+                                EventInvocationTargetTemplate::Service {
+                                    name: service_name.to_owned(),
+                                    handler: handler_name.to_owned(),
+                                }
+                            }
+                            InvocationTargetType::VirtualObject(handler_ty) => {
+                                EventInvocationTargetTemplate::VirtualObject {
+                                    name: service_name.to_owned(),
+                                    handler: handler_name.to_owned(),
+                                    handler_ty,
+                                }
+                            }
+                            InvocationTargetType::Workflow(handler_ty) => {
+                                EventInvocationTargetTemplate::Workflow {
+                                    name: service_name.to_owned(),
+                                    handler: handler_name.to_owned(),
+                                    handler_ty,
+                                }
+                            }
+                        },
                     }
-                    InvocationTargetType::VirtualObject(VirtualObjectHandlerType::Exclusive) => {
-                        EventReceiverServiceType::VirtualObject
-                    }
-                    InvocationTargetType::Workflow(_) | InvocationTargetType::VirtualObject(_) => {
-                        return Err(SchemaError::Subscription(
-                            SubscriptionError::InvalidSinkSharedHandler(sink),
-                        ))
-                    }
-                    InvocationTargetType::Service => EventReceiverServiceType::Service,
-                };
+                } else {
+                    let ty = match handler_schemas.target_meta.target_ty {
+                        InvocationTargetType::Workflow(WorkflowHandlerType::Workflow) => {
+                            EventReceiverServiceType::Workflow
+                        }
+                        InvocationTargetType::VirtualObject(
+                            VirtualObjectHandlerType::Exclusive,
+                        ) => EventReceiverServiceType::VirtualObject,
+                        InvocationTargetType::Workflow(_)
+                        | InvocationTargetType::VirtualObject(_) => {
+                            return Err(SchemaError::Subscription(
+                                SubscriptionError::InvalidSinkSharedHandler(sink),
+                            ))
+                        }
+                        InvocationTargetType::Service => EventReceiverServiceType::Service,
+                    };
 
-                Sink::Service {
-                    name: service_name.to_owned(),
-                    handler: handler_name.to_owned(),
-                    ty,
+                    Sink::DeprecatedService {
+                        name: service_name.to_owned(),
+                        handler: handler_name.to_owned(),
+                        ty,
+                    }
                 }
             }
             _ => {
@@ -419,9 +454,8 @@ impl SchemaUpdater {
                         for h in schemas.handlers.values_mut() {
                             h.target_meta.public = new_public_value;
                         }
-                        // Regenerate OpenAPI
-                        schemas.service_openapi =
-                            ServiceOpenAPI::infer(&name, schemas.ty, &schemas.handlers)
+                        // Cleanup generated OpenAPI
+                        schemas.service_openapi_cache = Default::default();
                     }
                     ModifyServiceChange::IdempotencyRetention(new_idempotency_retention) => {
                         schemas.idempotency_retention = new_idempotency_retention;
@@ -717,7 +751,7 @@ mod tests {
     fn register_new_deployment() {
         let schema_information = Schema::default();
         let initial_version = schema_information.version();
-        let mut updater = SchemaUpdater::from(schema_information);
+        let mut updater = SchemaUpdater::new(schema_information, false);
 
         let deployment = Deployment::mock();
         let deployment_id = updater
@@ -764,7 +798,7 @@ mod tests {
             .resolve_latest_service(ANOTHER_GREETER_SERVICE_NAME)
             .is_none());
 
-        updater = schemas.into();
+        updater = SchemaUpdater::new(schemas, false);
         updater
             .add_deployment(
                 Some(deployment_2.id),
@@ -799,7 +833,7 @@ mod tests {
         assert!(schemas.assert_service(GREETER_SERVICE_NAME).public);
 
         let version_before_modification = schemas.version();
-        updater = SchemaUpdater::from(schemas);
+        updater = SchemaUpdater::new(schemas, false);
         updater.modify_service(
             GREETER_SERVICE_NAME.to_owned(),
             vec![ModifyServiceChange::Public(false)],
@@ -809,7 +843,7 @@ mod tests {
         assert!(version_before_modification < schemas.version());
         assert!(!schemas.assert_service(GREETER_SERVICE_NAME).public);
 
-        updater = SchemaUpdater::from(schemas);
+        updater = SchemaUpdater::new(schemas, false);
         updater.add_deployment(
             Some(deployment.id),
             deployment.metadata.clone(),
@@ -848,7 +882,7 @@ mod tests {
 
             schemas.assert_service_deployment(GREETER_SERVICE_NAME, deployment_1.id);
 
-            let compute_result = SchemaUpdater::from(schemas).add_deployment(
+            let compute_result = SchemaUpdater::new(schemas, false).add_deployment(
                 Some(deployment_2.id),
                 deployment_2.metadata,
                 vec![greeter_virtual_object()],
@@ -879,7 +913,7 @@ mod tests {
         schemas.assert_service_deployment(GREETER_SERVICE_NAME, deployment.id);
         schemas.assert_service_deployment(ANOTHER_GREETER_SERVICE_NAME, deployment.id);
 
-        updater = SchemaUpdater::from(schemas);
+        updater = SchemaUpdater::new(schemas, false);
         updater
             .add_deployment(
                 Some(deployment.id),
@@ -984,7 +1018,7 @@ mod tests {
         schemas.assert_service_revision(ANOTHER_GREETER_SERVICE_NAME, 1);
 
         let version_before_removal = schemas.version();
-        updater = schemas.into();
+        updater = SchemaUpdater::new(schemas, false);
         updater.remove_deployment(deployment_1.id);
         let schemas = updater.into_inner();
 
@@ -1065,7 +1099,7 @@ mod tests {
             let schemas = updater.into_inner();
             schemas.assert_service_revision(GREETER_SERVICE_NAME, 1);
 
-            updater = schemas.into();
+            updater = SchemaUpdater::new(schemas, false);
             let rejection = updater
                 .add_deployment(
                     Some(deployment_2.id),

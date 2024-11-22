@@ -1,4 +1,4 @@
-// Copyright (c) 2024 -  Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -13,7 +13,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use restate_serde_util::{ByteCount, NonZeroByteCount};
+use restate_serde_util::NonZeroByteCount;
 
 #[serde_as]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, derive_builder::Builder)]
@@ -96,7 +96,7 @@ pub struct RocksDbOptions {
     /// Max size of info LOG file
     ///
     /// Default: 64MB
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<ByteCount>"))]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<NonZeroByteCount>"))]
     rocksdb_log_max_file_size: Option<NonZeroByteCount>,
 }
 

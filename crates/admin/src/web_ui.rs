@@ -1,4 +1,4 @@
-// Copyright (c) 2024 -  Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -48,6 +48,7 @@ async fn serve_web_ui(uri: Uri) -> impl IntoResponse {
 
 pub(crate) fn web_ui_router() -> axum::Router {
     axum::Router::new()
+        .route("/", get(|| async { Redirect::permanent("/ui/") }))
         .route("/ui", get(|| async { Redirect::permanent("/ui/") }))
         .route("/ui/", get(serve_web_ui))
         .route("/ui/*path", get(serve_web_ui))

@@ -1,4 +1,4 @@
-// Copyright (c) 2024 - Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -10,15 +10,14 @@
 
 mod nodeset_selection;
 
+use futures::never::Never;
+use rand::prelude::IteratorRandom;
+use rand::{thread_rng, RngCore};
 use std::collections::HashMap;
 use std::iter;
-use std::num::NonZeroU8;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-
-use rand::prelude::IteratorRandom;
-use rand::{thread_rng, RngCore};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{debug, trace, trace_span, Instrument};
@@ -29,6 +28,7 @@ use restate_core::metadata_store::{
     retry_on_network_error, MetadataStoreClient, Precondition, ReadWriteError, WriteError,
 };
 use restate_core::{metadata, task_center, Metadata, MetadataWriter, ShutdownError};
+use restate_types::cluster_controller::{ClusterConfiguration, NodeSetSelectionStrategy};
 use restate_types::config::Configuration;
 use restate_types::errors::GenericError;
 use restate_types::identifiers::PartitionId;
@@ -41,14 +41,12 @@ use restate_types::logs::{LogId, Lsn, TailState};
 use restate_types::metadata_store::keys::BIFROST_CONFIG_KEY;
 use restate_types::nodes_config::NodesConfiguration;
 use restate_types::partition_table::PartitionTable;
-use restate_types::replicated_loglet::{
-    ReplicatedLogletId, ReplicatedLogletParams, ReplicationProperty,
-};
+use restate_types::replicated_loglet::{ReplicatedLogletId, ReplicatedLogletParams};
 use restate_types::retries::{RetryIter, RetryPolicy};
 use restate_types::{logs, GenerationalNodeId, NodeId, PlainNodeId, Version, Versioned};
 
 use crate::cluster_controller::logs_controller::nodeset_selection::{
-    NodeSelectionError, NodeSetSelectionStrategy, NodeSetSelector,
+    NodeSelectionError, NodeSetSelector,
 };
 use crate::cluster_controller::observed_cluster_state::ObservedClusterState;
 use crate::cluster_controller::scheduler;
@@ -105,7 +103,7 @@ enum LogState {
     /// create the initial segment configuration.
     Provisioning {
         log_id: LogId,
-        provider_kind: ProviderKind,
+        cluster_configuration: Arc<ClusterConfiguration>,
     },
     /// Log has an open tail segment and can be written to. Log is periodically monitored to check
     /// whether it needs to be reconfigured.
@@ -216,17 +214,19 @@ impl LogState {
     ) -> Result<()> {
         match self {
             LogState::Provisioning {
-                provider_kind,
                 log_id,
+                cluster_configuration,
             } => {
                 if let Some(loglet_configuration) = try_provisioning(
                     *log_id,
-                    *provider_kind,
+                    cluster_configuration,
                     observed_cluster_state,
                     node_set_selector_hints,
                 ) {
-                    let chain =
-                        Chain::new(*provider_kind, loglet_configuration.to_loglet_params()?);
+                    let chain = Chain::new(
+                        cluster_configuration.default_provider,
+                        loglet_configuration.to_loglet_params()?,
+                    );
                     log_builder
                         .add_log(*log_id, chain)
                         .expect("a provisioning log should not have a logs entry");
@@ -250,6 +250,7 @@ impl LogState {
 
     fn try_reconfiguring<F, G>(
         &mut self,
+        cluster_configuration: &ClusterConfiguration,
         observed_cluster_state: &ObservedClusterState,
         mut append_segment: F,
         preferred_sequencer_hint: G,
@@ -269,9 +270,11 @@ impl LogState {
                 configuration,
                 ..
             } => {
-                if let Some(loglet_configuration) = configuration
-                    .try_reconfiguring(observed_cluster_state, preferred_sequencer_hint())
-                {
+                if let Some(loglet_configuration) = configuration.try_reconfiguring(
+                    cluster_configuration,
+                    observed_cluster_state,
+                    preferred_sequencer_hint(),
+                ) {
                     let segment_index = append_segment(
                         *seal_lsn,
                         loglet_configuration.as_provider(),
@@ -307,11 +310,11 @@ impl LogState {
 /// If this is possible, then this function returns some [`LogletConfiguration`].
 fn try_provisioning(
     log_id: LogId,
-    provider_kind: ProviderKind,
+    cluster_configuration: &ClusterConfiguration,
     observed_cluster_state: &ObservedClusterState,
     node_set_selector_hints: impl NodeSetSelectorHints,
 ) -> Option<LogletConfiguration> {
-    match provider_kind {
+    match cluster_configuration.default_provider {
         ProviderKind::Local => {
             let log_id = thread_rng().next_u64();
             Some(LogletConfiguration::Local(log_id))
@@ -323,6 +326,7 @@ fn try_provisioning(
         }
         #[cfg(feature = "replicated-loglet")]
         ProviderKind::Replicated => build_new_replicated_loglet_configuration(
+            cluster_configuration,
             ReplicatedLogletId::new(log_id, SegmentIndex::OLDEST),
             metadata().nodes_config_ref().as_ref(),
             observed_cluster_state,
@@ -337,6 +341,7 @@ fn try_provisioning(
 /// and the previous configuration.
 #[cfg(feature = "replicated-loglet")]
 fn build_new_replicated_loglet_configuration(
+    cluster_configuration: &ClusterConfiguration,
     loglet_id: ReplicatedLogletId,
     nodes_config: &NodesConfiguration,
     observed_cluster_state: &ObservedClusterState,
@@ -347,10 +352,10 @@ fn build_new_replicated_loglet_configuration(
     // todo: make the default nodeset size configurable
     let replication = previous_configuration
         .map(|config| config.replication.clone())
-        .unwrap_or_else(|| ReplicationProperty::new(NonZeroU8::new(2).expect("to be valid")));
+        .unwrap_or_else(|| cluster_configuration.replication_property.clone());
 
     // todo: make nodeset selection strategy configurable
-    let strategy = NodeSetSelectionStrategy::StrictFaultTolerantGreedy;
+    let strategy = cluster_configuration.nodeset_selection_strategy;
 
     let preferred_nodes = previous_configuration
         .map(|p| p.nodeset.clone())
@@ -486,6 +491,7 @@ impl LogletConfiguration {
 
     fn try_reconfiguring(
         &self,
+        cluster_configuration: &ClusterConfiguration,
         observed_cluster_state: &ObservedClusterState,
         preferred_sequencer: Option<NodeId>,
     ) -> Option<LogletConfiguration> {
@@ -493,6 +499,7 @@ impl LogletConfiguration {
             #[cfg(feature = "replicated-loglet")]
             LogletConfiguration::Replicated(configuration) => {
                 build_new_replicated_loglet_configuration(
+                    cluster_configuration,
                     configuration.loglet_id.next(),
                     &metadata().nodes_config_ref(),
                     observed_cluster_state,
@@ -615,9 +622,6 @@ enum Event {
 /// complexity of handling multiple in-flight logs writes, the controller waits until the
 /// in-flight write completes or a newer log is detected.
 struct LogsControllerInner {
-    // todo make configurable
-    default_provider: ProviderKind,
-
     logs_state: HashMap<LogId, LogState, Xxh3Builder>,
     logs_write_in_progress: Option<Version>,
 
@@ -628,28 +632,21 @@ struct LogsControllerInner {
 }
 
 impl LogsControllerInner {
-    fn new(
-        logs: Pinned<Logs>,
-        partition_table: &PartitionTable,
-        default_provider: ProviderKind,
-        retry_policy: RetryPolicy,
-    ) -> Result<Self> {
-        let mut this = Self {
-            default_provider,
+    fn new(retry_policy: RetryPolicy) -> Self {
+        Self {
             current_logs: Arc::new(Logs::default()),
             logs_state: HashMap::with_hasher(Xxh3Builder::default()),
             logs_write_in_progress: None,
             retry_policy,
-        };
+        }
 
-        this.on_logs_update(logs)?;
-        this.on_partition_table_update(partition_table);
-        Ok(this)
+        // this.on_logs_update(logs)?;
+        // this.on_partition_table_update(cluster_configuration, partition_table);
     }
 
     fn on_observed_cluster_state_update(
         &mut self,
-
+        cluster_configuration: &ClusterConfiguration,
         nodes_config: &NodesConfiguration,
         observed_cluster_state: &ObservedClusterState,
         effects: &mut Vec<Effect>,
@@ -666,6 +663,7 @@ impl LogsControllerInner {
                 &node_set_selector_hints,
             )?;
             self.reconfigure_logs(
+                cluster_configuration,
                 observed_cluster_state,
                 &mut builder,
                 node_set_selector_hints,
@@ -728,12 +726,14 @@ impl LogsControllerInner {
 
     fn reconfigure_logs(
         &mut self,
+        cluster_configuration: &ClusterConfiguration,
         observed_cluster_state: &ObservedClusterState,
         logs_builder: &mut LogsBuilder,
         node_set_selector_hints: impl NodeSetSelectorHints,
     ) -> Result<()> {
         for (log_id, log_state) in &mut self.logs_state {
             log_state.try_reconfiguring(
+                cluster_configuration,
                 observed_cluster_state,
                 |seal_lsn, provider_kind, loglet_params| {
                     let mut chain_builder = logs_builder
@@ -880,17 +880,26 @@ impl LogsControllerInner {
         }
     }
 
-    fn on_partition_table_update(&mut self, partition_table: &PartitionTable) {
+    fn on_partition_table_update(
+        &mut self,
+        cluster_configuration: Option<Arc<ClusterConfiguration>>,
+        partition_table: &PartitionTable,
+    ) {
+        let Some(cluster_configuration) = cluster_configuration else {
+            return;
+        };
+
         // update the provisioning logs
         for (partition_id, _) in partition_table.partitions() {
+            let cluster_configuration = Arc::clone(&cluster_configuration);
             self.logs_state
                 .entry((*partition_id).into())
                 .or_insert_with(|| {
                     let log_id = (*partition_id).into();
-                    debug!(%log_id, "Try provisioning log with provider '{}'", self.default_provider);
+                    debug!(%log_id, "Try provisioning log with provider '{}'", cluster_configuration.default_provider);
                     LogState::Provisioning {
                         log_id,
-                        provider_kind: self.default_provider,
+                        cluster_configuration,
                     }
                 });
         }
@@ -948,12 +957,7 @@ impl LogsController {
 
         let mut this = Self {
             effects: Some(Vec::new()),
-            inner: LogsControllerInner::new(
-                metadata.logs_ref(),
-                metadata.partition_table_ref().as_ref(),
-                configuration.bifrost.default_provider,
-                retry_policy,
-            )?,
+            inner: LogsControllerInner::new(retry_policy),
             metadata,
             bifrost,
             metadata_store_client,
@@ -1037,11 +1041,13 @@ impl LogsController {
 
     pub fn on_observed_cluster_state_update(
         &mut self,
+        cluster_configuration: &ClusterConfiguration,
         nodes_config: &NodesConfiguration,
         observed_cluster_state: &ObservedClusterState,
         node_set_selector_hints: impl NodeSetSelectorHints,
     ) -> Result<(), anyhow::Error> {
         self.inner.on_observed_cluster_state_update(
+            cluster_configuration,
             nodes_config,
             observed_cluster_state,
             self.effects.as_mut().expect("to be present"),
@@ -1052,8 +1058,13 @@ impl LogsController {
         Ok(())
     }
 
-    pub fn on_partition_table_update(&mut self, partition_table: &PartitionTable) {
-        self.inner.on_partition_table_update(partition_table);
+    pub fn on_partition_table_update(
+        &mut self,
+        cluster_configuration: Option<Arc<ClusterConfiguration>>,
+        partition_table: &PartitionTable,
+    ) {
+        self.inner
+            .on_partition_table_update(cluster_configuration, partition_table);
     }
 
     pub fn on_logs_update(&mut self, logs: Pinned<Logs>) -> Result<()> {
@@ -1210,7 +1221,7 @@ impl LogsController {
         });
     }
 
-    pub async fn run_async_operations(&mut self) -> Result<()> {
+    pub async fn run_async_operations(&mut self) -> Result<Never> {
         loop {
             if self.async_operations.is_empty() {
                 futures::future::pending().await
@@ -1287,13 +1298,14 @@ pub mod tests {
     use std::num::NonZeroU8;
 
     use enumset::{enum_set, EnumSet};
+    use restate_types::cluster_controller::{ClusterConfiguration, ClusterConfigurationSeed};
     use restate_types::nodes_config::{
         LogServerConfig, NodeConfig, NodesConfiguration, Role, StorageState,
     };
     use restate_types::replicated_loglet::{
         NodeSet, ReplicatedLogletId, ReplicatedLogletParams, ReplicationProperty,
     };
-    use restate_types::{GenerationalNodeId, NodeId, PlainNodeId};
+    use restate_types::{GenerationalNodeId, NodeId, PlainNodeId, Version};
 
     use crate::cluster_controller::logs_controller::{
         build_new_replicated_loglet_configuration, LogletConfiguration,
@@ -1457,6 +1469,17 @@ pub mod tests {
         }
     }
 
+    fn cluster_configuration(nodes: u8) -> ClusterConfiguration {
+        ClusterConfiguration {
+            version: Version::MIN,
+            configuration: ClusterConfigurationSeed {
+                replication_property: ReplicationProperty::new(
+                    NonZeroU8::new(nodes).expect("must be non zero"),
+                ),
+                ..Default::default()
+            },
+        }
+    }
     pub fn node(id: u32, roles: EnumSet<Role>, storage_state: StorageState) -> NodeConfig {
         NodeConfig::new(
             format!("node-{}", id),
@@ -1516,7 +1539,9 @@ pub mod tests {
         nodes.kill_node(2);
         assert!(params.requires_reconfiguration(&nodes.nodes_config, &nodes.observed_state));
 
+        let cluster_config = cluster_configuration(2);
         let config = build_new_replicated_loglet_configuration(
+            &cluster_config,
             seq_n0.loglet_id,
             &nodes.nodes_config,
             &nodes.observed_state,
@@ -1541,7 +1566,10 @@ pub mod tests {
             .dead_nodes([6]) // N6 starts out offline
             .build();
 
+        let cluster_config = cluster_configuration(2);
+
         let initial = build_new_replicated_loglet_configuration(
+            &cluster_config,
             ReplicatedLogletId::from(1),
             &nodes.nodes_config,
             &nodes.observed_state,
@@ -1562,6 +1590,7 @@ pub mod tests {
         nodes.kill_nodes([2, 5]);
 
         let config = build_new_replicated_loglet_configuration(
+            &cluster_config,
             initial.loglet_id,
             &nodes.nodes_config,
             &nodes.observed_state,
@@ -1585,6 +1614,7 @@ pub mod tests {
         nodes.revive_node((2, 2)); // N2 comes back
 
         let mut config = build_new_replicated_loglet_configuration(
+            &cluster_config,
             config.loglet_id,
             &nodes.nodes_config,
             &nodes.observed_state,
@@ -1601,6 +1631,7 @@ pub mod tests {
 
         // the loglet should be reconfigured to use a new live node as its sequencer, keeping its nodeset
         let new_sequencer_config = build_new_replicated_loglet_configuration(
+            &cluster_config,
             config.loglet_id,
             &nodes.nodes_config,
             &nodes.observed_state,
@@ -1617,6 +1648,7 @@ pub mod tests {
         nodes.revive_nodes([(1, 2), (6, 2)]);
 
         let config = build_new_replicated_loglet_configuration(
+            &cluster_config,
             new_sequencer_config.loglet_id,
             &nodes.nodes_config,
             &nodes.observed_state,
@@ -1631,6 +1663,7 @@ pub mod tests {
         nodes.revive_node((2, 3)); // N2 comes back _again_
 
         let config = build_new_replicated_loglet_configuration(
+            &cluster_config,
             new_sequencer_config.loglet_id,
             &nodes.nodes_config,
             &nodes.observed_state,

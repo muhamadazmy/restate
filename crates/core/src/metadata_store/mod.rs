@@ -1,4 +1,4 @@
-// Copyright (c) 2024 - Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -386,6 +386,16 @@ impl MetadataStoreClientError for WriteError {
     }
 }
 
+impl MetadataStoreClientError for ReadError {
+    fn is_network_error(&self) -> bool {
+        match self {
+            ReadError::Network(_) => true,
+            ReadError::Internal(_) => false,
+            ReadError::Codec(_) => false,
+            ReadError::Store(_) => false,
+        }
+    }
+}
 static_assertions::assert_impl_all!(MetadataStoreClient: Send, Sync, Clone);
 
 pub async fn retry_on_network_error<Fn, Fut, T, E, P>(retry_policy: P, action: Fn) -> Result<T, E>

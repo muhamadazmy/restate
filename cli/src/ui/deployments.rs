@@ -1,4 +1,4 @@
-// Copyright (c) 2023 -  Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -151,7 +151,7 @@ pub fn add_deployment_to_kv_table(deployment: &Deployment, table: &mut Table) {
     for (header, value) in additional_headers.iter() {
         table.add_kv_row(
             "Deployment Additional Header:",
-            &format!("{}: {}", header, value.to_str().unwrap_or("<BINARY>")),
+            format!("{}: {}", header, value.to_str().unwrap_or("<BINARY>")),
         );
     }
 

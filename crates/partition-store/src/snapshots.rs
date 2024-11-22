@@ -1,3 +1,13 @@
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
+// All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
@@ -60,6 +70,7 @@ pub struct LocalPartitionSnapshot {
     pub min_applied_lsn: Lsn,
     pub db_comparator_name: String,
     pub files: Vec<LiveFile>,
+    pub key_range: RangeInclusive<PartitionKey>,
 }
 
 /// RocksDB SST file that is part of a snapshot. Serialization wrapper around [LiveFile].

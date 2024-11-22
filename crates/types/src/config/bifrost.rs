@@ -1,4 +1,4 @@
-// Copyright (c) 2024 -  Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -89,7 +89,7 @@ impl BifrostOptions {
 impl Default for BifrostOptions {
     fn default() -> Self {
         Self {
-            default_provider: ProviderKind::Local,
+            default_provider: ProviderKind::Replicated,
             replicated_loglet: ReplicatedLogletOptions::default(),
             local: LocalLogletOptions::default(),
             read_retry_policy: RetryPolicy::exponential(

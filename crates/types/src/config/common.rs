@@ -1,4 +1,4 @@
-// Copyright (c) 2024 -  Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -15,11 +15,13 @@ use std::time::Duration;
 
 use enumset::EnumSet;
 use once_cell::sync::Lazy;
-use restate_serde_util::{NonZeroByteCount, SerdeableHeaderHashMap};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+use restate_serde_util::{NonZeroByteCount, SerdeableHeaderHashMap};
+
 use super::{AwsOptions, HttpOptions, PerfStatsLevel, RocksDbOptions};
+use crate::cluster_controller::ClusterConfigurationSeed;
 use crate::net::{AdvertisedAddress, BindAddress};
 use crate::nodes_config::Role;
 use crate::retries::RetryPolicy;
@@ -75,6 +77,15 @@ pub struct CommonOptions {
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub advertised_address: AdvertisedAddress,
 
+    /// # Cluster configuration seed
+    ///
+    /// This configuration is used to populate the cluster configuration on
+    /// bootstrap. If `allow-bootstrap` is not enabled, cluster-configuration-seed
+    /// is not used.
+    ///
+    /// After bootstrapping changes to this configuration has no effect.
+    pub cluster_configuration_seed: ClusterConfigurationSeed,
+
     /// # Partitions
     ///
     /// Number of partitions that will be provisioned during cluster bootstrap,
@@ -120,6 +131,12 @@ pub struct CommonOptions {
     ///
     /// Disable ANSI terminal codes for logs. This is useful when the log collector doesn't support processing ANSI terminal codes.
     pub log_disable_ansi_codes: bool,
+
+    /// Address to bind for the tokio-console tracing subscriber. If unset and restate-server is
+    /// built with tokio-console support, it'll listen on `0.0.0.0:6669`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub tokio_console_bind_address: Option<BindAddress>,
 
     /// Timeout for idle histograms.
     ///
@@ -218,12 +235,6 @@ pub struct CommonOptions {
     ///
     /// The retry policy for node network error
     pub network_error_retry_policy: RetryPolicy,
-
-    /// # Automatically provision number of configured partitions
-    ///
-    /// If this option is set to `false`, then one needs to manually write a partition table to
-    /// the metadata store. Without a partition table, the cluster will not start.
-    pub auto_provision_partitions: bool,
 }
 
 static HOSTNAME: Lazy<String> = Lazy::new(|| {
@@ -359,6 +370,7 @@ impl Default for CommonOptions {
             log_filter: "warn,restate=info".to_string(),
             log_format: Default::default(),
             log_disable_ansi_codes: false,
+            tokio_console_bind_address: Some(BindAddress::Socket("0.0.0.0:6669".parse().unwrap())),
             default_thread_pool_size: None,
             storage_high_priority_bg_threads: None,
             storage_low_priority_bg_threads: None,
@@ -377,7 +389,7 @@ impl Default for CommonOptions {
                 Some(15),
                 Some(Duration::from_secs(5)),
             ),
-            auto_provision_partitions: true,
+            cluster_configuration_seed: ClusterConfigurationSeed::default(),
         }
     }
 }

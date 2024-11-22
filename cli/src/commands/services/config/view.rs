@@ -1,4 +1,4 @@
-// Copyright (c) 2024 -  Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -73,7 +73,7 @@ async fn view(env: &CliEnv, opts: &View) -> Result<()> {
 
     let mut table = Table::new_styled();
     table.add_kv_row("Name:", &service.name);
-    table.add_kv_row("Service type:", &format!("{:?}", service.ty));
+    table.add_kv_row("Service type:", format!("{:?}", service.ty));
     c_println!("{table}");
     c_println!();
 

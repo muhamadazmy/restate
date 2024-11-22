@@ -1,4 +1,4 @@
-// Copyright (c) 2023 -  Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -122,6 +122,7 @@ async fn generate_rest_api_doc() -> anyhow::Result<()> {
             ServiceClient::from_options(&config.common.service_client, AssumeRoleCacheMode::None)
                 .unwrap(),
         ),
+        false,
         None,
     );
 

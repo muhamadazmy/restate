@@ -1,4 +1,4 @@
-// Copyright (c) 2024 -  Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -22,7 +22,7 @@ use tonic::codec::CompressionEncoding;
 use tracing::{debug, info};
 
 use restate_bifrost::{Bifrost, BifrostAdmin};
-use restate_core::metadata_store::{retry_on_network_error, MetadataStoreClient};
+use restate_core::metadata_store::MetadataStoreClient;
 use restate_core::network::rpc_router::RpcRouter;
 use restate_core::network::{
     MessageRouterBuilder, NetworkSender, NetworkServerBuilder, Networking, TransportConnect,
@@ -37,12 +37,10 @@ use restate_types::health::HealthStatus;
 use restate_types::identifiers::{PartitionId, SnapshotId};
 use restate_types::live::Live;
 use restate_types::logs::{LogId, Lsn};
-use restate_types::metadata_store::keys::PARTITION_TABLE_KEY;
 use restate_types::net::metadata::MetadataKind;
 use restate_types::net::partition_processor_manager::CreateSnapshotRequest;
-use restate_types::partition_table::PartitionTable;
 use restate_types::protobuf::common::AdminStatus;
-use restate_types::{GenerationalNodeId, Version};
+use restate_types::GenerationalNodeId;
 
 use super::cluster_state_refresher::ClusterStateRefresher;
 use super::grpc_svc_handler::ClusterCtrlSvcHandler;
@@ -225,8 +223,6 @@ impl<T: TransportConnect> Service<T> {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
-        self.init_partition_table().await?;
-
         let mut config_watcher = Configuration::watcher();
         let mut cluster_state_watcher = self.cluster_state_refresher.cluster_state_watcher();
 
@@ -272,7 +268,8 @@ impl<T: TransportConnect> Service<T> {
                     state.reconfigure(configuration);
                 }
                 result = state.run() => {
-                    result?
+                    let leader_event = result?;
+                    state.on_leader_event(leader_event).await?;
                 }
                 _ = &mut shutdown => {
                     self.health_status.update(AdminStatus::Unknown);
@@ -282,37 +279,6 @@ impl<T: TransportConnect> Service<T> {
         }
     }
 
-    async fn init_partition_table(&mut self) -> anyhow::Result<()> {
-        let configuration = self.configuration.live_load();
-
-        let partition_table = retry_on_network_error(
-            configuration.common.network_error_retry_policy.clone(),
-            || {
-                self.metadata_store_client
-                    .get_or_insert(PARTITION_TABLE_KEY.clone(), || {
-                        let partition_table = if configuration.common.auto_provision_partitions {
-                            PartitionTable::with_equally_sized_partitions(
-                                Version::MIN,
-                                configuration.common.bootstrap_num_partitions(),
-                            )
-                        } else {
-                            PartitionTable::with_equally_sized_partitions(Version::MIN, 0)
-                        };
-
-                        debug!("Initializing the partition table with '{partition_table:?}'");
-
-                        partition_table
-                    })
-            },
-        )
-        .await?;
-
-        self.metadata_writer
-            .update(Arc::new(partition_table))
-            .await?;
-
-        Ok(())
-    }
     /// Triggers a snapshot creation for the given partition by issuing an RPC
     /// to the node hosting the active leader.
     async fn create_partition_snapshot(
@@ -563,6 +529,7 @@ mod tests {
 
     struct NodeStateHandler {
         persisted_lsn: Arc<AtomicU64>,
+        archived_lsn: Arc<AtomicU64>,
         // set of node ids for which the handler won't send a response to the caller, this allows to simulate
         // dead nodes
         block_list: BTreeSet<GenerationalNodeId>,
@@ -578,6 +545,7 @@ mod tests {
 
             let partition_processor_status = PartitionProcessorStatus {
                 last_persisted_log_lsn: Some(Lsn::from(self.persisted_lsn.load(Ordering::Relaxed))),
+                last_archived_log_lsn: Some(Lsn::from(self.archived_lsn.load(Ordering::Relaxed))),
                 ..PartitionProcessorStatus::new()
             };
 
@@ -606,8 +574,11 @@ mod tests {
         };
 
         let persisted_lsn = Arc::new(AtomicU64::new(0));
+        let archived_lsn = Arc::new(AtomicU64::new(0));
+
         let get_node_state_handler = Arc::new(NodeStateHandler {
             persisted_lsn: Arc::clone(&persisted_lsn),
+            archived_lsn: Arc::clone(&archived_lsn),
             block_list: BTreeSet::new(),
         });
 
@@ -689,8 +660,11 @@ mod tests {
         };
 
         let persisted_lsn = Arc::new(AtomicU64::new(0));
+        let archived_lsn = Arc::new(AtomicU64::new(0));
+
         let get_node_state_handler = Arc::new(NodeStateHandler {
             persisted_lsn: Arc::clone(&persisted_lsn),
+            archived_lsn: Arc::clone(&archived_lsn),
             block_list: BTreeSet::new(),
         });
         let (node_env, bifrost) = create_test_env(config, |builder| {
@@ -768,6 +742,7 @@ mod tests {
         };
 
         let persisted_lsn = Arc::new(AtomicU64::new(0));
+        let archived_lsn = Arc::new(AtomicU64::new(0));
 
         let (node_env, bifrost) = create_test_env(config, |builder| {
             let black_list = builder
@@ -780,6 +755,7 @@ mod tests {
 
             let get_node_state_handler = NodeStateHandler {
                 persisted_lsn: Arc::clone(&persisted_lsn),
+                archived_lsn: Arc::clone(&archived_lsn),
                 block_list: black_list,
             };
 

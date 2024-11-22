@@ -1,4 +1,4 @@
-// Copyright (c) 2024 - Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -10,11 +10,13 @@
 
 use crate::cluster::cluster_state::RunMode;
 use crate::identifiers::{PartitionId, PartitionKey};
+use crate::logs::metadata::ProviderKind;
 use crate::partition_table::PartitionTable;
+use crate::replicated_loglet::ReplicationProperty;
 use crate::{flexbuffers_storage_encode_decode, PlainNodeId, Version, Versioned};
 use serde_with::serde_as;
 use std::collections::{BTreeMap, HashSet};
-use std::num::NonZero;
+use std::num::{NonZero, NonZeroU16, NonZeroU8};
 use std::ops::RangeInclusive;
 use xxhash_rust::xxh3::Xxh3Builder;
 
@@ -203,5 +205,128 @@ impl From<SchedulingPlan> for SchedulingPlanBuilder {
             inner: value,
             modified: false,
         }
+    }
+}
+
+/// Nodeset selection strategy for picking cluster members to host replicated logs. Note that this
+/// concerns loglet replication configuration across storage servers during log bootstrap or cluster
+/// reconfiguration, for example when expanding capacity.
+///
+/// It is expected that the Bifrost data plane will deal with short-term server unavailability.
+/// Therefore, we can afford to aim high with our nodeset selections and optimise for maximum
+/// possible fault tolerance. It is the data plane's responsibility to achieve availability within
+/// this nodeset during periods of individual node downtime.
+///
+/// Finally, nodeset selection is orthogonal to log sequencer placement.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum NodeSetSelectionStrategy {
+    /// Selects an optimal nodeset size based on the replication factor. The nodeset size is at
+    /// least 2f+1, calculated by working backwards from a replication factor of f+1. If there are
+    /// more nodes available in the cluster, the strategy will use them.
+    ///
+    /// This strategy will never suggest a nodeset smaller than 2f+1, thus ensuring that there is
+    /// always plenty of fault tolerance built into the loglet. This is a safe default choice.
+    #[default]
+    StrictFaultTolerantGreedy,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schemars",
+    schemars(rename = "ClusterConfiguration", default)
+)]
+#[serde(rename_all = "kebab-case")]
+pub struct ClusterConfigurationSeed {
+    /// # Partitions
+    ///
+    /// Number of partitions that will be provisioned during cluster bootstrap,
+    /// partitions used to process messages.
+    ///
+    /// NOTE: This config entry only impacts the initial number of partitions.
+    /// Repartitioning is not supported yet
+    ///
+    /// Cannot be higher than `65535` (You should almost never need as many partitions anyway)
+    pub num_partitions: NonZeroU16,
+
+    /// # Default Provider
+    ///
+    /// The default bifrost provider
+    ///
+    /// Default: [`ProviderKind::Replicated`]
+    pub default_provider: ProviderKind,
+
+    /// This implies a _minimum_ nodeset size `N` of `2f+1`. The actual size of the node set is determined by the
+    /// specific strategy in use.
+    ///
+    /// Example:
+    /// A replication factor of F=2 (configured as `{node: 2}`)
+    ///
+    /// ```
+    /// F = f+1 = 2
+    /// then f = 1
+    ///
+    /// ∴ N = 2f+1 => 3
+    /// ```
+    ///
+    /// A replication factor of 1 means we cannot afford losing any nodes and hence the
+    /// _min_ nodeset size is 1.
+    ///
+    /// A replication factor of 3, means f = 3, and hence _min_ nodset size is 5
+    ///
+    /// Default: {node: 1}
+    #[cfg_attr(feature = "schemars", schemars(with = "schemars::Map<String, u8>"))]
+    //todo(azmy): configurable NodeSetSelectionStrategy
+    pub replication_property: ReplicationProperty,
+
+    /// # Nodeset Selection Strategy
+    ///
+    /// Defines the policy for nodes selection to satisfy the configured
+    /// replication_property.
+    ///
+    /// Currently only `strict-fault-tolerant-greedy` strategy is supported
+    ///
+    /// Default: "strict-fault-tolerant-greedy"
+    pub nodeset_selection_strategy: NodeSetSelectionStrategy,
+
+    /// # Replication Strategy
+    ///
+    /// Defines the replication strategy for partition processors
+    ///
+    ///
+    /// Default: "on-all-nodes"
+    pub partition_processor_replication_strategy: ReplicationStrategy,
+}
+
+impl Default for ClusterConfigurationSeed {
+    fn default() -> Self {
+        Self {
+            num_partitions: NonZeroU16::new(24).expect("is valid"),
+            default_provider: ProviderKind::Replicated,
+            replication_property: ReplicationProperty::new(NonZeroU8::new(1).expect("is valid")),
+            nodeset_selection_strategy: NodeSetSelectionStrategy::default(),
+            partition_processor_replication_strategy: ReplicationStrategy::OnAllNodes,
+        }
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, derive_more::Deref)]
+#[serde(rename_all = "kebab-case")]
+pub struct ClusterConfiguration {
+    pub version: Version,
+    #[serde(flatten)]
+    #[deref]
+    pub configuration: ClusterConfigurationSeed,
+}
+
+flexbuffers_storage_encode_decode!(ClusterConfiguration);
+
+impl Versioned for ClusterConfiguration {
+    fn version(&self) -> Version {
+        self.version
     }
 }

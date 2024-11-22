@@ -1,4 +1,4 @@
-// Copyright (c) 2024 -  Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -7,11 +7,16 @@
 // As of the Change Date specified in that file, in accordance with
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
+mod configuration;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
+use configuration::ClusterConfigurationManager;
 use futures::future::OptionFuture;
 use itertools::Itertools;
+use restate_types::cluster_controller::ClusterConfiguration;
 use tokio::sync::watch;
 use tokio::time;
 use tokio::time::{Interval, MissedTickBehavior};
@@ -87,18 +92,19 @@ where
 
         Ok(())
     }
-}
 
-impl<T> ClusterControllerState<T>
-where
-    T: TransportConnect,
-{
-    pub async fn run(&mut self) -> anyhow::Result<()> {
+    pub async fn on_leader_event(&mut self, leader_event: LeaderEvent) -> anyhow::Result<()> {
         match self {
-            Self::Follower => {
-                futures::future::pending::<()>().await;
-                Ok(())
-            }
+            ClusterControllerState::Follower => Ok(()),
+            ClusterControllerState::Leader(leader) => leader.on_leader_event(leader_event).await,
+        }
+    }
+
+    /// Runs the cluster controller state related tasks. It returns [`LeaderEvent`] which need to
+    /// be processed by calling [`Self::on_leader_event`].
+    pub async fn run(&mut self) -> anyhow::Result<LeaderEvent> {
+        match self {
+            Self::Follower => futures::future::pending::<anyhow::Result<_>>().await,
             Self::Leader(leader) => leader.run().await,
         }
     }
@@ -125,6 +131,16 @@ where
     }
 }
 
+/// Events that are emitted by a leading cluster controller that need to be processed explicitly
+/// because their operations are not cancellation safe.
+#[derive(Debug)]
+pub enum LeaderEvent {
+    TrimLogs,
+    LogsUpdate,
+    PartitionTableUpdate,
+    ClusterConfigurationUpdate,
+}
+
 pub struct Leader<T> {
     metadata: Metadata,
     bifrost: Bifrost,
@@ -141,6 +157,11 @@ pub struct Leader<T> {
     cluster_state_watcher: ClusterStateWatcher,
     logs: Live<Logs>,
     log_trim_threshold: Lsn,
+
+    // configuration watcher
+    configuration_refresh_interval: Interval,
+    cluster_configuration_manager: ClusterConfigurationManager,
+    cluster_configuration_watch: watch::Receiver<Option<Arc<ClusterConfiguration>>>,
 }
 
 impl<T> Leader<T>
@@ -149,6 +170,14 @@ where
 {
     async fn from_service(service: &Service<T>) -> anyhow::Result<Leader<T>> {
         let configuration = service.configuration.pinned();
+
+        let mut cluster_configuration_manager = ClusterConfigurationManager::new(
+            service.configuration.clone(),
+            service.metadata_store_client.clone(),
+            service.metadata_writer.clone(),
+        );
+
+        cluster_configuration_manager.initialize().await?;
 
         let scheduler = Scheduler::init(
             &configuration,
@@ -174,6 +203,10 @@ where
             time::interval(configuration.admin.log_tail_update_interval.into());
         find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
+        // todo(azmy): make configurable;
+        let mut configuration_refresh_interval = time::interval(Duration::from_secs(5));
+        configuration_refresh_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         let mut leader = Self {
             metadata: service.metadata.clone(),
             bifrost: service.bifrost.clone(),
@@ -190,6 +223,9 @@ where
             log_trim_threshold,
             logs_controller,
             scheduler,
+            configuration_refresh_interval,
+            cluster_configuration_watch: cluster_configuration_manager.watch(),
+            cluster_configuration_manager,
         };
 
         leader.logs_watcher.mark_changed();
@@ -202,8 +238,13 @@ where
         &mut self,
         observed_cluster_state: &ObservedClusterState,
     ) -> anyhow::Result<()> {
-        let nodes_config = &self.nodes_config.live_load();
+        let Some(cluster_configuration) = self.cluster_configuration_watch.borrow().clone() else {
+            return Ok(());
+        };
+
+        let nodes_config = self.nodes_config.live_load();
         self.logs_controller.on_observed_cluster_state_update(
+            &cluster_configuration,
             nodes_config,
             observed_cluster_state,
             SchedulingPlanNodeSetSelectorHints::from(&self.scheduler),
@@ -224,48 +265,100 @@ where
             create_log_trim_interval(&configuration.admin);
     }
 
-    async fn run(&mut self) -> anyhow::Result<()> {
-        let bifrost_admin = BifrostAdmin::new(
-            &self.bifrost,
-            &self.metadata_writer,
-            &self.metadata_store_client,
-        );
-
+    async fn run(&mut self) -> anyhow::Result<LeaderEvent> {
         loop {
             tokio::select! {
                 _ = self.find_logs_tail_interval.tick() => {
                     self.logs_controller.find_logs_tail();
                 }
                 _ = OptionFuture::from(self.log_trim_interval.as_mut().map(|interval| interval.tick())) => {
-                    let result = self.trim_logs(bifrost_admin).await;
-
-                    if let Err(err) = result {
-                        warn!("Could not trim the logs. This can lead to increased disk usage: {err}");
-                    }
+                    return Ok(LeaderEvent::TrimLogs);
+                }
+                _ = self.configuration_refresh_interval.tick() => {
+                    self.cluster_configuration_manager.schedule_refresh()?;
+                }
+                _ = self.cluster_configuration_watch.changed() => {
+                    debug!("Detected cluster configuration change version");
+                    return Ok(LeaderEvent::ClusterConfigurationUpdate);
                 }
                 result = self.logs_controller.run_async_operations() => {
                     result?;
                 }
                 Ok(_) = self.logs_watcher.changed() => {
-                    self.logs_controller.on_logs_update(self.metadata.logs_ref())?;
-                    // tell the scheduler about potentially newly provisioned logs
-                    self.scheduler.on_logs_update(self.logs.live_load(), self.partition_table.live_load()).await?
+                    return Ok(LeaderEvent::LogsUpdate);
+
                 }
                 Ok(_) = self.partition_table_watcher.changed() => {
-                    let partition_table = self.partition_table.live_load();
-                    let logs = self.logs.live_load();
-
-                    self.logs_controller.on_partition_table_update(partition_table);
-                    self.scheduler.on_logs_update(logs, partition_table).await?;
+                    return Ok(LeaderEvent::PartitionTableUpdate);
                 }
             }
         }
     }
 
-    async fn trim_logs(
-        &self,
-        bifrost_admin: BifrostAdmin<'_>,
-    ) -> Result<(), restate_bifrost::Error> {
+    pub async fn on_leader_event(&mut self, leader_event: LeaderEvent) -> anyhow::Result<()> {
+        match leader_event {
+            LeaderEvent::TrimLogs => {
+                self.trim_logs().await;
+            }
+            LeaderEvent::LogsUpdate => {
+                self.on_logs_update().await?;
+            }
+            LeaderEvent::PartitionTableUpdate => {
+                self.on_partition_table_update().await?;
+            }
+            LeaderEvent::ClusterConfigurationUpdate => {
+                self.on_cluster_configuration_update().await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn on_cluster_configuration_update(&mut self) -> anyhow::Result<()> {
+        // todo(azmy): A proper implementation to reconfigure,
+        // this is a place holder to handle initial configuration setup.
+        self.on_partition_table_update().await
+    }
+
+    async fn on_logs_update(&mut self) -> anyhow::Result<()> {
+        self.logs_controller
+            .on_logs_update(self.metadata.logs_ref())?;
+        // tell the scheduler about potentially newly provisioned logs
+        self.scheduler
+            .on_logs_update(self.logs.live_load(), self.partition_table.live_load())
+            .await?;
+
+        Ok(())
+    }
+
+    async fn on_partition_table_update(&mut self) -> anyhow::Result<()> {
+        let partition_table = self.partition_table.live_load();
+        let logs = self.logs.live_load();
+
+        self.logs_controller.on_partition_table_update(
+            self.cluster_configuration_watch.borrow().clone(),
+            partition_table,
+        );
+        self.scheduler.on_logs_update(logs, partition_table).await?;
+
+        Ok(())
+    }
+
+    async fn trim_logs(&self) {
+        let result = self.trim_logs_inner().await;
+
+        if let Err(err) = result {
+            warn!("Could not trim the logs. This can lead to increased disk usage: {err}");
+        }
+    }
+
+    async fn trim_logs_inner(&self) -> Result<(), restate_bifrost::Error> {
+        let bifrost_admin = BifrostAdmin::new(
+            &self.bifrost,
+            &self.metadata_writer,
+            &self.metadata_store_client,
+        );
+
         let cluster_state = self.cluster_state_watcher.current();
 
         let mut persisted_lsns_per_partition: BTreeMap<
