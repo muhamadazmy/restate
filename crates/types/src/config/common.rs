@@ -623,9 +623,6 @@ mod tests {
     #[test]
     fn roles_compat_test() {
         let opts = CommonOptions::default();
-        // make sure we don't add log-server by default until previous version can parse nodes
-        // configuration with this role.
-        assert!(!opts.roles.contains(Role::LogServer));
         // make sure we don't add ingress by default until previous version can parse nodes
         // configuration with this role.
         assert!(!opts.roles.contains(Role::HttpIngress));
