@@ -11,16 +11,19 @@
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
+use restate_types::cluster_controller::{ClusterConfiguration, ClusterConfigurationSeed};
 use tonic::{async_trait, Request, Response, Status};
 use tracing::info;
 
 use restate_bifrost::{Bifrost, BifrostAdmin, Error as BiforstError};
 use restate_core::MetadataWriter;
-use restate_metadata_store::MetadataStoreClient;
+use restate_metadata_store::{MetadataStoreClient, Precondition};
 use restate_types::identifiers::PartitionId;
 use restate_types::logs::metadata::{Logs, ProviderKind, SegmentIndex};
 use restate_types::logs::{LogId, Lsn, SequenceNumber};
-use restate_types::metadata_store::keys::{BIFROST_CONFIG_KEY, NODES_CONFIG_KEY};
+use restate_types::metadata_store::keys::{
+    BIFROST_CONFIG_KEY, CLUSTER_CONFIG_KEY, NODES_CONFIG_KEY,
+};
 use restate_types::nodes_config::NodesConfiguration;
 use restate_types::storage::{StorageCodec, StorageEncode};
 use restate_types::{Version, Versioned};
@@ -34,6 +37,10 @@ use crate::cluster_controller::protobuf::{
     TrimLogRequest,
 };
 
+use super::protobuf::{
+    GetClusterConfigurationRequest, GetClusterConfigurationResponse,
+    SetClusterConfigurationRequest, SetClusterConfigurationResponse,
+};
 use super::ClusterControllerHandle;
 
 pub(crate) struct ClusterCtrlSvcHandler {
@@ -285,6 +292,61 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
         };
 
         Ok(Response::new(response))
+    }
+
+    async fn get_cluster_configuration(
+        &self,
+        _request: tonic::Request<GetClusterConfigurationRequest>,
+    ) -> Result<Response<GetClusterConfigurationResponse>, Status> {
+        // todo(azmy): cluster configuration manager is buried deep
+        // since it's only usable by a `leader` admin. We still can do direct
+        // config set/get here.
+
+        let config: ClusterConfiguration = self
+            .metadata_store_client
+            .get(CLUSTER_CONFIG_KEY.clone())
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?
+            .ok_or_else(|| Status::not_found("configuration not set"))?;
+
+        let response = GetClusterConfigurationResponse {
+            version: config.version.into(),
+            cluster_configuration: Some(config.configuration.into()),
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn set_cluster_configuration(
+        &self,
+        request: Request<SetClusterConfigurationRequest>,
+    ) -> Result<Response<SetClusterConfigurationResponse>, Status> {
+        let request = request.into_inner();
+
+        let expected_version: Version = request.expected_version.into();
+        let configuration = request
+            .cluster_configuration
+            .ok_or_else(|| Status::invalid_argument("ClusterConfiguration is required fields"))?;
+
+        let configuration = ClusterConfigurationSeed::try_from(configuration)
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+
+        let configuration = ClusterConfiguration {
+            version: expected_version.next(),
+            configuration,
+        };
+        let precondition = if expected_version == Version::INVALID {
+            Precondition::DoesNotExist
+        } else {
+            Precondition::MatchesVersion(expected_version)
+        };
+
+        self.metadata_store_client
+            .put(CLUSTER_CONFIG_KEY.clone(), &configuration, precondition)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        Ok(Response::new(SetClusterConfigurationResponse {}))
     }
 }
 
