@@ -39,7 +39,14 @@ service ClusterCtrlSvc {
 
   rpc SetClusterConfiguration(SetClusterConfigurationRequest)
       returns (SetClusterConfigurationResponse);
+
+  rpc SealAndReconfigureChain(SealAndReconfigureRequest)
+      returns (SealAndReconfigureResponse);
 }
+
+message SealAndReconfigureRequest { uint32 log_id = 1; }
+
+message SealAndReconfigureResponse {}
 
 message SetClusterConfigurationResponse {}
 message SetClusterConfigurationRequest {
