@@ -38,8 +38,8 @@ use crate::cluster_controller::protobuf::{
 };
 
 use super::protobuf::{
-    GetClusterConfigurationRequest, GetClusterConfigurationResponse,
-    SetClusterConfigurationRequest, SetClusterConfigurationResponse,
+    GetClusterConfigurationRequest, GetClusterConfigurationResponse, SealAndReconfigureRequest,
+    SealAndReconfigureResponse, SetClusterConfigurationRequest, SetClusterConfigurationResponse,
 };
 use super::ClusterControllerHandle;
 
@@ -251,6 +251,20 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
                 params: sealed_segment.params.to_string(),
             }),
         }))
+    }
+
+    async fn seal_and_reconfigure_chain(
+        &self,
+        request: Request<SealAndReconfigureRequest>,
+    ) -> Result<Response<SealAndReconfigureResponse>, Status> {
+        let request = request.into_inner();
+        self.controller_handle
+            .force_seal(request.log_id.into())
+            .await
+            .map_err(|_| Status::aborted("Node is shutting down"))?
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        return Ok(Response::new(SealAndReconfigureResponse {}));
     }
 
     async fn find_tail(
