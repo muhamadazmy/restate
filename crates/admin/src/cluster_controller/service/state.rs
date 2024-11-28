@@ -103,6 +103,15 @@ where
         }
     }
 
+    pub fn force_seal_log(&mut self, log_id: LogId) -> anyhow::Result<()> {
+        match self {
+            ClusterControllerState::Follower => {
+                anyhow::bail!("Not an admin leader. Please contact a leader node")
+            }
+            ClusterControllerState::Leader(leader) => leader.force_seal_log(log_id),
+        }
+    }
+
     /// Runs the cluster controller state related tasks. It returns [`LeaderEvent`] which need to
     /// be processed by calling [`Self::on_leader_event`].
     pub async fn run(&mut self) -> anyhow::Result<LeaderEvent> {
@@ -293,6 +302,10 @@ where
                 }
             }
         }
+    }
+
+    pub fn force_seal_log(&mut self, log_id: LogId) -> anyhow::Result<()> {
+        self.logs_controller.force_seal_log(log_id)
     }
 
     pub async fn on_leader_event(&mut self, leader_event: LeaderEvent) -> anyhow::Result<()> {
