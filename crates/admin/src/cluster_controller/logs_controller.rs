@@ -712,6 +712,33 @@ impl LogsControllerInner {
         }
     }
 
+    fn force_seal_log(&mut self, log_id: LogId, effect: &mut Vec<Effect>) -> anyhow::Result<()> {
+        let Some(state) = self.logs_state.get_mut(&log_id) else {
+            anyhow::bail!("No log with log id {log_id}");
+        };
+
+        match state {
+            LogState::Available {
+                configuration,
+                segment_index,
+            } => {
+                effect.push(Effect::Seal {
+                    log_id,
+                    segment_index: *segment_index,
+                    debounce: None,
+                });
+
+                *state = LogState::Sealing {
+                    configuration: configuration.take(),
+                    segment_index: *segment_index,
+                };
+            }
+            LogState::Provisioning { .. } | LogState::Sealing { .. } | LogState::Sealed { .. } => {}
+        }
+
+        Ok(())
+    }
+
     fn provision_logs(
         &mut self,
         cluster_configuration: &ClusterConfiguration,
@@ -1050,6 +1077,14 @@ impl LogsController {
 
     pub fn on_logs_update(&mut self, logs: Pinned<Logs>) -> Result<()> {
         self.inner.on_logs_update(logs)
+    }
+
+    pub fn force_seal_log(&mut self, log_id: LogId) -> anyhow::Result<()> {
+        self.inner
+            .force_seal_log(log_id, self.effects.as_mut().expect("to be present"))?;
+
+        self.apply_effects();
+        Ok(())
     }
 
     fn apply_effects(&mut self) {
