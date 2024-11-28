@@ -16,11 +16,14 @@ use tracing::info;
 
 use restate_bifrost::{Bifrost, BifrostAdmin, Error as BiforstError};
 use restate_core::MetadataWriter;
-use restate_metadata_store::MetadataStoreClient;
+use restate_metadata_store::{MetadataStoreClient, Precondition};
+use restate_types::cluster_controller::{ClusterConfiguration, ClusterConfigurationSeed};
 use restate_types::identifiers::PartitionId;
 use restate_types::logs::metadata::{Logs, ProviderKind, SegmentIndex};
 use restate_types::logs::{LogId, Lsn, SequenceNumber};
-use restate_types::metadata_store::keys::{BIFROST_CONFIG_KEY, NODES_CONFIG_KEY};
+use restate_types::metadata_store::keys::{
+    BIFROST_CONFIG_KEY, CLUSTER_CONFIG_KEY, NODES_CONFIG_KEY,
+};
 use restate_types::nodes_config::NodesConfiguration;
 use restate_types::storage::{StorageCodec, StorageEncode};
 use restate_types::{Version, Versioned};
@@ -34,6 +37,10 @@ use crate::cluster_controller::protobuf::{
     TrimLogRequest,
 };
 
+use super::protobuf::{
+    GetClusterConfigurationRequest, GetClusterConfigurationResponse,
+    SetClusterConfigurationRequest, SetClusterConfigurationResponse,
+};
 use super::ClusterControllerHandle;
 
 pub(crate) struct ClusterCtrlSvcHandler {
@@ -285,6 +292,91 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
         };
 
         Ok(Response::new(response))
+    }
+
+    async fn get_cluster_configuration(
+        &self,
+        _request: tonic::Request<GetClusterConfigurationRequest>,
+    ) -> Result<Response<GetClusterConfigurationResponse>, Status> {
+        // since configuration manager is only available when running
+        // lin leader mode. It's better if we do configuration set/get
+        // here so it can be done over any admin node and not necessary
+        // the leader.
+        //
+        // the leader will detect the change in configuration anyway
+        // when it schedule a refresh
+        let config: ClusterConfiguration = self
+            .metadata_store_client
+            .get(CLUSTER_CONFIG_KEY.clone())
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?
+            .ok_or_else(|| Status::not_found("configuration not set"))?;
+
+        let response = GetClusterConfigurationResponse {
+            version: config.version.into(),
+            cluster_configuration: Some(config.configuration.into()),
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn set_cluster_configuration(
+        &self,
+        request: Request<SetClusterConfigurationRequest>,
+    ) -> Result<Response<SetClusterConfigurationResponse>, Status> {
+        let request = request.into_inner();
+
+        let expected_version: Version = request.expected_version.into();
+        let configuration = request
+            .cluster_configuration
+            .ok_or_else(|| Status::invalid_argument("ClusterConfiguration is required fields"))?;
+
+        let configuration = ClusterConfigurationSeed::try_from(configuration)
+            .map_err(|err| Status::invalid_argument(err.to_string()))?;
+
+        // verify changes. we need to get current config
+        if let Some(current) = self
+            .metadata_store_client
+            .get::<ClusterConfiguration>(CLUSTER_CONFIG_KEY.clone())
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?
+        {
+            // changing number of partitions is not supported at the moment
+            if current.num_partitions != configuration.num_partitions {
+                return Err(Status::invalid_argument(
+                    "Changing number of partitions is not supported at the moment.",
+                ));
+            }
+
+            // change of provider type should not also be supported.
+            // Normally this is because updating from `local` to `replicated`
+            // is not possible atm without introducing too much complexity
+            // it's also not safe to go from replicated to local. hence
+            // it better to prevent changing the provider-kind completely
+            if current.default_provider != configuration.default_provider {
+                return Err(Status::invalid_argument(
+                    "Changing default provider is not supported at the moment.",
+                ));
+            }
+        }
+
+        let configuration = ClusterConfiguration {
+            version: expected_version.next(),
+            configuration,
+        };
+
+        let precondition = if expected_version == Version::INVALID {
+            Precondition::DoesNotExist
+        } else {
+            Precondition::MatchesVersion(expected_version)
+        };
+
+        self.metadata_store_client
+            .put(CLUSTER_CONFIG_KEY.clone(), &configuration, precondition)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        Ok(Response::new(SetClusterConfigurationResponse {}))
     }
 }
 
