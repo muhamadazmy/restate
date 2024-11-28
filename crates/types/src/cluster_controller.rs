@@ -43,6 +43,11 @@ pub enum ReplicationStrategy {
     OnAllNodes,
     /// Schedule this number of partition processor replicas
     Factor(NonZero<u32>),
+    /// A specially strategy that is forced with
+    /// Local and InMemory loglet provider.
+    ///
+    /// The user should never select this himself
+    OnOneNodeNoFollowers,
 }
 
 /// The scheduling plan represents the target state of the cluster. The cluster controller will
@@ -431,6 +436,7 @@ impl From<ReplicationStrategy> for ProtoReplicationStrategy {
                     },
                 )),
             },
+            ReplicationStrategy::OnOneNodeNoFollowers => Self { strategy: None },
         }
     }
 }
