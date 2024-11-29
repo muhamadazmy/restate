@@ -21,7 +21,7 @@ use futures::{stream, FutureExt, StreamExt};
 use metrics::{counter, Counter};
 use restate_bifrost::CommitToken;
 use restate_core::network::Reciprocal;
-use restate_core::{TaskCenter, TaskId};
+use restate_core::{TaskCenter, TaskHandle, TaskId};
 use restate_partition_store::PartitionStore;
 use restate_types::identifiers::{
     InvocationId, LeaderEpoch, PartitionId, PartitionKey, PartitionProcessorRpcRequestId,
@@ -54,7 +54,7 @@ pub struct LeaderState {
     action_effects_counter: Counter,
 
     pub shuffle_hint_tx: HintSender,
-    shuffle_task_id: TaskId,
+    shuffle_task_handle: Option<TaskHandle<anyhow::Result<()>>>,
     pub timer_service: Pin<Box<TimerService>>,
     self_proposer: SelfProposer,
 
@@ -76,7 +76,7 @@ impl LeaderState {
         partition_id: PartitionId,
         leader_epoch: LeaderEpoch,
         own_partition_key: PartitionKey,
-        shuffle_task_id: TaskId,
+        shuffle_task_handle: TaskHandle<anyhow::Result<()>>,
         cleaner_task_id: TaskId,
         shuffle_hint_tx: HintSender,
         timer_service: TimerService,
@@ -89,7 +89,7 @@ impl LeaderState {
             leader_epoch,
             own_partition_key,
             action_effects_counter: counter!(PARTITION_ACTUATOR_HANDLED),
-            shuffle_task_id,
+            shuffle_task_handle: Some(shuffle_task_handle),
             cleaner_task_id,
             shuffle_hint_tx,
             timer_service: Box::pin(timer_service),
@@ -143,7 +143,17 @@ impl LeaderState {
         );
         let mut all_streams = all_streams.ready_chunks(BATCH_READY_UP_TO);
 
+        let shuffle_task_handle = self.shuffle_task_handle.as_mut().expect("is set");
         tokio::select! {
+            // watch the shuffle task in case it crashed
+            result = shuffle_task_handle => {
+                self.shuffle_task_handle.take();
+                match result {
+                    Ok(Ok(_)) => Err(Error::task_terminated_unexpectedly("shuffle")),
+                    Ok(Err(err)) => Err(Error::task_failed("shuffle", err)),
+                    Err(shutdown_error) => Err(Error::Shutdown(shutdown_error))
+                }
+            }
             Some(action_effects) = all_streams.next() => {
                 Ok(action_effects)
             },
@@ -160,8 +170,14 @@ impl LeaderState {
             InvokerStorageReader<PartitionStore>,
         >,
     ) {
-        let shuffle_handle =
-            OptionFuture::from(TaskCenter::current().cancel_task(self.shuffle_task_id));
+        let shuffle_handle = match self.shuffle_task_handle {
+            None => OptionFuture::from(None),
+            Some(shuffle_handle) => {
+                shuffle_handle.cancel();
+                OptionFuture::from(Some(shuffle_handle))
+            }
+        };
+
         let cleaner_handle =
             OptionFuture::from(TaskCenter::current().cancel_task(self.cleaner_task_id));
 
@@ -175,7 +191,7 @@ impl LeaderState {
         );
 
         if let Some(shuffle_result) = shuffle_result {
-            shuffle_result.expect("graceful termination of shuffle task");
+            let _ = shuffle_result.expect("graceful termination of shuffle task");
         }
         if let Some(cleaner_result) = cleaner_result {
             cleaner_result.expect("graceful termination of cleaner task");

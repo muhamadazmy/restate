@@ -66,6 +66,11 @@ pub struct WorkerOptions {
     /// Snapshots provide a mechanism for safely trimming the log and efficient bootstrapping of new
     /// worker nodes.
     pub snapshots: SnapshotsOptions,
+
+    /// # Append retry policy
+    ///
+    /// Retry policy for appending records to virtual log (bifrost)
+    pub append_retry_policy: RetryPolicy,
 }
 
 impl WorkerOptions {
@@ -101,6 +106,7 @@ impl Default for WorkerOptions {
             invoker: Default::default(),
             max_command_batch_size: NonZeroUsize::new(4).expect("Non zero number"),
             snapshots: SnapshotsOptions::default(),
+            append_retry_policy: RetryPolicy::fixed_delay(Duration::from_secs(1), None),
         }
     }
 }
