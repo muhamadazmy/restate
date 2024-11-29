@@ -38,7 +38,7 @@ use restate_core::{
     cancellation_watcher, my_node_id, Metadata, ShutdownError, TaskCenterFutureExt, TaskHandle,
     TaskKind,
 };
-use restate_core::{RuntimeRootTaskHandle, TaskCenter};
+use restate_core::{RuntimeTaskHandle, TaskCenter};
 use restate_invoker_api::StatusHandle;
 use restate_invoker_impl::{BuildError, ChannelStatusReader};
 use restate_metadata_store::{MetadataStoreClient, ReadModifyWriteError};
@@ -214,8 +214,7 @@ impl PartitionProcessorManager {
     }
 
     pub async fn run(mut self) -> anyhow::Result<()> {
-        let shutdown = cancellation_watcher();
-        tokio::pin!(shutdown);
+        let mut shutdown = std::pin::pin!(cancellation_watcher());
 
         let (persisted_lsns_tx, persisted_lsns_rx) = watch::channel(BTreeMap::default());
         self.persisted_lsns_rx = Some(persisted_lsns_rx);
@@ -275,12 +274,41 @@ impl PartitionProcessorManager {
                     }
                 }
                 _ = &mut shutdown => {
-                    self.health_status.update(WorkerStatus::Unknown);
-                    for task in self.snapshot_export_tasks.iter() {
-                        task.cancel();
-                    }
-                    return Ok(());
+                    break
                 }
+            }
+        }
+
+        self.shutdown().await;
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) {
+        debug!("Shutting down partition processor manager.");
+
+        self.health_status.update(WorkerStatus::Unknown);
+
+        for task in self.snapshot_export_tasks.iter() {
+            task.cancel();
+        }
+
+        // stop all running processors
+        for processor_state in self.processor_states.values_mut() {
+            processor_state.stop();
+        }
+
+        // await that all running processors terminate
+        self.await_processors_termination().await;
+    }
+
+    async fn await_processors_termination(&mut self) {
+        while let Some(event) = self.asynchronous_operations.join_next().await {
+            let event = event.expect("asynchronous operations must not panic");
+            self.on_asynchronous_event(event);
+
+            if self.processor_states.is_empty() {
+                // all processors have terminated :-)
+                break;
             }
         }
     }
@@ -456,7 +484,7 @@ impl PartitionProcessorManager {
     fn await_runtime_task_result(
         &mut self,
         partition_id: PartitionId,
-        runtime_task_handle: RuntimeRootTaskHandle<anyhow::Result<()>>,
+        runtime_task_handle: RuntimeTaskHandle<anyhow::Result<()>>,
     ) {
         self.asynchronous_operations.spawn(
             async move {
@@ -626,16 +654,9 @@ impl PartitionProcessorManager {
                     let starting_task = self
                         .start_partition_processor_task(partition_id, partition_key_range.clone());
 
-                    // We spawn the partition processors start tasks on the blocking thread pool due to a macOS issue
-                    // where doing otherwise appears to starve the Tokio event loop, causing very slow startup.
-                    let handle = TaskCenter::spawn_blocking_unmanaged(
-                        "starting-partition-processor",
-                        starting_task.run(),
-                    );
-
                     self.asynchronous_operations.spawn(
                         async move {
-                            let result = handle.await.expect("task must not panic");
+                            let result = starting_task.run();
                             AsynchronousEvent {
                                 partition_id,
                                 inner: EventKind::Started(result),
@@ -827,7 +848,7 @@ impl PartitionProcessorManager {
         let task_name = self
             .name_cache
             .entry(partition_id)
-            .or_insert_with(|| Box::leak(Box::new(format!("pp-{}", partition_id))));
+            .or_insert_with(|| Box::leak(Box::new(format!("pp-{partition_id}"))));
 
         SpawnPartitionProcessorTask::new(
             task_name,
@@ -881,7 +902,7 @@ struct AsynchronousEvent {
 
 #[derive(strum::IntoStaticStr)]
 enum EventKind {
-    Started(anyhow::Result<(StartedProcessor, RuntimeRootTaskHandle<anyhow::Result<()>>)>),
+    Started(anyhow::Result<(StartedProcessor, RuntimeTaskHandle<anyhow::Result<()>>)>),
     Stopped(anyhow::Result<()>),
     NewLeaderEpoch {
         leader_epoch_token: LeaderEpochToken,

@@ -19,7 +19,7 @@ use tracing::instrument;
 use crate::{Metadata, ShutdownError};
 
 use super::{
-    RuntimeError, RuntimeRootTaskHandle, TaskCenterInner, TaskContext, TaskHandle, TaskId, TaskKind,
+    RuntimeError, RuntimeTaskHandle, TaskCenterInner, TaskContext, TaskHandle, TaskId, TaskKind,
 };
 
 #[derive(Clone, derive_more::Debug)]
@@ -83,7 +83,7 @@ impl Handle {
         runtime_name: &'static str,
         partition_id: Option<PartitionId>,
         root_future: impl FnOnce() -> F + Send + 'static,
-    ) -> Result<RuntimeRootTaskHandle<anyhow::Result<()>>, RuntimeError>
+    ) -> Result<RuntimeTaskHandle<anyhow::Result<()>>, RuntimeError>
     where
         F: Future<Output = anyhow::Result<()>> + 'static,
     {
@@ -148,19 +148,6 @@ impl Handle {
 
     pub fn metadata(&self) -> Option<Metadata> {
         self.inner.metadata()
-    }
-
-    /// Spawn a potentially thread-blocking future on a dedicated thread pool
-    pub fn spawn_blocking_unmanaged<F, O>(
-        &self,
-        name: &'static str,
-        future: F,
-    ) -> tokio::task::JoinHandle<O>
-    where
-        F: Future<Output = O> + Send + 'static,
-        O: Send + 'static,
-    {
-        self.inner.spawn_blocking_unmanaged(name, future)
     }
 
     /// Take control over the running task from task-center. This returns None if the task was not

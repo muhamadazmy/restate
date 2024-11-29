@@ -686,7 +686,7 @@ mod tests {
 
         let mut appender = bifrost.create_appender(LOG_ID)?;
         for i in 1..=20 {
-            let lsn = appender.append(format!("record{}", i)).await?;
+            let lsn = appender.append(format!("record{i}")).await?;
             assert_eq!(Lsn::from(i), lsn);
         }
         tokio::time::sleep(interval_duration * 10).await;
@@ -749,7 +749,7 @@ mod tests {
 
         let mut appender = bifrost.create_appender(LOG_ID)?;
         for i in 1..=5 {
-            let lsn = appender.append(format!("record{}", i)).await?;
+            let lsn = appender.append(format!("record{i}")).await?;
             assert_eq!(Lsn::from(i), lsn);
         }
 
