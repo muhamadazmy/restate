@@ -255,17 +255,20 @@ where
 }
 
 mod state_machine {
-    use pin_project::pin_project;
     use std::cmp::Ordering;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::time::Duration;
+
+    use anyhow::Context;
+    use pin_project::pin_project;
     use tokio_util::sync::ReusableBoxFuture;
     use tracing::{debug, trace};
 
     use restate_storage_api::outbox_table::OutboxMessage;
+    use restate_types::config::Configuration;
     use restate_types::message::MessageIndex;
+    use restate_types::retries::{RetryIter, RetryPolicy};
     use restate_wal_protocol::Envelope;
 
     use crate::partition::shuffle;
@@ -285,7 +288,12 @@ mod state_machine {
     enum State<SendFuture> {
         Idle,
         ReadingOutbox,
-        Sending(#[pin] SendFuture, Arc<Envelope>),
+        Sending {
+            #[pin]
+            send_future: SendFuture,
+            envelope: Arc<Envelope>,
+            retry: Option<RetryIter<'static>>,
+        },
     }
 
     #[pin_project]
@@ -296,6 +304,7 @@ mod state_machine {
         read_future: ReadFuture<OutboxReader>,
         send_operation: SendOp,
         hint_rx: &'a mut async_channel::Receiver<NewOutboxMessage>,
+        retry_policy: RetryPolicy,
         #[pin]
         state: State<SendFuture>,
     }
@@ -336,6 +345,7 @@ mod state_machine {
                 read_future: ReusableBoxFuture::new(reading_future),
                 send_operation,
                 hint_rx,
+                retry_policy: Configuration::pinned().worker.append_retry_policy.clone(),
                 state: State::ReadingOutbox,
             }
         }
@@ -344,6 +354,7 @@ mod state_machine {
             self: Pin<&mut Self>,
         ) -> Result<MessageIndex, anyhow::Error> {
             let mut this = self.project();
+
             loop {
                 match this.state.as_mut().project() {
                     StateProj::Idle => {
@@ -365,7 +376,11 @@ mod state_machine {
                                         this.metadata,
                                     ));
                                     let send_future = (this.send_operation)(Arc::clone(&envelope));
-                                    this.state.set(State::Sending(send_future, envelope));
+                                    this.state.set(State::Sending {
+                                        send_future,
+                                        envelope,
+                                        retry: Some(this.retry_policy.clone().into_iter()),
+                                    });
                                     break;
                                 }
                                 Ordering::Greater => {
@@ -404,20 +419,41 @@ mod state_machine {
                             ));
                             let send_future = (this.send_operation)(Arc::clone(&envelope));
 
-                            this.state.set(State::Sending(send_future, envelope));
+                            this.state.set(State::Sending {
+                                send_future,
+                                envelope,
+                                retry: Some(this.retry_policy.clone().into_iter()),
+                            });
                         } else {
                             this.state.set(State::Idle);
                         }
                     }
-                    StateProj::Sending(send_future, envelope) => {
+                    StateProj::Sending {
+                        send_future,
+                        envelope,
+                        retry,
+                    } => {
                         if let Err(err) = send_future.await {
                             debug!("Retrying failed shuffle attempt: {err}");
 
                             let send_future = (this.send_operation)(Arc::clone(envelope));
                             let envelope = Arc::clone(envelope);
-                            this.state.set(State::Sending(send_future, envelope));
+                            let mut retry = retry.take().expect("retry policy is set");
 
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            match retry.next() {
+                                Some(delay) => {
+                                    this.state.set(State::Sending {
+                                        send_future,
+                                        envelope,
+                                        retry: Some(retry),
+                                    });
+
+                                    tokio::time::sleep(delay).await;
+                                }
+                                None => {
+                                    return Err(err).context("Maximum number of retries exhausted");
+                                }
+                            }
                         } else {
                             let successfully_shuffled_sequence_number =
                                 *this.current_sequence_number;
