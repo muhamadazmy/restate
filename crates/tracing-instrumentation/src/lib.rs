@@ -279,7 +279,10 @@ pub fn init_tracing_and_logging(
             .clone()
             .expect("falls back to default value")
         {
-            BindAddress::Uds(p) => console_subscriber::ServerAddr::Unix(p),
+            BindAddress::Uds(uds_path) => {
+                _ = std::fs::remove_file(&uds_path);
+                console_subscriber::ServerAddr::Unix(uds_path)
+            }
             BindAddress::Socket(s) => console_subscriber::ServerAddr::Tcp(s),
         };
 
