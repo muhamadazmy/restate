@@ -45,15 +45,20 @@ restate-wal-protocol = { workspace = true }
 anyhow = { workspace = true }
 assert2 = { workspace = true }
 async-channel = { workspace = true }
+async-trait = { workspace = true }
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
 codederror = { workspace = true }
 derive_builder = { workspace = true }
 derive_more = { workspace = true }
 futures = { workspace = true }
+enumset = { workspace = true }
 humantime = { workspace = true }
 itertools = { workspace = true }
 metrics = { workspace = true }
+object_store = { workspace = true }
 opentelemetry = { workspace = true }
 parking_lot = { workspace = true }
 pin-project = { workspace = true }
@@ -63,13 +68,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true }
 strum = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["io-util"] }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 ulid = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 restate-bifrost = { workspace = true, features = ["test-util"] }
@@ -80,10 +87,11 @@ restate-service-protocol = { workspace = true, features = ["test-util"] }
 restate-storage-api = { workspace = true, features = ["test-util"] }
 restate-test-util = { workspace = true, features = ["prost"] }
 restate-types = { workspace = true, features = ["test-util"] }
-prost = { workspace = true }
 
-rstest = { workspace = true }
 googletest = { workspace = true }
+prost = { workspace = true }
+rocksdb = { workspace = true }
+rstest = { workspace = true }
 tempfile = { workspace = true }
 test-log = { workspace = true }
 tracing-subscriber = { workspace = true }

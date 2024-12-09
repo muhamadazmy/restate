@@ -8,18 +8,18 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::warn;
 
-use restate_serde_util::NonZeroByteCount;
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
+use tracing::warn;
 
 use super::{CommonOptions, RocksDbOptions, RocksDbOptionsBuilder};
 use crate::identifiers::PartitionId;
 use crate::retries::RetryPolicy;
+use restate_serde_util::NonZeroByteCount;
 
 /// # Worker options
 #[serde_as]
@@ -50,6 +50,9 @@ pub struct WorkerOptions {
 
     #[cfg_attr(feature = "schemars", schemars(skip))]
     experimental_feature_disable_idempotency_table: bool,
+
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    experimental_feature_invocation_status_killed: bool,
 
     pub storage: StorageOptions,
 
@@ -88,6 +91,10 @@ impl WorkerOptions {
     pub fn experimental_feature_disable_idempotency_table(&self) -> bool {
         self.experimental_feature_disable_idempotency_table
     }
+
+    pub fn experimental_feature_invocation_status_killed(&self) -> bool {
+        self.experimental_feature_invocation_status_killed
+    }
 }
 
 impl Default for WorkerOptions {
@@ -97,6 +104,7 @@ impl Default for WorkerOptions {
             num_timers_in_memory_limit: None,
             cleanup_interval: Duration::from_secs(60 * 60).into(),
             experimental_feature_disable_idempotency_table: false,
+            experimental_feature_invocation_status_killed: false,
             storage: StorageOptions::default(),
             invoker: Default::default(),
             max_command_batch_size: NonZeroUsize::new(4).expect("Non zero number"),
@@ -359,6 +367,17 @@ impl Default for StorageOptions {
 #[serde(rename_all = "kebab-case")]
 #[builder(default)]
 pub struct SnapshotsOptions {
+    /// # Destination
+    ///
+    /// Where snapshots are moved after they get created. This property support URLs with either
+    /// `s3://` or `file://` protocol scheme. The URL is parsed with
+    ///
+    /// Example: `s3://snapshots-bucket/restate/cluster` will send snapshots to the specified
+    /// bucket, prefixing keys with the URL path.
+    ///
+    /// Default: `None`
+    pub destination: Option<String>,
+
     /// # Automatic snapshot creation frequency
     ///
     /// Number of log records that trigger a snapshot to be created.

@@ -1,4 +1,4 @@
-// Copyright (c) 2023 - 2025 Restate Software, Inc., Restate GmbH.
+// Copyright (c) 2024 - 2025 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
 // Use of this software is governed by the Business Source License
@@ -8,8 +8,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-mod etcd;
-mod objstore;
+mod repository;
+mod snapshot_task;
 
-pub use etcd::EtcdMetadataStore;
-pub use objstore::create_object_store_based_meta_store;
+pub use repository::SnapshotRepository;
+pub use snapshot_task::*;

@@ -119,6 +119,7 @@ message InvocationStatusV2 {
     INBOXED = 2;
     INVOKED = 3;
     SUSPENDED = 4;
+    KILLED = 6;
     COMPLETED = 5;
   }
 
@@ -158,6 +159,12 @@ message InvocationStatusV2 {
 
   // Completed
   ResponseResult result = 18;
+}
+
+// Slimmer version of InvocationStatusV2
+message InvocationV2Lite {
+  InvocationStatusV2.Status status = 1;
+  InvocationTarget invocation_target = 2;
 }
 
 // TODO remove this after 1.1
