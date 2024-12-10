@@ -9,6 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use futures::future::OptionFuture;
 use itertools::Itertools;
@@ -138,7 +139,6 @@ pub enum LeaderEvent {
 }
 
 pub struct Leader<T> {
-    metadata: Metadata,
     bifrost: Bifrost,
     metadata_store_client: MetadataStoreClient,
     metadata_writer: MetadataWriter,
@@ -162,8 +162,6 @@ where
     async fn from_service(service: &Service<T>) -> anyhow::Result<Leader<T>> {
         let configuration = service.configuration.pinned();
 
-        let metadata = Metadata::current();
-
         let scheduler = Scheduler::init(
             &configuration,
             service.metadata_store_client.clone(),
@@ -173,7 +171,6 @@ where
 
         let logs_controller = LogsController::init(
             &configuration,
-            metadata.clone(),
             service.bifrost.clone(),
             service.metadata_store_client.clone(),
             service.metadata_writer.clone(),
@@ -187,8 +184,12 @@ where
             time::interval(configuration.admin.log_tail_update_interval.into());
         find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
+        // todo(azmy): make configurable;
+        let mut configuration_refresh_interval = time::interval(Duration::from_secs(5));
+        configuration_refresh_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        let metadata = Metadata::current();
         let mut leader = Self {
-            metadata: metadata.clone(),
             bifrost: service.bifrost.clone(),
             metadata_store_client: service.metadata_store_client.clone(),
             metadata_writer: service.metadata_writer.clone(),
@@ -215,15 +216,17 @@ where
         &mut self,
         observed_cluster_state: &ObservedClusterState,
     ) -> anyhow::Result<()> {
-        let nodes_config = &self.nodes_config.live_load();
+        let nodes_config = self.nodes_config.live_load();
         self.logs_controller.on_observed_cluster_state_update(
             nodes_config,
             observed_cluster_state,
             SchedulingPlanNodeSetSelectorHints::from(&self.scheduler),
         )?;
+
         self.scheduler
             .on_observed_cluster_state(
                 observed_cluster_state,
+                Metadata::with_current(|m| m.partition_table_ref()).replication_strategy(),
                 nodes_config,
                 LogsBasedPartitionProcessorPlacementHints::from(&self.logs_controller),
             )
@@ -278,8 +281,8 @@ where
 
     async fn on_logs_update(&mut self) -> anyhow::Result<()> {
         self.logs_controller
-            .on_logs_update(self.metadata.logs_ref())?;
-        // tell the scheduler about potentially newly provisioned logs
+            .on_logs_update(Metadata::with_current(|m| m.logs_ref()))?;
+
         self.scheduler
             .on_logs_update(self.logs.live_load(), self.partition_table.live_load())
             .await?;
@@ -289,11 +292,14 @@ where
 
     async fn on_partition_table_update(&mut self) -> anyhow::Result<()> {
         let partition_table = self.partition_table.live_load();
-        let logs = self.logs.live_load();
 
         self.logs_controller
             .on_partition_table_update(partition_table);
-        self.scheduler.on_logs_update(logs, partition_table).await?;
+
+        // tell the scheduler about potentially newly provisioned logs
+        self.scheduler
+            .on_logs_update(self.logs.live_load(), self.partition_table.live_load())
+            .await?;
 
         Ok(())
     }
