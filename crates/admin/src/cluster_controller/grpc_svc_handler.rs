@@ -220,7 +220,27 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
         );
 
         let request = request.into_inner();
-        let kind: ProviderKind = request
+        let extension = match request.extension {
+            Some(extension) => extension,
+            None => {
+                match self
+                    .controller_handle
+                    .force_seal(request.log_id.into())
+                    .await
+                    .map_err(|_| Status::aborted("node is shutting down"))?
+                {
+                    Ok(_) => {
+                        return Ok(Response::new(SealAndExtendChainResponse {
+                            new_segment_index: 0,
+                            sealed_segment: None,
+                        }))
+                    }
+                    Err(err) => return Err(Status::internal(err.to_string())),
+                }
+            }
+        };
+
+        let kind: ProviderKind = extension
             .provider
             .parse()
             .map_err(|_| Status::invalid_argument("Provider type is not supported"))?;
@@ -228,13 +248,13 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
         let sealed_segment = admin
             .seal_and_extend_chain(
                 request.log_id.into(),
-                request.segment_index.map(SegmentIndex::from),
-                request
+                extension.segment_index.map(SegmentIndex::from),
+                extension
                     .min_version
                     .map(Version::from)
                     .unwrap_or_else(|| Version::MIN),
                 kind,
-                request.params.into(),
+                extension.params.into(),
             )
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
