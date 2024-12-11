@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 
 use futures::future::OptionFuture;
 use itertools::Itertools;
+use restate_metadata_store::ReadError;
+use restate_types::cluster_controller::SchedulingPlan;
+use restate_types::metadata_store::keys::SCHEDULING_PLAN_KEY;
 use tokio::sync::watch;
 use tokio::time;
 use tokio::time::{Interval, MissedTickBehavior};
@@ -39,7 +42,7 @@ use crate::cluster_controller::scheduler::{Scheduler, SchedulingPlanNodeSetSelec
 use crate::cluster_controller::service::Service;
 
 pub enum ClusterControllerState<T> {
-    Follower,
+    Follower(Follower),
     Leader(Leader<T>),
 }
 
@@ -47,6 +50,10 @@ impl<T> ClusterControllerState<T>
 where
     T: TransportConnect,
 {
+    pub async fn follower(service: &Service<T>) -> anyhow::Result<Self> {
+        Ok(Self::Follower(Follower::from_service(service).await?))
+    }
+
     pub async fn update(&mut self, service: &Service<T>) -> anyhow::Result<()> {
         let maybe_leader = {
             let nodes_config = Metadata::with_current(|m| m.nodes_config_ref());
@@ -72,34 +79,48 @@ where
 
         match (is_leader, &self) {
             (true, ClusterControllerState::Leader(_))
-            | (false, ClusterControllerState::Follower) => {
+            | (false, ClusterControllerState::Follower(_)) => {
                 // nothing to do
             }
-            (true, ClusterControllerState::Follower) => {
+            (true, ClusterControllerState::Follower(_)) => {
                 info!("Cluster controller switching to leader mode");
                 *self = ClusterControllerState::Leader(Leader::from_service(service).await?);
             }
             (false, ClusterControllerState::Leader(_)) => {
                 info!("Cluster controller switching to follower mode");
-                *self = ClusterControllerState::Follower;
+                *self = ClusterControllerState::Follower(Follower::from_service(service).await?);
             }
         };
 
         Ok(())
     }
 
-    pub async fn on_leader_event(&mut self, leader_event: LeaderEvent) -> anyhow::Result<()> {
+    pub async fn on_controller_event(
+        &mut self,
+        controller_event: ControllerEvent,
+    ) -> anyhow::Result<()> {
         match self {
-            ClusterControllerState::Follower => Ok(()),
-            ClusterControllerState::Leader(leader) => leader.on_leader_event(leader_event).await,
+            ClusterControllerState::Follower(follower) => {
+                follower.on_controller_event(controller_event).await
+            }
+            ClusterControllerState::Leader(leader) => {
+                leader.on_controller_event(controller_event).await
+            }
+        }
+    }
+
+    pub fn force_seal_log(&mut self, log_id: LogId) -> anyhow::Result<()> {
+        match self {
+            ClusterControllerState::Follower(follower) => follower.force_seal_log(log_id),
+            ClusterControllerState::Leader(leader) => leader.force_seal_log(log_id),
         }
     }
 
     /// Runs the cluster controller state related tasks. It returns [`LeaderEvent`] which need to
     /// be processed by calling [`Self::on_leader_event`].
-    pub async fn run(&mut self) -> anyhow::Result<LeaderEvent> {
+    pub async fn run(&mut self) -> anyhow::Result<ControllerEvent> {
         match self {
-            Self::Follower => futures::future::pending::<anyhow::Result<_>>().await,
+            Self::Follower(follower) => follower.run().await,
             Self::Leader(leader) => leader.run().await,
         }
     }
@@ -109,7 +130,11 @@ where
         observed_cluster_state: &ObservedClusterState,
     ) -> anyhow::Result<()> {
         match self {
-            Self::Follower => Ok(()),
+            Self::Follower(follower) => {
+                follower
+                    .on_observed_cluster_state(observed_cluster_state)
+                    .await
+            }
             Self::Leader(leader) => {
                 leader
                     .on_observed_cluster_state(observed_cluster_state)
@@ -120,16 +145,109 @@ where
 
     pub fn reconfigure(&mut self, configuration: &Configuration) {
         match self {
-            Self::Follower => {}
+            Self::Follower(_) => {}
             Self::Leader(leader) => leader.reconfigure(configuration),
         }
+    }
+}
+
+/// The leader cluster controller state only watches log changes
+/// and initiate a log seal/reconfigure when a loglet is forced to seal  
+pub struct Follower {
+    metadata_store_client: MetadataStoreClient,
+    logs_controller: LogsController,
+    logs_watcher: watch::Receiver<Version>,
+}
+
+impl Follower {
+    async fn from_service<T>(service: &Service<T>) -> anyhow::Result<Follower> {
+        let configuration = service.configuration.pinned();
+
+        let logs_controller = LogsController::init(
+            &configuration,
+            service.bifrost.clone(),
+            service.metadata_store_client.clone(),
+            service.metadata_writer.clone(),
+        )
+        .await?;
+
+        let metadata = Metadata::current();
+        let mut follower = Self {
+            metadata_store_client: service.metadata_store_client.clone(),
+            logs_watcher: metadata.watch(MetadataKind::Logs),
+            logs_controller,
+        };
+
+        follower.logs_watcher.mark_changed();
+
+        Ok(follower)
+    }
+
+    async fn run(&mut self) -> anyhow::Result<ControllerEvent> {
+        loop {
+            tokio::select! {
+                result = self.logs_controller.run_async_operations() => {
+                    result?;
+                }
+                Ok(_) = self.logs_watcher.changed() => {
+                    return Ok(ControllerEvent::LogsUpdate);
+                }
+            }
+        }
+    }
+
+    async fn on_controller_event(&mut self, leader_event: ControllerEvent) -> anyhow::Result<()> {
+        match leader_event {
+            ControllerEvent::LogsUpdate => {
+                self.on_logs_update().await?;
+            }
+            ControllerEvent::TrimLogs => {}
+            ControllerEvent::PartitionTableUpdate => {}
+        }
+
+        Ok(())
+    }
+
+    async fn on_logs_update(&mut self) -> anyhow::Result<()> {
+        self.logs_controller
+            .on_logs_update(Metadata::with_current(|m| m.logs_ref()))?;
+
+        Ok(())
+    }
+
+    async fn on_observed_cluster_state(
+        &mut self,
+        observed_cluster_state: &ObservedClusterState,
+    ) -> anyhow::Result<()> {
+        let nodes_config = Metadata::with_current(|m| m.nodes_config_ref());
+
+        let scheduling_plan = self.fetch_scheduling_plan().await?;
+
+        self.logs_controller.on_observed_cluster_state_update(
+            false,
+            &nodes_config,
+            observed_cluster_state,
+            SchedulingPlanNodeSetSelectorHints::from(scheduling_plan.as_ref()),
+        )?;
+
+        Ok(())
+    }
+
+    async fn fetch_scheduling_plan(&self) -> Result<Option<SchedulingPlan>, ReadError> {
+        self.metadata_store_client
+            .get(SCHEDULING_PLAN_KEY.clone())
+            .await
+    }
+
+    fn force_seal_log(&mut self, log_id: LogId) -> anyhow::Result<()> {
+        self.logs_controller.force_seal_log(log_id)
     }
 }
 
 /// Events that are emitted by a leading cluster controller that need to be processed explicitly
 /// because their operations are not cancellation safe.
 #[derive(Debug)]
-pub enum LeaderEvent {
+pub enum ControllerEvent {
     TrimLogs,
     LogsUpdate,
     PartitionTableUpdate,
@@ -207,6 +325,7 @@ where
     ) -> anyhow::Result<()> {
         let nodes_config = Metadata::with_current(|m| m.nodes_config_ref());
         self.logs_controller.on_observed_cluster_state_update(
+            true,
             &nodes_config,
             observed_cluster_state,
             SchedulingPlanNodeSetSelectorHints::from(&self.scheduler),
@@ -229,38 +348,42 @@ where
             create_log_trim_interval(&configuration.admin);
     }
 
-    async fn run(&mut self) -> anyhow::Result<LeaderEvent> {
+    async fn run(&mut self) -> anyhow::Result<ControllerEvent> {
         loop {
             tokio::select! {
                 _ = self.find_logs_tail_interval.tick() => {
                     self.logs_controller.find_logs_tail();
                 }
                 _ = OptionFuture::from(self.log_trim_interval.as_mut().map(|interval| interval.tick())) => {
-                    return Ok(LeaderEvent::TrimLogs);
+                    return Ok(ControllerEvent::TrimLogs);
                 }
                 result = self.logs_controller.run_async_operations() => {
                     result?;
                 }
                 Ok(_) = self.logs_watcher.changed() => {
-                    return Ok(LeaderEvent::LogsUpdate);
+                    return Ok(ControllerEvent::LogsUpdate);
 
                 }
                 Ok(_) = self.partition_table_watcher.changed() => {
-                    return Ok(LeaderEvent::PartitionTableUpdate);
+                    return Ok(ControllerEvent::PartitionTableUpdate);
                 }
             }
         }
     }
 
-    pub async fn on_leader_event(&mut self, leader_event: LeaderEvent) -> anyhow::Result<()> {
+    fn force_seal_log(&mut self, log_id: LogId) -> anyhow::Result<()> {
+        self.logs_controller.force_seal_log(log_id)
+    }
+
+    async fn on_controller_event(&mut self, leader_event: ControllerEvent) -> anyhow::Result<()> {
         match leader_event {
-            LeaderEvent::TrimLogs => {
+            ControllerEvent::TrimLogs => {
                 self.trim_logs().await;
             }
-            LeaderEvent::LogsUpdate => {
+            ControllerEvent::LogsUpdate => {
                 self.on_logs_update().await?;
             }
-            LeaderEvent::PartitionTableUpdate => {
+            ControllerEvent::PartitionTableUpdate => {
                 self.on_partition_table_update().await?;
             }
         }
