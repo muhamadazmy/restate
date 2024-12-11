@@ -111,11 +111,13 @@ async fn reconfigure(connection: &ConnectionInfo, opts: &ReconfigureOpts) -> any
         .await?
         .into_inner();
 
-    c_println!("✅ Log reconfiguration");
-    c_println!(" └ Segment Index: {}", response.new_segment_index);
     let Some(sealed_segment) = response.sealed_segment else {
+        c_println!("✅ Log scheduled for reconfiguration");
         return Ok(());
     };
+
+    c_println!("✅ Log reconfiguration");
+    c_println!(" └ Segment Index: {}", response.new_segment_index);
 
     c_println!();
     c_println!("Sealed segment");
