@@ -990,7 +990,7 @@ checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
 name = "bifrost-benchpress"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1002,7 +1002,6 @@ dependencies = [
  "hdrhistogram",
  "metrics",
  "metrics-exporter-prometheus",
- "once_cell",
  "quanta",
  "restate-bifrost",
  "restate-core",
@@ -1020,7 +1019,7 @@ dependencies = [
  "static_assertions",
  "strum",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tikv-jemallocator",
  "tokio",
  "tokio-stream",
@@ -1544,10 +1543,10 @@ dependencies = [
 
 [[package]]
 name = "codederror"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "codederror-derive",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
 ]
 
 [[package]]
@@ -2867,6 +2866,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foldhash"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f81ec6369c545a7d40e4589b5597581fa1c441fe1cce96dd1de43159910a36a2"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3132,6 +3137,9 @@ name = "hashbrown"
 version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
+dependencies = [
+ "foldhash",
+]
 
 [[package]]
 name = "hdrhistogram"
@@ -3666,9 +3674,9 @@ checksum = "c8fae54786f62fb2918dcfae3d568594e50eb9b5c25bf04371af6fe7516452fb"
 
 [[package]]
 name = "inotify"
-version = "0.9.6"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8069d3ec154eb856955c1c0fbffefbf5f3c40a104ec912d4797314c1801abff"
+checksum = "fdd168d97690d0b8c412d6b6c10360277f4d7ee495c5d0d5d5fe0854923255cc"
 dependencies = [
  "bitflags 1.3.2",
  "inotify-sys",
@@ -4187,9 +4195,9 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.23.0"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "884adb57038347dfbaf2d5065887b6cf4312330dc8e94bc30a1a839bd79d3261"
+checksum = "7a7deb012b3b2767169ff203fadb4c6b0b82b947512e5eb9e0b78c2e186ad9e3"
 dependencies = [
  "ahash 0.8.11",
  "portable-atomic",
@@ -4197,9 +4205,9 @@ dependencies = [
 
 [[package]]
 name = "metrics-exporter-prometheus"
-version = "0.15.3"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4f0c8427b39666bf970460908b213ec09b3b350f20c0c2eabcbba51704a08e6"
+checksum = "85b6f8152da6d7892ff1b7a1c0fa3f435e92b5918ad67035c3bb432111d9a29b"
 dependencies = [
  "base64 0.22.1",
  "hyper-util",
@@ -4213,9 +4221,9 @@ dependencies = [
 
 [[package]]
 name = "metrics-tracing-context"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62a6a1f7141f1d9bc7a886b87536bbfc97752e08b369e1e0453a9acfab5f5da4"
+checksum = "f1ada651cd6bdffe01e5f35067df53491f1fe853d2b154008ca2bd30b3d3fcf6"
 dependencies = [
  "indexmap 2.7.0",
  "itoa",
@@ -4230,17 +4238,16 @@ dependencies = [
 
 [[package]]
 name = "metrics-util"
-version = "0.17.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4259040465c955f9f2f1a4a8a16dc46726169bca0f88e8fb2dbeced487c3e828"
+checksum = "15b482df36c13dd1869d73d14d28cd4855fbd6cfc32294bee109908a9f4a4ed7"
 dependencies = [
  "aho-corasick",
  "crossbeam-epoch",
  "crossbeam-utils",
- "hashbrown 0.14.5",
+ "hashbrown 0.15.2",
  "indexmap 2.7.0",
  "metrics",
- "num_cpus",
  "ordered-float",
  "quanta",
  "radix_trie",
@@ -4353,7 +4360,7 @@ dependencies = [
 
 [[package]]
 name = "mock-service-endpoint"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "assert2",
  "async-stream",
@@ -4368,7 +4375,7 @@ dependencies = [
  "restate-types",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -4472,32 +4479,42 @@ dependencies = [
 
 [[package]]
 name = "notify"
-version = "6.1.1"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6205bd8bb1e454ad2e27422015fb5e4f2bcc7e08fa8f27058670d208324a4d2d"
+checksum = "c533b4c39709f9ba5005d8002048266593c1cfaf3c5f0739d5b8ab0c6c504009"
 dependencies = [
  "bitflags 2.6.0",
- "crossbeam-channel",
  "filetime",
  "fsevent-sys",
  "inotify",
  "kqueue",
  "libc",
  "log",
- "mio 0.8.11",
+ "mio 1.0.3",
+ "notify-types",
  "walkdir",
- "windows-sys 0.48.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
 name = "notify-debouncer-mini"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d40b221972a1fc5ef4d858a2f671fb34c75983eb385463dff3780eeff6a9d43"
+checksum = "aaa5a66d07ed97dce782be94dcf5ab4d1b457f4243f7566c7557f15cabc8c799"
 dependencies = [
- "crossbeam-channel",
  "log",
  "notify",
+ "notify-types",
+ "tempfile",
+]
+
+[[package]]
+name = "notify-types"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7393c226621f817964ffb3dc5704f9509e107a8b024b489cc2c1b217378785df"
+dependencies = [
+ "instant",
 ]
 
 [[package]]
@@ -4508,6 +4525,15 @@ checksum = "77a8165726e8236064dbb45459242600304b42a5ea24ee2948e18e023bf7ba84"
 dependencies = [
  "overload",
  "winapi",
+]
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4a28e057d01f97e61255210fcff094d74ed0466038633e95017f5beb68e4399"
+dependencies = [
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5927,7 +5953,7 @@ dependencies = [
 
 [[package]]
 name = "restate-admin"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5976,7 +6002,7 @@ dependencies = [
  "serde_with",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -5989,7 +6015,7 @@ dependencies = [
 
 [[package]]
 name = "restate-admin-rest-model"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "bytes",
  "derive_more",
@@ -6007,14 +6033,14 @@ dependencies = [
 
 [[package]]
 name = "restate-base64-util"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "base64 0.22.1",
 ]
 
 [[package]]
 name = "restate-benchmarks"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6040,7 +6066,7 @@ dependencies = [
 
 [[package]]
 name = "restate-bifrost"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6071,7 +6097,7 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -6083,7 +6109,7 @@ dependencies = [
 
 [[package]]
 name = "restate-cli"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6134,7 +6160,7 @@ dependencies = [
  "sync_wrapper 1.0.2",
  "tempfile",
  "termcolor",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-util",
  "toml",
@@ -6150,7 +6176,7 @@ dependencies = [
 
 [[package]]
 name = "restate-cli-util"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6173,7 +6199,7 @@ dependencies = [
 
 [[package]]
 name = "restate-core"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6200,7 +6226,6 @@ dependencies = [
  "hyper-util",
  "metrics",
  "object_store",
- "once_cell",
  "opentelemetry",
  "parking_lot",
  "pin-project-lite",
@@ -6216,7 +6241,7 @@ dependencies = [
  "static_assertions",
  "strum",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -6243,20 +6268,20 @@ dependencies = [
 
 [[package]]
 name = "restate-errors"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "codederror",
  "paste",
  "termimad",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "restate-fs-util"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "tokio",
  "tracing",
@@ -6265,14 +6290,14 @@ dependencies = [
 
 [[package]]
 name = "restate-futures-util"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "futures",
  "pin-project",
  "restate-test-util",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -6280,7 +6305,7 @@ dependencies = [
 
 [[package]]
 name = "restate-ingress-http"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "assert2",
@@ -6313,7 +6338,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
@@ -6327,7 +6352,7 @@ dependencies = [
 
 [[package]]
 name = "restate-ingress-kafka"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6347,7 +6372,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
@@ -6355,7 +6380,7 @@ dependencies = [
 
 [[package]]
 name = "restate-invoker-api"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6365,13 +6390,13 @@ dependencies = [
  "restate-errors",
  "restate-types",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
 ]
 
 [[package]]
 name = "restate-invoker-impl"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6404,7 +6429,7 @@ dependencies = [
  "serde_with",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -6414,7 +6439,7 @@ dependencies = [
 
 [[package]]
 name = "restate-local-cluster-runner"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "arc-swap",
  "clap",
@@ -6434,7 +6459,7 @@ dependencies = [
  "serde",
  "tempfile",
  "test_bin",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "toml",
  "tracing",
@@ -6444,7 +6469,7 @@ dependencies = [
 
 [[package]]
 name = "restate-log-server"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6475,7 +6500,7 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -6489,7 +6514,7 @@ dependencies = [
 
 [[package]]
 name = "restate-metadata-store"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "assert2",
@@ -6516,7 +6541,7 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -6532,7 +6557,7 @@ dependencies = [
 
 [[package]]
 name = "restate-node"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6556,7 +6581,6 @@ dependencies = [
  "metrics-exporter-prometheus",
  "metrics-tracing-context",
  "metrics-util",
- "once_cell",
  "prost-types",
  "restate-admin",
  "restate-bifrost",
@@ -6581,7 +6605,7 @@ dependencies = [
  "serde_with",
  "strum",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -6595,7 +6619,7 @@ dependencies = [
 
 [[package]]
 name = "restate-partition-store"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6610,7 +6634,6 @@ dependencies = [
  "googletest",
  "humantime",
  "num-bigint",
- "once_cell",
  "paste",
  "prost",
  "rand",
@@ -6629,7 +6652,7 @@ dependencies = [
  "strum",
  "sync_wrapper 1.0.2",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -6637,7 +6660,7 @@ dependencies = [
 
 [[package]]
 name = "restate-queue"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "bincode",
  "criterion",
@@ -6650,7 +6673,7 @@ dependencies = [
 
 [[package]]
 name = "restate-rocksdb"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6661,7 +6684,6 @@ dependencies = [
  "futures",
  "futures-util",
  "metrics",
- "once_cell",
  "parking_lot",
  "restate-core",
  "restate-errors",
@@ -6672,7 +6694,7 @@ dependencies = [
  "smartstring",
  "static_assertions",
  "strum",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "threadpool",
  "tokio",
  "tracing",
@@ -6680,7 +6702,7 @@ dependencies = [
 
 [[package]]
 name = "restate-serde-util"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "bytes",
  "bytesize",
@@ -6697,7 +6719,7 @@ dependencies = [
 
 [[package]]
 name = "restate-server"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6731,7 +6753,7 @@ dependencies = [
  "serde_with",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
@@ -6744,7 +6766,7 @@ dependencies = [
 
 [[package]]
 name = "restate-service-client"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "arc-swap",
  "aws-config",
@@ -6770,7 +6792,7 @@ dependencies = [
  "hyper-rustls 0.27.3",
  "hyper-util",
  "jsonwebtoken",
- "once_cell",
+ "parking_lot",
  "pem",
  "pin-project-lite",
  "restate-types",
@@ -6781,7 +6803,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tower 0.4.13",
  "tower-service",
  "tracing",
@@ -6789,7 +6811,7 @@ dependencies = [
 
 [[package]]
 name = "restate-service-protocol"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -6799,7 +6821,6 @@ dependencies = [
  "http 1.2.0",
  "http-body-util",
  "itertools 0.13.0",
- "once_cell",
  "paste",
  "prost",
  "regress 0.10.1",
@@ -6812,7 +6833,7 @@ dependencies = [
  "serde_json",
  "size",
  "strum",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -6821,7 +6842,7 @@ dependencies = [
 
 [[package]]
 name = "restate-storage-api"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6835,12 +6856,12 @@ dependencies = [
  "restate-types",
  "serde",
  "strum",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
 ]
 
 [[package]]
 name = "restate-storage-query-datafusion"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "ahash 0.8.11",
  "anyhow",
@@ -6866,7 +6887,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -6874,7 +6895,7 @@ dependencies = [
 
 [[package]]
 name = "restate-storage-query-postgres"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6896,7 +6917,7 @@ dependencies = [
  "restate-types",
  "schemars",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tracing",
  "uuid",
@@ -6904,7 +6925,7 @@ dependencies = [
 
 [[package]]
 name = "restate-test-util"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "assert2",
  "googletest",
@@ -6915,7 +6936,7 @@ dependencies = [
 
 [[package]]
 name = "restate-timer"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "ahash 0.8.11",
  "derive_builder",
@@ -6927,7 +6948,7 @@ dependencies = [
  "schemars",
  "serde",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -6937,7 +6958,7 @@ dependencies = [
 
 [[package]]
 name = "restate-timer-queue"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "futures",
  "tokio",
@@ -6945,15 +6966,14 @@ dependencies = [
 
 [[package]]
 name = "restate-tracing-instrumentation"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "arc-swap",
  "console-subscriber",
  "derive_builder",
  "futures",
  "metrics-tracing-context",
- "nu-ansi-term",
- "once_cell",
+ "nu-ansi-term 0.50.1",
  "opentelemetry",
  "opentelemetry-contrib",
  "opentelemetry-otlp",
@@ -6962,17 +6982,19 @@ dependencies = [
  "restate-types",
  "schemars",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tonic",
  "tracing",
+ "tracing-appender",
+ "tracing-core",
  "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "restate-types"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7002,8 +7024,8 @@ dependencies = [
  "notify",
  "notify-debouncer-mini",
  "num-traits",
- "once_cell",
  "opentelemetry",
+ "parking_lot",
  "paste",
  "prettyplease",
  "prost",
@@ -7031,7 +7053,7 @@ dependencies = [
  "sync_wrapper 1.0.2",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tiny-gradient",
  "tokio",
  "toml",
@@ -7044,7 +7066,7 @@ dependencies = [
 
 [[package]]
 name = "restate-utoipa"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "assert-json-diff",
  "indexmap 2.7.0",
@@ -7055,7 +7077,7 @@ dependencies = [
 
 [[package]]
 name = "restate-wal-protocol"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "assert2",
@@ -7068,7 +7090,6 @@ dependencies = [
  "enum-map",
  "flexbuffers",
  "googletest",
- "once_cell",
  "restate-bifrost",
  "restate-core",
  "restate-invoker-api",
@@ -7080,7 +7101,7 @@ dependencies = [
  "serde_json",
  "static_assertions",
  "strum",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -7088,7 +7109,7 @@ dependencies = [
 
 [[package]]
 name = "restate-web-ui"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "include_dir",
  "zip 2.2.1",
@@ -7096,7 +7117,7 @@ dependencies = [
 
 [[package]]
 name = "restate-worker"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "assert2",
@@ -7151,7 +7172,7 @@ dependencies = [
  "strum",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -7164,7 +7185,7 @@ dependencies = [
 
 [[package]]
 name = "restatectl"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7198,7 +7219,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
  "tokio",
  "tokio-stream",
  "toml",
@@ -7748,13 +7769,13 @@ dependencies = [
 
 [[package]]
 name = "service-protocol-wireshark-dissector"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "bytes",
  "mlua",
  "restate-service-protocol",
  "restate-types",
- "thiserror 1.0.69",
+ "thiserror 2.0.6",
 ]
 
 [[package]]
@@ -7869,9 +7890,9 @@ checksum = "9fed904c7fb2856d868b92464fc8fa597fce366edea1a9cbfaa8cb5fe080bd6d"
 
 [[package]]
 name = "sketches-ddsketch"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85636c14b73d81f541e525f585c0a2109e6744e1565b5c1668e31c70c10ed65c"
+checksum = "c1e9a774a6c28142ac54bb25d25562e6bcf957493a184f15ad4eebccb23e410a"
 
 [[package]]
 name = "slab"
@@ -8709,6 +8730,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-appender"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3566e8ce28cc0a3fe42519fc80e6b4c943cc4c8cef275620eb8dac2d3d4e06cf"
+dependencies = [
+ "crossbeam-channel",
+ "thiserror 1.0.69",
+ "time",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing-attributes"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8785,7 +8818,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8189decb5ac0fa7bc8b96b7cb9b2701d60d48805aca84a238004d665fcc4008"
 dependencies = [
  "matchers",
- "nu-ansi-term",
+ "nu-ansi-term 0.46.0",
  "once_cell",
  "parking_lot",
  "regex",
@@ -9503,7 +9536,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xtask"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "reqwest",
