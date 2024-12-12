@@ -41,7 +41,7 @@ fn cluster_config_string(config: ClusterConfiguration) -> anyhow::Result<String>
     let strategy: ReplicationStrategy =
         config.replication_strategy.unwrap_or_default().try_into()?;
 
-    write_leaf(&mut w, 1, false, "Replication strategy", strategy)?;
+    write_leaf(&mut w, 1, false, "Bifrost replication strategy", strategy)?;
 
     let provider: DefaultProvider = config.default_provider.unwrap_or_default().try_into()?;
     write_default_provider(&mut w, 1, provider)?;
