@@ -45,10 +45,10 @@ pub struct ConfigSetOpts {
 
     /// Default provider kind
     #[clap(long)]
-    provider: Option<ProviderKind>,
+    bifrost_provider: Option<ProviderKind>,
 
     /// Replication property
-    #[clap(long, required_if_eq("provider", "replicated"))]
+    #[clap(long, required_if_eq("bifrost_provider", "replicated"))]
     replication_property: Option<ReplicationProperty>,
 
     /// Node set selection strategy
@@ -86,7 +86,7 @@ async fn config_set(connection: &ConnectionInfo, set_opts: &ConfigSetOpts) -> an
         current.replication_strategy = Some(replication_strategy.into());
     }
 
-    if let Some(provider) = set_opts.provider {
+    if let Some(provider) = set_opts.bifrost_provider {
         let default_provider = match provider {
             ProviderKind::InMemory => DefaultProvider::InMemory,
             ProviderKind::Local => DefaultProvider::Local,
