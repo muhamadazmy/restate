@@ -9,6 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use std::collections::{hash_map, BTreeMap, HashMap, HashSet};
+use std::fmt::Display;
 use std::num::NonZeroU8;
 use std::str::FromStr;
 
@@ -127,9 +128,7 @@ impl LookupIndex {
 /// this nodeset during periods of individual node downtime.
 ///
 /// Finally, nodeset selection is orthogonal to log sequencer placement.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Copy, Default, serde::Serialize, serde::Deserialize, strum::Display,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
@@ -149,6 +148,25 @@ pub enum NodeSetSelectionStrategy {
     /// For an `F=3` (and hence `f=2`), then `2f+1` => 5 nodes
     #[default]
     StrictFaultTolerantGreedy,
+}
+
+impl Display for NodeSetSelectionStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StrictFaultTolerantGreedy => write!(f, "strict-fault-tolerant-greedy"),
+        }
+    }
+}
+
+impl FromStr for NodeSetSelectionStrategy {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "strict-fault-tolerant-greedy" => Ok(Self::StrictFaultTolerantGreedy),
+            _ => Err("Unknown node set selection strategy"),
+        }
+    }
 }
 
 impl From<NodeSetSelectionStrategy> for ProtoNodeSetSelectionStrategy {
