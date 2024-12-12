@@ -651,6 +651,7 @@ impl LogsControllerInner {
 
     fn on_observed_cluster_state_update(
         &mut self,
+        leader: bool,
         nodes_config: &NodesConfiguration,
         observed_cluster_state: &ObservedClusterState,
         effects: &mut Vec<Effect>,
@@ -661,14 +662,18 @@ impl LogsControllerInner {
             return Ok(());
         }
 
-        self.seal_logs(nodes_config, observed_cluster_state, effects);
-
         let mut builder = self.current_logs.deref().clone().into_builder();
-        self.provision_logs(
-            observed_cluster_state,
-            &mut builder,
-            &node_set_selector_hints,
-        )?;
+
+        if leader {
+            self.seal_logs(nodes_config, observed_cluster_state, effects);
+
+            self.provision_logs(
+                observed_cluster_state,
+                &mut builder,
+                &node_set_selector_hints,
+            )?;
+        }
+
         self.reconfigure_logs(
             observed_cluster_state,
             &mut builder,
@@ -714,6 +719,33 @@ impl LogsControllerInner {
                 })
             }
         }
+    }
+
+    fn seal_log(&mut self, log_id: LogId, effect: &mut Vec<Effect>) -> anyhow::Result<()> {
+        let Some(state) = self.logs_state.get_mut(&log_id) else {
+            anyhow::bail!("No log with log id {log_id}");
+        };
+
+        match state {
+            LogState::Available {
+                configuration,
+                segment_index,
+            } => {
+                effect.push(Effect::Seal {
+                    log_id,
+                    segment_index: *segment_index,
+                    debounce: None,
+                });
+
+                *state = LogState::Sealing {
+                    configuration: configuration.take(),
+                    segment_index: *segment_index,
+                };
+            }
+            LogState::Provisioning { .. } | LogState::Sealing { .. } | LogState::Sealed { .. } => {}
+        }
+
+        Ok(())
     }
 
     fn provision_logs(
@@ -1035,11 +1067,13 @@ impl LogsController {
 
     pub fn on_observed_cluster_state_update(
         &mut self,
+        leader: bool,
         nodes_config: &NodesConfiguration,
         observed_cluster_state: &ObservedClusterState,
         node_set_selector_hints: impl NodeSetSelectorHints,
     ) -> Result<(), anyhow::Error> {
         self.inner.on_observed_cluster_state_update(
+            leader,
             nodes_config,
             observed_cluster_state,
             self.effects.as_mut().expect("to be present"),
@@ -1056,6 +1090,14 @@ impl LogsController {
 
     pub fn on_logs_update(&mut self, logs: Pinned<Logs>) -> Result<()> {
         self.inner.on_logs_update(logs)
+    }
+
+    pub fn schedule_seal_log(&mut self, log_id: LogId) -> anyhow::Result<()> {
+        self.inner
+            .seal_log(log_id, self.effects.as_mut().expect("to be present"))?;
+
+        self.apply_effects();
+        Ok(())
     }
 
     fn apply_effects(&mut self) {

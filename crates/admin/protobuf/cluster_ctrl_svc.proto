@@ -98,8 +98,7 @@ message CreatePartitionSnapshotRequest { uint32 partition_id = 1; }
 
 message CreatePartitionSnapshotResponse { string snapshot_id = 1; }
 
-message SealAndExtendChainRequest {
-  uint32 log_id = 1;
+message ChainExtension {
   // segment_index will be automatically selected (to the index of last segment)
   // if not set.
   optional uint32 segment_index = 2;
@@ -107,6 +106,11 @@ message SealAndExtendChainRequest {
   // check `ProviderKind` for possible values.
   string provider = 4;
   string params = 5;
+}
+
+message SealAndExtendChainRequest {
+  uint32 log_id = 1;
+  optional ChainExtension extension = 2;
 }
 
 message SealedSegment {

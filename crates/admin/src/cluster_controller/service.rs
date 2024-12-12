@@ -157,6 +157,10 @@ enum ClusterControllerCommand {
         partition_id: PartitionId,
         response_tx: oneshot::Sender<anyhow::Result<SnapshotId>>,
     },
+    ScheduleSeal {
+        log_id: LogId,
+        response_tx: oneshot::Sender<anyhow::Result<()>>,
+    },
     UpdateClusterConfiguration {
         num_partitions: u16,
         replication_strategy: ReplicationStrategy,
@@ -185,35 +189,49 @@ impl ClusterControllerHandle {
         log_id: LogId,
         trim_point: Lsn,
     ) -> Result<Result<(), anyhow::Error>, ShutdownError> {
-        let (tx, rx) = oneshot::channel();
+        let (response_tx, response_rx) = oneshot::channel();
 
         let _ = self
             .tx
             .send(ClusterControllerCommand::TrimLog {
                 log_id,
                 trim_point,
-                response_tx: tx,
+                response_tx,
             })
             .await;
 
-        rx.await.map_err(|_| ShutdownError)
+        response_rx.await.map_err(|_| ShutdownError)
     }
 
     pub async fn create_partition_snapshot(
         &self,
         partition_id: PartitionId,
     ) -> Result<Result<SnapshotId, anyhow::Error>, ShutdownError> {
-        let (tx, rx) = oneshot::channel();
+        let (response_tx, response_rx) = oneshot::channel();
 
         let _ = self
             .tx
             .send(ClusterControllerCommand::CreateSnapshot {
                 partition_id,
-                response_tx: tx,
+                response_tx,
             })
             .await;
 
-        rx.await.map_err(|_| ShutdownError)
+        response_rx.await.map_err(|_| ShutdownError)
+    }
+
+    pub async fn schedule_seal(&self, log_id: LogId) -> Result<anyhow::Result<()>, ShutdownError> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let _ = self
+            .tx
+            .send(ClusterControllerCommand::ScheduleSeal {
+                log_id,
+                response_tx,
+            })
+            .await;
+
+        response_rx.await.map_err(|_| ShutdownError)
     }
 
     pub async fn update_cluster_configuration(
@@ -265,7 +283,7 @@ impl<T: TransportConnect> Service<T> {
             &self.metadata_store_client,
         );
 
-        let mut state: ClusterControllerState<T> = ClusterControllerState::Follower;
+        let mut state: ClusterControllerState<T> = ClusterControllerState::follower(&self).await?;
 
         self.health_status.update(AdminStatus::Ready);
 
@@ -283,7 +301,7 @@ impl<T: TransportConnect> Service<T> {
                 }
                 Some(cmd) = self.command_rx.recv() => {
                     // it is still safe to handle cluster commands as a follower
-                    self.on_cluster_cmd(cmd, bifrost_admin).await;
+                    self.on_cluster_cmd(&mut state, cmd, bifrost_admin).await;
                 }
                 _ = config_watcher.changed() => {
                     debug!("Updating the cluster controller settings.");
@@ -292,8 +310,8 @@ impl<T: TransportConnect> Service<T> {
                     state.reconfigure(configuration);
                 }
                 result = state.run() => {
-                    let leader_event = result?;
-                    state.on_leader_event(leader_event).await?;
+                    let controller_event = result?;
+                    state.on_controller_event(controller_event).await?;
                 }
                 _ = &mut shutdown => {
                     self.health_status.update(AdminStatus::Unknown);
@@ -498,6 +516,7 @@ impl<T: TransportConnect> Service<T> {
 
     async fn on_cluster_cmd(
         &self,
+        state: &mut ClusterControllerState<T>,
         command: ClusterControllerCommand,
         bifrost_admin: BifrostAdmin<'_>,
     ) {
@@ -524,6 +543,14 @@ impl<T: TransportConnect> Service<T> {
                 info!(?partition_id, "Create snapshot command received");
                 self.create_partition_snapshot(partition_id, response_tx)
                     .await;
+            }
+            ClusterControllerCommand::ScheduleSeal {
+                log_id,
+                response_tx,
+            } => {
+                info!(%log_id, "Forcing seal of loglet");
+                let result = state.schedule_seal(log_id);
+                let _ = response_tx.send(result);
             }
             ClusterControllerCommand::UpdateClusterConfiguration {
                 num_partitions,
