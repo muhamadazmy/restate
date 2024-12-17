@@ -30,7 +30,6 @@ use crate::providers::replicated_loglet::tasks::{
 };
 
 use super::error::ReplicatedLogletError;
-use super::log_server_manager::RemoteLogServerManager;
 use super::metric_definitions::{BIFROST_RECORDS_ENQUEUED_BYTES, BIFROST_RECORDS_ENQUEUED_TOTAL};
 use super::read_path::{ReadStreamTask, ReplicatedLogletReadStream};
 use super::remote_sequencer::RemoteSequencer;
@@ -72,9 +71,6 @@ impl<T: TransportConnect> ReplicatedLoglet<T> {
         record_cache: RecordCache,
     ) -> Self {
         let known_global_tail = TailOffsetWatch::new(TailState::Open(LogletOffset::OLDEST));
-        let log_server_manager =
-            RemoteLogServerManager::new(my_params.loglet_id, &my_params.nodeset);
-
         let sequencer = if networking.my_node_id() == my_params.sequencer {
             debug!(
                 loglet_id = %my_params.loglet_id,
@@ -90,7 +86,6 @@ impl<T: TransportConnect> ReplicatedLoglet<T> {
                     selector_strategy,
                     networking.clone(),
                     logservers_rpc.store.clone(),
-                    log_server_manager.clone(),
                     record_cache.clone(),
                     known_global_tail.clone(),
                 ),
@@ -375,6 +370,8 @@ mod tests {
         set_current_config(config.clone());
         let config = Live::from_value(config);
 
+        RocksDbManager::init(config.clone().map(|c| &c.common));
+
         let mut node_env =
             TestCoreEnvBuilder::with_incoming_only_connector().add_mock_nodes_config();
         let mut server_builder = NetworkServerBuilder::default();
@@ -389,15 +386,14 @@ mod tests {
             node_env.metadata_store_client.clone(),
             record_cache.clone(),
             &mut node_env.router_builder,
+            &mut server_builder,
         )
         .await?;
 
         let node_env = node_env.build().await;
 
-        RocksDbManager::init(config.clone().map(|c| &c.common));
-
         log_server
-            .start(node_env.metadata_writer.clone(), &mut server_builder)
+            .start(node_env.metadata_writer.clone())
             .await
             .into_test_result()?;
 
