@@ -9,6 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use prost_dto::IntoProto;
@@ -58,7 +59,6 @@ impl ClusterState {
         })
     }
 
-    #[cfg(any(test, feature = "test-util"))]
     pub fn empty() -> Self {
         ClusterState {
             last_refreshed: None,
@@ -110,7 +110,7 @@ pub struct SuspectNode {
 }
 
 #[derive(
-    Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, IntoProto, derive_more::Display,
+    Debug, Clone, Copy, Serialize, Deserialize, Hash, Eq, PartialEq, IntoProto, derive_more::Display,
 )]
 #[proto(target = "crate::protobuf::cluster::RunMode")]
 pub enum RunMode {
@@ -118,7 +118,7 @@ pub enum RunMode {
     Follower,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, IntoProto)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, IntoProto)]
 #[proto(target = "crate::protobuf::cluster::ReplayStatus")]
 pub enum ReplayStatus {
     Starting,
@@ -126,7 +126,7 @@ pub enum ReplayStatus {
     CatchingUp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, IntoProto)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, IntoProto)]
 #[proto(target = "crate::protobuf::cluster::PartitionProcessorStatus")]
 pub struct PartitionProcessorStatus {
     #[proto(required)]
@@ -161,6 +161,32 @@ impl Default for PartitionProcessorStatus {
             last_archived_log_lsn: None,
             target_tail_lsn: None,
         }
+    }
+}
+
+impl Hash for PartitionProcessorStatus {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.planned_mode.hash(state);
+        self.effective_mode.hash(state);
+        if let Some(ref epoch) = self.last_observed_leader_epoch {
+            epoch.hash(state);
+        }
+        if let Some(ref leader_node) = self.last_observed_leader_node {
+            leader_node.hash(state);
+        }
+        self.replay_status.hash(state);
+        // NOTE:
+        // we intentionally ignoring fields like
+        // - updated_at
+        // - last_applied_log_lsn
+        // - last_record_applied_at
+        // - num_skipped_records
+        // - last_persisted_log_lsn
+        // - target_tail_lsn
+        //
+        // because we are only interested
+        // in attributes that describe the structure
+        // of the cluster state and partition processors
     }
 }
 
