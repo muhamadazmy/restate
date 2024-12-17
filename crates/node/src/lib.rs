@@ -282,6 +282,7 @@ impl Node {
                     worker_role
                         .as_ref()
                         .map(|worker_role| worker_role.storage_query_context().clone()),
+                    base_role.cluster_state_watch(),
                 )
                 .await?,
             )
