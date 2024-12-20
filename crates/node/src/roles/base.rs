@@ -17,11 +17,11 @@ use restate_core::{
     worker_api::ProcessorsManagerHandle,
     ShutdownError, TaskCenter, TaskKind,
 };
-use restate_types::net::node::{GetNodeState, NodeStateResponse};
+use restate_types::net::node::{GetPartitionProcessorsState, PartitionProcessorsStateResponse};
 
 pub struct BaseRole {
     processor_manager_handle: Option<ProcessorsManagerHandle>,
-    incoming_node_state: MessageStream<GetNodeState>,
+    incoming_node_state: MessageStream<GetPartitionProcessorsState>,
 }
 
 impl BaseRole {
@@ -58,15 +58,15 @@ impl BaseRole {
     async fn run(mut self) -> anyhow::Result<()> {
         while let Some(request) = self.incoming_node_state.next().await {
             // handle request
-            self.handle_get_node_state(request).await?;
+            self.handle_get_partition_processors_state(request).await?;
         }
 
         Ok(())
     }
 
-    async fn handle_get_node_state(
+    async fn handle_get_partition_processors_state(
         &self,
-        msg: Incoming<GetNodeState>,
+        msg: Incoming<GetPartitionProcessorsState>,
     ) -> Result<(), ShutdownError> {
         let partition_state = if let Some(ref handle) = self.processor_manager_handle {
             Some(handle.get_state().await?)
@@ -76,7 +76,7 @@ impl BaseRole {
 
         // only return error if Shutdown
         if let Err(NetworkError::Shutdown(err)) = msg
-            .to_rpc_response(NodeStateResponse {
+            .to_rpc_response(PartitionProcessorsStateResponse {
                 partition_processor_state: partition_state,
             })
             .try_send()
