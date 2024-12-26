@@ -17,9 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use super::TargetName;
 use crate::logs::metadata::SegmentIndex;
-use crate::logs::{LogId, LogletOffset, Record, SequenceNumber, TailState};
+use crate::logs::{LogId, LogletId, LogletOffset, Record, SequenceNumber, TailState};
 use crate::net::define_rpc;
-use crate::replicated_loglet::ReplicatedLogletId;
 
 // ----- ReplicatedLoglet Sequencer API -----
 define_rpc! {
@@ -66,7 +65,7 @@ pub struct CommonRequestHeader {
     pub log_id: LogId,
     pub segment_index: SegmentIndex,
     /// The loglet_id id globally unique
-    pub loglet_id: ReplicatedLogletId,
+    pub loglet_id: LogletId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +96,6 @@ impl CommonResponseHeader {
 // ** APPEND
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Append {
-    #[serde(flatten)]
     pub header: CommonRequestHeader,
     pub payloads: Arc<[Record]>,
 }
@@ -113,7 +111,6 @@ impl Append {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Appended {
-    #[serde(flatten)]
     pub header: CommonResponseHeader,
     // INVALID if Status indicates that the append failed
     pub last_offset: LogletOffset,
@@ -157,7 +154,6 @@ impl Appended {
 // ** GET_TAIL_INFO
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetSequencerState {
-    #[serde(flatten)]
     pub header: CommonRequestHeader,
 }
 
