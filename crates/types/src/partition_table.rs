@@ -401,6 +401,7 @@ impl From<PartitionTable> for PartitionTableBuilder {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PartitionTableShadow {
     version: Version,
+    nodes_version: Option<Version>,
     // only needed for deserializing the FixedPartitionTable created in v1 of Restate. Can be
     // removed once we no longer support reading FixedPartitionTable data.
     num_partitions: u16,
@@ -416,6 +417,7 @@ impl From<PartitionTable> for PartitionTableShadow {
         let num_partitions = value.num_partitions();
         Self {
             version: value.version,
+            nodes_version: Some(value.nodes_version),
             num_partitions,
             partitions: Some(value.partitions),
             replication_strategy: Some(value.replication_strategy),
@@ -441,6 +443,7 @@ impl TryFrom<PartitionTableShadow> for PartitionTable {
                 builder.with_equally_sized_partitions(value.num_partitions)?;
             }
         }
+        builder.inner.nodes_version = value.nodes_version.unwrap_or(Version::INVALID);
 
         Ok(builder.build_with_same_version())
     }
