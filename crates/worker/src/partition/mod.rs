@@ -59,6 +59,7 @@ use restate_types::net::partition_processor::{
     InvocationOutput, PartitionProcessorRpcError, PartitionProcessorRpcRequest,
     PartitionProcessorRpcRequestInner, PartitionProcessorRpcResponse,
 };
+use restate_types::partition_processor::{PartitionProcessorStatus, ReplayStatus, RunMode};
 use restate_types::storage::StorageDecodeError;
 use restate_types::time::MillisSinceEpoch;
 use restate_wal_protocol::control::AnnounceLeader;
