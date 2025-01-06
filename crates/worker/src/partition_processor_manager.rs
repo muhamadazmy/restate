@@ -12,6 +12,7 @@ mod message_handler;
 mod persisted_lsn_watchdog;
 mod processor_state;
 mod spawn_processor_task;
+mod update_placement_task;
 
 use restate_types::identifiers::SnapshotId;
 use std::collections::hash_map::Entry;
@@ -19,6 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::{Add, RangeInclusive};
 use std::sync::Arc;
 use std::time::Duration;
+use update_placement_task::UpdatePlacementTask;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::gauge;
@@ -233,6 +235,7 @@ impl PartitionProcessorManager {
 
         let mut logs_version_watcher = metadata.watch(MetadataKind::Logs);
         let mut partition_table_version_watcher = metadata.watch(MetadataKind::PartitionTable);
+        let mut nodes_config_version_watcher = metadata.watch(MetadataKind::NodesConfiguration);
 
         let mut latest_snapshot_check_interval = tokio::time::interval(Duration::from_secs(5));
         latest_snapshot_check_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -250,17 +253,23 @@ impl PartitionProcessorManager {
                     self.pending_control_processors = Some(control_processors.into_body());
                     self.on_control_processors();
                 }
+                _ = nodes_config_version_watcher.changed() => {
+                    self.update_partitions_placements().await?;
+                }
                 _ = logs_version_watcher.changed(), if self.pending_control_processors.is_some() => {
                     // logs version has changed. and we have a control_processors message
                     // waiting for processing. We can check now if logs version matches
                     // and if we can apply this now.
                     self.on_control_processors();
                 }
-                _ = partition_table_version_watcher.changed(), if self.pending_control_processors.is_some() => {
+                _ = partition_table_version_watcher.changed() => {
+                    self.update_partitions_placements().await?;
                     // partition table version has changed. and we have a control_processors message
                     // waiting for processing. We can check now if logs version matches
                     // and if we can apply this now.
-                    self.on_control_processors();
+                    if self.pending_control_processors.is_some(){
+                        self.on_control_processors();
+                    }
                 }
                 Some(event) = self.asynchronous_operations.join_next() => {
                     self.on_asynchronous_event(event.expect("asynchronous operations must not panic"));
@@ -283,6 +292,12 @@ impl PartitionProcessorManager {
 
         self.shutdown().await;
         Ok(())
+    }
+
+    async fn update_partitions_placements(&self) -> anyhow::Result<()> {
+        let update_placement_task = UpdatePlacementTask::new(self.metadata_store_client.clone());
+        // todo: run in the background
+        update_placement_task.run().await
     }
 
     async fn shutdown(&mut self) {
