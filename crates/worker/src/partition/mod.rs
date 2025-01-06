@@ -40,7 +40,6 @@ use restate_storage_api::service_status_table::{
     ReadOnlyVirtualObjectStatusTable, VirtualObjectStatus,
 };
 use restate_storage_api::{StorageError, Transaction};
-use restate_types::cluster::cluster_state::{PartitionProcessorStatus, ReplayStatus, RunMode};
 use restate_types::config::WorkerOptions;
 use restate_types::errors::KILLED_INVOCATION_ERROR;
 use restate_types::identifiers::{
