@@ -8,11 +8,11 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::sync::Arc;
-
+use anyhow::bail;
 use enum_map::Enum;
 use prost_dto::{FromProto, IntoProto};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use strum::EnumIter;
 
 use crate::logs::metadata::Logs;
@@ -65,12 +65,31 @@ define_message! {
     IntoProto,
     FromProto,
 )]
-#[proto(target = "crate::protobuf::node::MetadataKind")]
+#[proto(target = "crate::protobuf::common::MetadataKind")]
 pub enum MetadataKind {
     NodesConfiguration,
     Schema,
     PartitionTable,
     Logs,
+}
+
+// todo remove once prost_dto supports TryFromProto
+impl TryFrom<crate::protobuf::common::MetadataKind> for MetadataKind {
+    type Error = anyhow::Error;
+
+    fn try_from(value: crate::protobuf::common::MetadataKind) -> Result<Self, Self::Error> {
+        match value {
+            crate::protobuf::common::MetadataKind::Unknown => bail!("unknown metadata kind"),
+            crate::protobuf::common::MetadataKind::NodesConfiguration => {
+                Ok(MetadataKind::NodesConfiguration)
+            }
+            crate::protobuf::common::MetadataKind::Schema => Ok(MetadataKind::Schema),
+            crate::protobuf::common::MetadataKind::PartitionTable => {
+                Ok(MetadataKind::PartitionTable)
+            }
+            crate::protobuf::common::MetadataKind::Logs => Ok(MetadataKind::Logs),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, derive_more::From)]
