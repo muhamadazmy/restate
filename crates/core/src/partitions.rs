@@ -162,6 +162,9 @@ impl PartitionRoutingRefresher {
             tokio::select! {
                 _ = &mut cancel => {
                     debug!("Routing information refresher stopped");
+                    if let Some(task) = self.inflight_refresh_task.take() {
+                        task.abort();
+                    }
                     break;
                 }
                 Some(cmd) = self.receiver.recv() => {
