@@ -9,8 +9,10 @@
 // by the Apache License, Version 2.0.
 
 use rand::seq::IteratorRandom;
+use restate_metadata_store::ReadModifyWriteError;
+use restate_types::cluster::cluster_state::ReplayStatus;
 use restate_types::live::Pinned;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::debug;
 use xxhash_rust::xxh3::Xxh3Builder;
@@ -152,7 +154,7 @@ impl<T: TransportConnect> Scheduler<T> {
                 &placement_hints,
             );
 
-            self.ensure_leadership(partition_id, &mut target_state, &placement_hints);
+            // self.ensure_leadership(partition_id, &mut target_state, &placement_hints);
         });
 
         if let Some(partition_table) = builder.build_if_modified() {
@@ -350,6 +352,7 @@ impl<T: TransportConnect> Scheduler<T> {
         }
     }
 
+    #[allow(dead_code)]
     fn ensure_leadership<H: PartitionProcessorPlacementHints>(
         &self,
         partition_id: &PartitionId,
@@ -443,7 +446,7 @@ impl<T: TransportConnect> Scheduler<T> {
         for (node_id, run_mode) in partition.placement.iter() {
             if !observed_state
                 .remove(node_id)
-                .is_some_and(|observed_run_mode| observed_run_mode == run_mode)
+                .is_some_and(|partition_state| partition_state.run_mode == run_mode)
             {
                 commands
                     .entry(*node_id)
@@ -466,6 +469,140 @@ impl<T: TransportConnect> Scheduler<T> {
                 });
         }
     }
+
+    /// A best effort rebalance of partitions. If some worker
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn rebalance_partitions(
+        &mut self,
+        observed_cluster_state: &ObservedClusterState,
+    ) -> Result<(), Error> {
+        // tries to balance load across workers nodes.
+        let result = self
+            .metadata_writer
+            .metadata_store_client()
+            .read_modify_write(PARTITION_TABLE_KEY.clone(), |current| {
+                let current = current.ok_or(RebalanceError::Unmodified)?;
+                debug!("Trying to rebalance partition processors");
+                self.rebalance_partition_table(
+                    current,
+                    &Metadata::with_current(|m| m.nodes_config_ref()),
+                    observed_cluster_state,
+                )
+                .ok_or(RebalanceError::Unmodified)
+            })
+            .await;
+
+        let partition_table = match result {
+            Ok(partition_table) => partition_table,
+            Err(ReadModifyWriteError::FailedOperation(RebalanceError::Unmodified)) => return Ok(()),
+            Err(ReadModifyWriteError::ReadWrite(err)) => return Err(err.into()),
+        };
+
+        debug!("New rebalanced partition: {:?}", partition_table);
+        self.metadata_writer
+            .update(Arc::new(partition_table))
+            .await?;
+
+        self.instruct_nodes(observed_cluster_state)
+    }
+
+    fn rebalance_partition_table(
+        &self,
+        partition_table: PartitionTable,
+        nodes_config: &NodesConfiguration,
+        observed_cluster_state: &ObservedClusterState,
+    ) -> Option<PartitionTable> {
+        let alive_workers: HashSet<_> = observed_cluster_state
+            .alive_nodes
+            .keys()
+            .cloned()
+            .filter(|node_id| nodes_config.has_worker_role(node_id))
+            .collect();
+
+        let partition_per_node = partition_table.num_partitions() as usize / alive_workers.len();
+        let max_partition_per_node =
+            partition_per_node + partition_table.num_partitions() as usize % alive_workers.len();
+
+        let mut loads = HashMap::new();
+
+        let mut rebalance_needed = false;
+        for (_, partition) in partition_table.partitions() {
+            if let Some(leader) = partition.placement.leader() {
+                let count = loads.entry(*leader).or_insert(0usize);
+                *count += 1;
+
+                if *count > max_partition_per_node {
+                    rebalance_needed = true;
+                }
+            }
+        }
+
+        if !rebalance_needed {
+            return None;
+        }
+
+        let mut builder = partition_table.into_builder();
+
+        builder.for_each(|partition_id, placement| {
+            let Some(leader) = placement.leader() else {
+                // this can only happen if this function was called
+                // before scheduler has never been called to setup the initial
+                // plan. In that case no rebalance is needed
+                return;
+            };
+
+            let leader_load = *loads.get(leader).expect("has load");
+            if leader_load <= max_partition_per_node {
+                return;
+            }
+
+            // Leader is over loaded. We can try to rebalance.
+            let Some(partition_state) = observed_cluster_state.partitions.get(partition_id) else {
+                return;
+            };
+
+            let mut leader = None;
+            for follower in placement.nodes().skip(1) {
+                if !alive_workers.contains(follower) {
+                    // if worker is not alive the scheduler
+                    // will change the plan anyway so we still can
+                    // try to rebalance but changes will most probably
+                    // get discarded
+                    continue;
+                }
+
+                let load = loads.entry(*follower).or_default();
+
+                // only upgrade follower in active state
+                match partition_state
+                    .partition_processors
+                    .get(follower)
+                    .map(|state| state.replay_status)
+                {
+                    Some(ReplayStatus::Active) => {}
+                    _ => continue,
+                }
+
+                if *load < partition_per_node {
+                    // upgrade to leader.
+                    leader = Some(*follower);
+                    *load += 1;
+                }
+            }
+
+            if let Some(leader) = leader {
+                placement.set_leader(leader);
+            }
+        });
+
+        builder.build_if_modified()
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+enum RebalanceError {
+    #[error("unmodified")]
+    Unmodified,
 }
 
 /// Placement hints for the [`logs_controller::LogsController`] based on the current
@@ -532,13 +669,14 @@ impl<'a> Drop for TargetPartitionPlacementState<'a> {
 #[cfg(test)]
 mod tests {
     use futures::StreamExt;
-    use googletest::assert_that;
     use googletest::matcher::{Matcher, MatcherResult};
+    use googletest::prelude::eq;
+    use googletest::{assert_that, unordered_elements_are};
     use http::Uri;
     use rand::prelude::ThreadRng;
     use rand::Rng;
     use restate_types::metadata_store::keys::PARTITION_TABLE_KEY;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::iter;
     use std::num::NonZero;
     use std::time::Duration;
@@ -554,7 +692,8 @@ mod tests {
     use restate_core::network::{ForwardingHandler, Incoming, MessageCollectorMockConnector};
     use restate_core::{Metadata, TestCoreEnv, TestCoreEnvBuilder};
     use restate_types::cluster::cluster_state::{
-        AliveNode, ClusterState, DeadNode, NodeState, PartitionProcessorStatus, RunMode,
+        AliveNode, ClusterState, DeadNode, NodeState, PartitionProcessorStatus, ReplayStatus,
+        RunMode,
     };
     use restate_types::identifiers::PartitionId;
     use restate_types::net::codec::WireDecode;
@@ -830,6 +969,176 @@ mod tests {
         Ok(())
     }
 
+    #[test(restate_core::test)]
+    async fn test_rebalance() -> googletest::Result<()> {
+        let num_nodes = 3;
+        let node_ids: Vec<_> = (0..=num_nodes)
+            .map(|idx| GenerationalNodeId::new(idx, idx))
+            .collect();
+        let mut nodes_config = NodesConfiguration::new(Version::MIN, "test-cluster".to_owned());
+
+        for node_id in &node_ids {
+            let node_config = NodeConfig::new(
+                format!("{node_id}"),
+                *node_id,
+                AdvertisedAddress::Http(Uri::default()),
+                Role::Worker.into(),
+                LogServerConfig::default(),
+            );
+            nodes_config.upsert_node(node_config);
+        }
+
+        let env = TestCoreEnv::create_with_single_node(0, 0).await;
+        let mut partition_table_builder =
+            PartitionTable::with_equally_sized_partitions(1.into(), 24).into_builder();
+        partition_table_builder.for_each(|_, placement| {
+            placement.set_leader(PlainNodeId::new(0));
+        });
+
+        let partition_table = partition_table_builder.build();
+        let scheduler = Scheduler::new(env.metadata_writer, env.networking);
+
+        let mut cluster_state = ClusterState {
+            last_refreshed: None,
+            logs_metadata_version: Version::INVALID,
+            nodes_config_version: Version::INVALID,
+            partition_table_version: Version::INVALID,
+            nodes: {
+                node_ids
+                    .iter()
+                    .cloned()
+                    .map(|node_id| {
+                        let replay_status = if node_id.as_plain() == PlainNodeId::new(3) {
+                            ReplayStatus::CatchingUp
+                        } else {
+                            ReplayStatus::Active
+                        };
+
+                        (
+                            node_id.as_plain(),
+                            NodeState::Alive(AliveNode {
+                                generational_node_id: node_id,
+                                last_heartbeat_at: MillisSinceEpoch::now(),
+                                partitions: partition_table
+                                    .partitions()
+                                    .map(|(partition_id, _)| {
+                                        (
+                                            *partition_id,
+                                            PartitionProcessorStatus {
+                                                replay_status,
+                                                ..Default::default()
+                                            },
+                                        )
+                                    })
+                                    .collect(),
+                            }),
+                        )
+                    })
+                    .collect()
+            },
+        };
+
+        let mut observed_cluster_state = ObservedClusterState::default();
+        observed_cluster_state.update(&cluster_state);
+
+        let rebalanced = scheduler.rebalance_partition_table(
+            partition_table.clone(),
+            &nodes_config,
+            &observed_cluster_state,
+        );
+
+        // since all partitions has only one node in the replica group
+        // rebalance has no effect.
+        assert_that!(rebalanced, eq(None));
+
+        let mut partition_table_builder = partition_table.into_builder();
+        // use all nodes with all partitions
+        partition_table_builder.for_each(|_, placement| {
+            placement.extend(node_ids.iter().map(|id| id.as_plain()));
+        });
+
+        let partition_table = partition_table_builder.build();
+
+        let rebalanced = scheduler.rebalance_partition_table(
+            partition_table.clone(),
+            &nodes_config,
+            &observed_cluster_state,
+        );
+
+        // since all partitions has only one node in the replica group
+        // rebalance has no effect.
+        assert!(rebalanced.is_some());
+        let rebalanced = rebalanced.unwrap();
+
+        let mut loads = HashMap::<PlainNodeId, usize>::new();
+        for (_, partition) in rebalanced.partitions() {
+            let leader = partition.placement.leader().cloned().unwrap();
+            let load = loads.entry(leader).or_default();
+            *load += 1;
+        }
+
+        // Balanced only across 3 nodes 0, 1, and 2
+        // but not node 3 because it's explicitly set as "catching up".
+        //
+        // This also produced an unbalanced result
+        // since there should be 4 nodes to carry the load.
+        // The next rebalance where all nodes have caught up
+        // should result in a fully balanced cluster
+        assert_that!(
+            loads,
+            unordered_elements_are![
+                (eq(PlainNodeId::new(0)), eq(12)),
+                (eq(PlainNodeId::new(1)), eq(6)),
+                (eq(PlainNodeId::new(2)), eq(6)),
+            ]
+        );
+
+        for node in cluster_state.nodes.values_mut() {
+            if let NodeState::Alive(alive) = node {
+                for partition in alive.partitions.values_mut() {
+                    partition.replay_status = ReplayStatus::Active;
+                }
+            }
+        }
+
+        observed_cluster_state.update(&cluster_state);
+        let rebalanced = scheduler.rebalance_partition_table(
+            partition_table.clone(),
+            &nodes_config,
+            &observed_cluster_state,
+        );
+
+        // since all partitions has only one node in the replica group
+        // rebalance has no effect.
+        assert!(rebalanced.is_some());
+        let rebalanced = rebalanced.unwrap();
+
+        let mut loads = HashMap::<PlainNodeId, usize>::new();
+        for (_, partition) in rebalanced.partitions() {
+            let leader = partition.placement.leader().cloned().unwrap();
+            let load = loads.entry(leader).or_default();
+            *load += 1;
+        }
+
+        // Balanced only across 3 nodes 0, 1, and 2
+        // but not node 3 because it's explicitly set as "catching up".
+        //
+        // This also produced an unbalanced result
+        // since there should be 4 nodes to carry the load.
+        // The next rebalance where all nodes have caught up
+        // should result in a fully balanced cluster
+        assert_that!(
+            loads,
+            unordered_elements_are![
+                (eq(PlainNodeId::new(0)), eq(8)),
+                (eq(PlainNodeId::new(1)), eq(8)),
+                (eq(PlainNodeId::new(2)), eq(8)),
+            ]
+        );
+
+        Ok(())
+    }
+
     async fn run_ensure_replication_test(
         mut partition_table_builder: PartitionTableBuilder,
         replication_strategy: ReplicationStrategy,
@@ -888,7 +1197,12 @@ mod tests {
                     }
 
                     for (node_id, run_mode) in partition.placement.iter() {
-                        if observed_state.partition_processors.get(node_id) != Some(&run_mode) {
+                        if observed_state
+                            .partition_processors
+                            .get(node_id)
+                            .map(|s| &s.run_mode)
+                            != Some(&run_mode)
+                        {
                             return MatcherResult::NoMatch;
                         }
                     }
@@ -941,6 +1255,7 @@ mod tests {
                             control_processor.partition_id,
                             plain_node_id,
                             RunMode::Follower,
+                            ReplayStatus::Active,
                         );
                     }
                     ProcessorCommand::Leader => {
@@ -948,6 +1263,7 @@ mod tests {
                             control_processor.partition_id,
                             plain_node_id,
                             RunMode::Leader,
+                            ReplayStatus::Active,
                         );
                     }
                 }

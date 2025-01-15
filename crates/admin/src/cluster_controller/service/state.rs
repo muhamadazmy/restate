@@ -123,6 +123,16 @@ where
         }
     }
 
+    pub async fn rebalance_partitions(
+        &mut self,
+        observed_cluster_state: &ObservedClusterState,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Follower => Ok(()),
+            Self::Leader(leader) => leader.rebalance_partitions(observed_cluster_state).await,
+        }
+    }
+
     pub fn reconfigure(&mut self, configuration: &Configuration) {
         match self {
             Self::Follower => {}
@@ -209,6 +219,17 @@ where
                 &nodes_config,
                 LogsBasedPartitionProcessorPlacementHints::from(&self.logs_controller),
             )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn rebalance_partitions(
+        &mut self,
+        observed_cluster_state: &ObservedClusterState,
+    ) -> anyhow::Result<()> {
+        self.scheduler
+            .rebalance_partitions(observed_cluster_state)
             .await?;
 
         Ok(())

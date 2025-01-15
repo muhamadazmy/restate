@@ -299,6 +299,10 @@ impl<T: TransportConnect> Service<T> {
 
         self.health_status.update(AdminStatus::Ready);
 
+        // todo(azmy): make reconfigurable
+        let mut rebalance_interval = tokio::time::interval(Duration::from_secs(60));
+        rebalance_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
                 _ = self.heartbeat_interval.tick() => {
@@ -324,6 +328,9 @@ impl<T: TransportConnect> Service<T> {
                 result = state.run() => {
                     let leader_event = result?;
                     state.on_leader_event(&self.observed_cluster_state, leader_event).await?;
+                }
+                _ = rebalance_interval.tick() => {
+                    state.rebalance_partitions(&self.observed_cluster_state).await?;
                 }
                 _ = &mut shutdown => {
                     self.health_status.update(AdminStatus::Unknown);

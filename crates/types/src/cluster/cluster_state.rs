@@ -118,7 +118,7 @@ pub enum RunMode {
     Follower,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, IntoProst)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, IntoProst)]
 #[prost(target = "crate::protobuf::cluster::ReplayStatus")]
 pub enum ReplayStatus {
     Starting,
