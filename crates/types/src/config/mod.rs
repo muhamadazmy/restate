@@ -55,6 +55,16 @@ use crate::errors::GenericError;
 use crate::live::Live;
 use crate::nodes_config::Role;
 
+/// Overrides production profile
+pub static PRODUCTION_PROFILE: LazyLock<toml::Table> = LazyLock::new(|| {
+    toml::toml! {
+        allow-bootstrap = false
+
+        [bifrost]
+        default-provider = "replicated"
+    }
+});
+
 #[cfg(any(test, feature = "test-util"))]
 enum TempOrPath {
     Temp(tempfile::TempDir),
@@ -229,5 +239,22 @@ impl Configuration {
     /// Dumps the configuration to a string
     pub fn dump(&self) -> Result<String, GenericError> {
         Ok(toml::to_string_pretty(self)?)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use figment::{providers::Serialized, Figment};
+
+    use super::{Configuration, PRODUCTION_PROFILE};
+
+    #[test]
+    fn validate_production_profile() {
+        let figment = Figment::new()
+            .merge(Serialized::defaults(Configuration::default()))
+            .merge(Serialized::from(&*PRODUCTION_PROFILE, "production"));
+
+        // verifies that the production profile is loadable
+        let _: Configuration = figment.select("production").extract().unwrap();
     }
 }
