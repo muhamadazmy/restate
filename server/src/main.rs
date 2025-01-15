@@ -74,6 +74,10 @@ struct RestateArguments {
     #[arg(value_enum, long = "wipe", hide = true)]
     wipe: Option<WipeMode>,
 
+    /// Use default production configuration profile.
+    #[clap(long)]
+    production: bool,
+
     #[clap(flatten)]
     opts_overrides: CommonOptionCliOverride,
 }
@@ -125,6 +129,7 @@ fn main() {
     // Initial configuration loading
     let config_loader = ConfigLoaderBuilder::default()
         .load_env(true)
+        .production(cli_args.production)
         .path(config_path.clone())
         .cli_override(cli_args.opts_overrides.clone())
         .build()

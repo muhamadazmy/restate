@@ -19,7 +19,7 @@ use notify_debouncer_full::{
 };
 use tracing::{error, info, warn};
 
-use crate::config::Configuration;
+use crate::config::{Configuration, PRODUCTION_PROFILE};
 
 #[derive(thiserror::Error, codederror::CodedError, Debug)]
 #[code(restate_errors::RT0002)]
@@ -31,6 +31,7 @@ pub enum ConfigLoadError {
 #[derive(Debug, Default, derive_builder::Builder)]
 #[builder(default)]
 pub struct ConfigLoader {
+    production: bool,
     path: Option<PathBuf>,
     load_env: bool,
     #[builder(setter(strip_option))]
@@ -45,7 +46,9 @@ impl ConfigLoader {
     pub fn load_once(&self) -> Result<Configuration, ConfigLoadError> {
         let defaults = self.custom_default.clone().unwrap_or_default();
 
-        let mut figment = Figment::from(Serialized::defaults(defaults));
+        let mut figment = Figment::from(Serialized::defaults(defaults))
+            .merge(Serialized::from(&*PRODUCTION_PROFILE, "production"));
+
         // Load configuration file
         if let Some(path) = &self.path {
             figment = figment.merge(Toml::file_exact(path.as_path()));
@@ -62,7 +65,13 @@ impl ConfigLoader {
             figment = figment.merge(Figment::from(Serialized::defaults(cli_overrides)))
         }
 
-        let mut config: Configuration = figment.extract()?;
+        let profile = if self.production {
+            "production"
+        } else {
+            "default"
+        };
+
+        let mut config: Configuration = figment.select(profile).extract()?;
 
         config.common.set_derived_values();
         Ok(config.apply_cascading_values())
