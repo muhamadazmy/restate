@@ -150,11 +150,11 @@ impl ProviderConfiguration {
     }
 }
 
-impl From<ProviderConfiguration> for crate::protobuf::cluster::DefaultProvider {
+impl From<ProviderConfiguration> for crate::protobuf::cluster::BifrostProvider {
     fn from(value: ProviderConfiguration) -> Self {
         use crate::protobuf::cluster;
 
-        let mut result = crate::protobuf::cluster::DefaultProvider::default();
+        let mut result = crate::protobuf::cluster::BifrostProvider::default();
 
         match value {
             ProviderConfiguration::Local => result.provider = ProviderKind::Local.to_string(),
@@ -162,7 +162,7 @@ impl From<ProviderConfiguration> for crate::protobuf::cluster::DefaultProvider {
             ProviderConfiguration::InMemory => result.provider = ProviderKind::InMemory.to_string(),
             ProviderConfiguration::Replicated(config) => {
                 result.provider = ProviderKind::Replicated.to_string();
-                result.replicated_config = Some(cluster::ReplicatedProviderConfig {
+                result.replication_property = Some(cluster::ReplicationProperty {
                     replication_property: config.replication_property.to_string(),
                 })
             }
@@ -172,9 +172,9 @@ impl From<ProviderConfiguration> for crate::protobuf::cluster::DefaultProvider {
     }
 }
 
-impl TryFrom<crate::protobuf::cluster::DefaultProvider> for ProviderConfiguration {
+impl TryFrom<crate::protobuf::cluster::BifrostProvider> for ProviderConfiguration {
     type Error = anyhow::Error;
-    fn try_from(value: crate::protobuf::cluster::DefaultProvider) -> Result<Self, Self::Error> {
+    fn try_from(value: crate::protobuf::cluster::BifrostProvider) -> Result<Self, Self::Error> {
         let provider_kind: ProviderKind = value.provider.parse()?;
 
         match provider_kind {
@@ -182,7 +182,7 @@ impl TryFrom<crate::protobuf::cluster::DefaultProvider> for ProviderConfiguratio
             #[cfg(any(test, feature = "memory-loglet"))]
             ProviderKind::InMemory => Ok(Self::InMemory),
             ProviderKind::Replicated => {
-                let config = value.replicated_config.ok_or_else(|| {
+                let config = value.replication_property.ok_or_else(|| {
                     anyhow::anyhow!("replicate_config is required with replicated provider")
                 })?;
 
