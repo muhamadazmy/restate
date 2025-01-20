@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use restate_types::protobuf::cluster::ClusterConfiguration;
+use restate_types::replicated_loglet::ReplicationProperty;
 use tonic::{async_trait, Request, Response, Status};
 use tracing::info;
 
@@ -299,8 +300,11 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
         let response = GetClusterConfigurationResponse {
             cluster_configuration: Some(ClusterConfiguration {
                 num_partitions: u32::from(partition_table.num_partitions()),
-                replication_strategy: Some(partition_table.replication_strategy().into()),
-                default_provider: Some(logs.configuration().default_provider.clone().into()),
+                partition_placement_strategy: partition_table
+                    .placement_strategy()
+                    .clone()
+                    .map(Into::into),
+                bifrost_provider: Some(logs.configuration().default_provider.clone().into()),
             }),
         };
 
@@ -319,16 +323,14 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
         self.controller_handle
             .update_cluster_configuration(
                 request
-                    .replication_strategy
-                    .ok_or_else(|| {
-                        Status::invalid_argument("replication_strategy is a required field")
-                    })?
-                    .try_into()
+                    .partition_placement_strategy
+                    .map(ReplicationProperty::try_from)
+                    .transpose()
                     .map_err(|err| {
                         Status::invalid_argument(format!("invalid replication_strategy: {err}"))
                     })?,
                 request
-                    .default_provider
+                    .bifrost_provider
                     .ok_or_else(|| {
                         Status::invalid_argument("default_provider is a required field")
                     })?
