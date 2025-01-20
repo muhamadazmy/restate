@@ -8,18 +8,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-mod convert;
-mod error;
-mod query;
+mod location_scope;
+mod node_location;
 
-use axum::{routing::post, Router};
-use std::sync::Arc;
-
-use crate::state::QueryServiceState;
-
-pub fn create_router(state: Arc<QueryServiceState>) -> Router<()> {
-    // Setup the router
-    axum::Router::new()
-        .route("/query", post(query::query))
-        .with_state(state)
-}
+pub use location_scope::NodeLocationScope;
+pub use node_location::NodeLocation;

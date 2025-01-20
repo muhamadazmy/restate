@@ -21,6 +21,7 @@ use serde_with::serde_as;
 use restate_serde_util::{NonZeroByteCount, SerdeableHeaderHashMap};
 
 use super::{AwsOptions, HttpOptions, PerfStatsLevel, RocksDbOptions};
+use crate::locality::NodeLocation;
 use crate::net::{AdvertisedAddress, BindAddress};
 use crate::nodes_config::Role;
 use crate::retries::RetryPolicy;
@@ -50,6 +51,31 @@ pub struct CommonOptions {
     /// Unique name for this node in the cluster. The node must not change unless
     /// it's started with empty local store. It defaults to the node's hostname.
     node_name: Option<String>,
+
+    /// # Node Location
+    ///
+    /// Setting the location allows Restate to form a tree-like cluster topology.
+    /// The value is written in the format of "<region>[.zone]" to assign this node
+    /// to a specific region, or to a zone within a region.
+    ///
+    /// The value of region and zone is arbitrary but whitespace and `.` are disallowed.
+    ///
+    ///
+    /// NOTE: It's _strongly_ recommended to not change the node's location string after
+    /// its initial registration. Changing the location may result in data loss or data
+    /// inconsistency if `log-server` is enabled on this node.
+    ///
+    /// When this value is not set, the node is considered to be in the _default_ location.
+    /// The _default_ location means that the node is not assigned to any specific region or zone.
+    ///
+    /// ## Examples
+    /// - `us-west` -- the node is in the `us-west` region.
+    /// - `us-west.a1` -- the node is in the `us-west` region and in the `a1` zone.
+    /// - `` -- [default] the node is in the default location
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    #[builder(setter(strip_option))]
+    location: Option<NodeLocation>,
 
     /// If set, the node insists on acquiring this node ID.
     pub force_node_id: Option<PlainNodeId>,
@@ -242,6 +268,12 @@ pub struct CommonOptions {
     #[serde(with = "serde_with::As::<serde_with::DisplayFromStr>")]
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub initialization_timeout: humantime::Duration,
+
+    /// # Disable telemetry
+    ///
+    /// Restate uses Scarf to collect anonymous usage data to help us understand how the software is being used.
+    /// You can set this flag to true to disable this collection. It can also be set with the environment variable DO_NOT_TRACK=true.
+    pub disable_telemetry: bool,
 }
 
 impl CommonOptions {
@@ -252,6 +284,13 @@ impl CommonOptions {
     // Once lock to ensure it doesn't change over time, even if the physical hostname changes.
     pub fn node_name(&self) -> &str {
         self.node_name.as_ref().unwrap_or(&HOSTNAME)
+    }
+
+    /// The node location as defined in the configuration file, or the default configuration if
+    /// unset.
+    pub fn location(&self) -> &NodeLocation {
+        static DEFAULT_LOCATION: NodeLocation = NodeLocation::new();
+        self.location.as_ref().unwrap_or(&DEFAULT_LOCATION)
     }
 
     #[cfg(feature = "unsafe-mutable-config")]
@@ -343,6 +382,7 @@ impl Default for CommonOptions {
             //   see "roles_compat_test" test below.
             roles: EnumSet::all() - Role::HttpIngress,
             node_name: None,
+            location: None,
             force_node_id: None,
             cluster_name: "localcluster".to_owned(),
             // boot strap the cluster by default. This is very likely to change in the future to be
@@ -382,6 +422,7 @@ impl Default for CommonOptions {
                 Some(Duration::from_secs(5)),
             ),
             initialization_timeout: Duration::from_secs(5 * 60).into(),
+            disable_telemetry: false,
         }
     }
 }
