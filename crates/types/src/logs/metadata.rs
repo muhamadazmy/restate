@@ -162,7 +162,7 @@ impl From<ProviderConfiguration> for crate::protobuf::cluster::BifrostProvider {
             ProviderConfiguration::InMemory => result.provider = ProviderKind::InMemory.to_string(),
             ProviderConfiguration::Replicated(config) => {
                 result.provider = ProviderKind::Replicated.to_string();
-                result.replicated_config = Some(cluster::ReplicatedProviderConfig {
+                result.replication_property = Some(cluster::ReplicationProperty {
                     replication_property: config.replication_property.to_string(),
                 })
             }
@@ -182,7 +182,7 @@ impl TryFrom<crate::protobuf::cluster::BifrostProvider> for ProviderConfiguratio
             #[cfg(any(test, feature = "memory-loglet"))]
             ProviderKind::InMemory => Ok(Self::InMemory),
             ProviderKind::Replicated => {
-                let config = value.replicated_config.ok_or_else(|| {
+                let config = value.replication_property.ok_or_else(|| {
                     anyhow::anyhow!("replicate_config is required with replicated provider")
                 })?;
 
