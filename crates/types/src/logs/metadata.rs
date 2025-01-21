@@ -150,11 +150,11 @@ impl ProviderConfiguration {
     }
 }
 
-impl From<ProviderConfiguration> for crate::protobuf::cluster::DefaultProvider {
+impl From<ProviderConfiguration> for crate::protobuf::cluster::BifrostProvider {
     fn from(value: ProviderConfiguration) -> Self {
         use crate::protobuf::cluster;
 
-        let mut result = crate::protobuf::cluster::DefaultProvider::default();
+        let mut result = crate::protobuf::cluster::BifrostProvider::default();
 
         match value {
             ProviderConfiguration::Local => result.provider = ProviderKind::Local.to_string(),
@@ -172,9 +172,9 @@ impl From<ProviderConfiguration> for crate::protobuf::cluster::DefaultProvider {
     }
 }
 
-impl TryFrom<crate::protobuf::cluster::DefaultProvider> for ProviderConfiguration {
+impl TryFrom<crate::protobuf::cluster::BifrostProvider> for ProviderConfiguration {
     type Error = anyhow::Error;
-    fn try_from(value: crate::protobuf::cluster::DefaultProvider) -> Result<Self, Self::Error> {
+    fn try_from(value: crate::protobuf::cluster::BifrostProvider) -> Result<Self, Self::Error> {
         let provider_kind: ProviderKind = value.provider.parse()?;
 
         match provider_kind {
