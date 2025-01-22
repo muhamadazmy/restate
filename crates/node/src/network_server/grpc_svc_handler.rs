@@ -17,7 +17,6 @@ use futures::stream::BoxStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
-use restate_core::metadata_store::MetadataStoreClient;
 use restate_core::network::protobuf::core_node_svc::core_node_svc_server::CoreNodeSvc;
 use restate_core::network::{ConnectionManager, ProtocolError, TransportConnect};
 use restate_core::protobuf::node_ctl_svc::node_ctl_svc_server::NodeCtlSvc;
@@ -26,7 +25,7 @@ use restate_core::protobuf::node_ctl_svc::{
     ProvisionClusterResponse,
 };
 use restate_core::task_center::TaskCenterMonitoring;
-use restate_core::{task_center, Metadata, MetadataKind, TargetVersion};
+use restate_core::{task_center, Metadata, MetadataKind, MetadataWriter, TargetVersion};
 use restate_types::config::Configuration;
 use restate_types::health::Health;
 use restate_types::logs::metadata::ProviderConfiguration;
@@ -42,7 +41,7 @@ pub struct NodeCtlSvcHandler {
     cluster_name: String,
     roles: EnumSet<Role>,
     health: Health,
-    metadata_store_client: MetadataStoreClient,
+    metadata_writer: MetadataWriter,
 }
 
 impl NodeCtlSvcHandler {
@@ -51,14 +50,14 @@ impl NodeCtlSvcHandler {
         cluster_name: String,
         roles: EnumSet<Role>,
         health: Health,
-        metadata_store_client: MetadataStoreClient,
+        metadata_writer: MetadataWriter,
     ) -> Self {
         Self {
             task_center,
             cluster_name,
             roles,
             health,
-            metadata_store_client,
+            metadata_writer,
         }
     }
 
@@ -177,7 +176,7 @@ impl NodeCtlSvc for NodeCtlSvcHandler {
         }
 
         let newly_provisioned = provision_cluster_metadata(
-            &self.metadata_store_client,
+            &self.metadata_writer,
             &config.common,
             &cluster_configuration,
         )
