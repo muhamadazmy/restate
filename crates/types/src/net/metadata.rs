@@ -130,3 +130,27 @@ impl MetadataContainer {
         }
     }
 }
+
+impl From<PartitionTable> for MetadataContainer {
+    fn from(value: PartitionTable) -> Self {
+        Self::PartitionTable(Arc::new(value))
+    }
+}
+
+impl From<Logs> for MetadataContainer {
+    fn from(value: Logs) -> Self {
+        Self::Logs(Arc::new(value))
+    }
+}
+
+impl From<NodesConfiguration> for MetadataContainer {
+    fn from(value: NodesConfiguration) -> Self {
+        Self::NodesConfiguration(Arc::new(value))
+    }
+}
+
+impl From<Schema> for MetadataContainer {
+    fn from(value: Schema) -> Self {
+        Self::Schema(Arc::new(value))
+    }
+}
