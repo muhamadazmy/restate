@@ -293,26 +293,12 @@ impl<'a> BifrostAdmin<'a> {
         Ok(())
     }
 
-    /// Creates empty metadata if none exists for bifrost and publishes it to metadata
-    /// manager.
-    pub async fn init_metadata(&self) -> Result<(), Error> {
-        let retry_policy = Configuration::pinned()
-            .common
-            .network_error_retry_policy
-            .clone();
+    /// Wait for metadata initialization
+    pub async fn wait_metadata_init(&self) -> Result<(), Error> {
+        Metadata::current()
+            .wait_for_version(MetadataKind::Logs, Version::MIN)
+            .await?;
 
-        let logs = retry_on_network_error(retry_policy, || {
-            self.inner
-                .metadata_writer
-                .metadata_store_client()
-                .get_or_insert(BIFROST_CONFIG_KEY.clone(), || {
-                    debug!("Attempting to initialize logs metadata in metadata store");
-                    Logs::from_configuration(&Configuration::pinned())
-                })
-        })
-        .await?;
-
-        self.inner.metadata_writer.update(Arc::new(logs)).await?;
         Ok(())
     }
 }
