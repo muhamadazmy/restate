@@ -9,10 +9,11 @@
 // by the Apache License, Version 2.0.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{debug, info, instrument};
 
-use restate_core::metadata_store::retry_on_network_error;
+use restate_core::metadata_store::{retry_on_network_error, ReadWriteError};
 use restate_core::{Metadata, MetadataKind};
 use restate_types::config::Configuration;
 use restate_types::logs::metadata::{Chain, LogletParams, Logs, ProviderKind, SegmentIndex};
@@ -293,26 +294,30 @@ impl<'a> BifrostAdmin<'a> {
         Ok(())
     }
 
-    /// Creates empty metadata if none exists for bifrost and publishes it to metadata
-    /// manager.
+    /// Waits for logs metadata to be initialized
     pub async fn init_metadata(&self) -> Result<(), Error> {
         let retry_policy = Configuration::pinned()
             .common
             .network_error_retry_policy
             .clone();
 
-        let logs = retry_on_network_error(retry_policy, || {
-            self.inner
-                .metadata_writer
-                .metadata_store_client()
-                .get_or_insert(BIFROST_CONFIG_KEY.clone(), || {
-                    debug!("Attempting to initialize logs metadata in metadata store");
-                    Logs::from_configuration(&Configuration::pinned())
-                })
-        })
-        .await?;
+        let logs = loop {
+            let logs: Option<Logs> = retry_on_network_error(retry_policy.clone(), || {
+                self.inner
+                    .metadata_writer
+                    .metadata_store_client()
+                    .get(BIFROST_CONFIG_KEY.clone())
+            })
+            .await
+            .map_err(ReadWriteError::from)?;
 
-        self.inner.metadata_writer.update(Arc::new(logs)).await?;
+            match logs {
+                Some(logs) => break logs,
+                None => tokio::time::sleep(Duration::from_secs(1)).await,
+            }
+        };
+
+        self.inner.metadata_writer.update(logs).await?;
         Ok(())
     }
 }

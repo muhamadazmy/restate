@@ -80,12 +80,7 @@ impl BifrostService {
     ///
     /// This requires to run within a task_center context.
     pub async fn start(self) -> anyhow::Result<()> {
-        // Make sure we have v1 metadata written to metadata store with the default
-        // configuration. If metadata is already initialized, this will make sure we have the
-        // latest version set in metadata manager.
-
-        // todo we seem to have a race condition between this call and the provision step which might
-        //  write a different logs configuration
+        // Make sure we wait until metadata is initialized
         self.bifrost.admin().init_metadata().await?;
 
         // initialize all enabled providers.

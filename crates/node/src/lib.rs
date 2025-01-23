@@ -16,6 +16,8 @@ mod roles;
 use anyhow::Context;
 use bytestring::ByteString;
 use prost_dto::IntoProst;
+use restate_types::net::metadata::MetadataContainer;
+use restate_types::retries::RetryPolicy;
 use std::num::NonZeroU16;
 use tracing::{debug, error, info, trace, warn};
 
@@ -32,7 +34,7 @@ use restate_core::network::{
     GrpcConnector, MessageRouterBuilder, NetworkServerBuilder, Networking,
 };
 use restate_core::partitions::{spawn_partition_routing_refresher, PartitionRoutingRefresher};
-use restate_core::{cancellation_watcher, Metadata, TaskKind};
+use restate_core::{cancellation_watcher, Metadata, MetadataWriter, TaskKind};
 use restate_core::{spawn_metadata_manager, MetadataBuilder, MetadataManager, TaskCenter};
 #[cfg(feature = "replicated-loglet")]
 use restate_log_server::LogServerService;
@@ -54,7 +56,7 @@ use restate_types::partition_table::{PartitionReplication, PartitionTable, Parti
 use restate_types::protobuf::common::{
     AdminStatus, IngressStatus, LogServerStatus, NodeRpcStatus, NodeStatus, WorkerStatus,
 };
-use restate_types::storage::StorageEncode;
+use restate_types::storage::{StorageDecode, StorageEncode};
 use restate_types::{GenerationalNodeId, Version, Versioned};
 
 #[derive(Debug, thiserror::Error, CodedError)]
@@ -341,14 +343,14 @@ impl Node {
             let health = self.health.clone();
             let common_options = config.common.clone();
             let connection_manager = self.networking.connection_manager().clone();
-            let metadata_store_client = self.metadata_store_client.clone();
+            let metadata_writer = metadata_writer.clone();
             async move {
                 NetworkServer::run(
                     health,
                     connection_manager,
                     self.server_builder,
                     common_options,
-                    metadata_store_client,
+                    metadata_writer,
                 )
                 .await?;
                 Ok(())
@@ -370,13 +372,13 @@ impl Node {
         }
 
         if config.common.allow_bootstrap {
+            let metadata_writer = metadata_writer.clone();
             TaskCenter::spawn(TaskKind::SystemBoot, "auto-provision-cluster", {
                 let cluster_configuration = ClusterConfiguration::from_configuration(&config);
-                let metadata_store_client = self.metadata_store_client.clone();
                 let common_opts = config.common.clone();
                 async move {
                     let response = provision_cluster_metadata(
-                        &metadata_store_client,
+                        &metadata_writer,
                         &common_opts,
                         &cluster_configuration,
                     )
@@ -577,39 +579,39 @@ impl ClusterConfiguration {
 /// metadata store. In this case, the method does not try to clean the already written metadata
 /// up. Instead, the caller can retry to complete the provisioning.
 async fn provision_cluster_metadata(
-    metadata_store_client: &MetadataStoreClient,
+    metadata_writer: &MetadataWriter,
     common_opts: &CommonOptions,
     cluster_configuration: &ClusterConfiguration,
 ) -> anyhow::Result<bool> {
     let (initial_nodes_configuration, initial_partition_table, initial_logs) =
         generate_initial_metadata(common_opts, cluster_configuration);
 
-    let result = retry_on_network_error(common_opts.network_error_retry_policy.clone(), || {
-        metadata_store_client.provision(&initial_nodes_configuration)
+    let success = retry_on_network_error(common_opts.network_error_retry_policy.clone(), || {
+        metadata_writer
+            .metadata_store_client()
+            .provision(&initial_nodes_configuration)
     })
     .await?;
 
-    retry_on_network_error(common_opts.network_error_retry_policy.clone(), || {
-        write_initial_value_dont_fail_if_it_exists(
-            metadata_store_client,
-            PARTITION_TABLE_KEY.clone(),
-            &initial_partition_table,
-        )
-    })
+    write_initial_value(
+        metadata_writer,
+        PARTITION_TABLE_KEY.clone(),
+        initial_partition_table,
+        common_opts.network_error_retry_policy.clone(),
+    )
     .await
     .context("failed provisioning the initial partition table")?;
 
-    retry_on_network_error(common_opts.network_error_retry_policy.clone(), || {
-        write_initial_value_dont_fail_if_it_exists(
-            metadata_store_client,
-            BIFROST_CONFIG_KEY.clone(),
-            &initial_logs,
-        )
-    })
+    write_initial_value(
+        metadata_writer,
+        BIFROST_CONFIG_KEY.clone(),
+        initial_logs,
+        common_opts.network_error_retry_policy.clone(),
+    )
     .await
     .context("failed provisioning the initial logs")?;
 
-    Ok(result)
+    Ok(success)
 }
 
 fn create_initial_nodes_configuration(common_opts: &CommonOptions) -> NodesConfiguration {
@@ -656,22 +658,37 @@ fn generate_initial_metadata(
     )
 }
 
-async fn write_initial_value_dont_fail_if_it_exists<T: Versioned + StorageEncode>(
-    metadata_store_client: &MetadataStoreClient,
+async fn write_initial_value<T>(
+    metadata_writer: &MetadataWriter,
     key: ByteString,
-    initial_value: &T,
-) -> Result<(), WriteError> {
-    match metadata_store_client
-        .put(key, initial_value, Precondition::DoesNotExist)
-        .await
-    {
-        Ok(_) => Ok(()),
+    mut value: T,
+    retry_policy: RetryPolicy,
+) -> Result<(), anyhow::Error>
+where
+    T: Versioned + StorageEncode + StorageDecode + Into<MetadataContainer>,
+{
+    let result = retry_on_network_error(retry_policy.clone(), || {
+        metadata_writer
+            .metadata_store_client()
+            .put(key.clone(), &value, Precondition::DoesNotExist)
+    })
+    .await;
+
+    match result {
+        Ok(_) => {}
         Err(WriteError::FailedPrecondition(_)) => {
-            // we might have failed on a previous attempt after writing this value; so let's continue
-            Ok(())
+            //update local copy
+            value = retry_on_network_error(retry_policy, || {
+                metadata_writer.metadata_store_client().get(key.clone())
+            })
+            .await?
+            .expect("must exist");
         }
-        Err(err) => Err(err),
+        Err(err) => return Err(err.into()),
     }
+
+    metadata_writer.update(value).await?;
+    Ok(())
 }
 
 #[cfg(not(feature = "replicated-loglet"))]
