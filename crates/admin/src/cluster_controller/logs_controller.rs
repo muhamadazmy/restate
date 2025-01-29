@@ -22,7 +22,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, trace, trace_span, Instrument};
 
 use restate_bifrost::{Bifrost, Error as BifrostError};
-use restate_core::metadata_store::{Precondition, WriteError};
+use restate_core::metadata_store::WriteError;
 use restate_core::{Metadata, MetadataWriter, ShutdownError, TaskCenterFutureExt};
 use restate_types::errors::GenericError;
 use restate_types::identifiers::PartitionId;
@@ -33,6 +33,7 @@ use restate_types::logs::metadata::{
     ProviderKind, ReplicatedLogletConfig, SegmentIndex,
 };
 use restate_types::logs::{LogId, LogletId, Lsn, TailState};
+use restate_types::metadata::Precondition;
 use restate_types::metadata_store::keys::BIFROST_CONFIG_KEY;
 use restate_types::nodes_config::{NodeConfig, NodesConfiguration, Role, StorageState};
 use restate_types::partition_table::PartitionTable;
