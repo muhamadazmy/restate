@@ -64,6 +64,29 @@ impl MetadataServerSvcClientWithAddress {
     }
 }
 
+#[derive(Debug, Clone, derive_more::Deref, derive_more::DerefMut)]
+struct MetadataServerSvcClientWithAddress {
+    #[deref]
+    #[deref_mut]
+    client: MetadataServerSvcClient<Channel>,
+    channel: ChannelWithAddress,
+}
+
+impl MetadataServerSvcClientWithAddress {
+    fn new(channel: ChannelWithAddress) -> Self {
+        Self {
+            client: MetadataServerSvcClient::new(channel.channel.clone())
+                .accept_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Gzip),
+            channel,
+        }
+    }
+
+    fn address(&self) -> &AdvertisedAddress {
+        &self.channel.address
+    }
+}
+
 /// Client end to interact with a set of metadata servers.
 #[derive(Debug, Clone)]
 pub struct GrpcMetadataServerClient {
@@ -293,7 +316,7 @@ impl MetadataStore for GrpcMetadataServerClient {
                 nodes_configuration: buffer.freeze(),
             })
             .await
-            .map_err(map_status_to_provision_error);
+            .map_err(|status| map_status_to_provision_error(client.address(), status));
 
         if response.is_ok() {
             *self.current_leader.lock() = Some(client);
@@ -320,10 +343,12 @@ fn map_status_to_write_error(address: &AdvertisedAddress, status: Status) -> Wri
     }
 }
 
-fn map_status_to_provision_error(status: Status) -> ProvisionError {
+fn map_status_to_provision_error(address: &AdvertisedAddress, status: Status) -> ProvisionError {
     match &status.code() {
-        Code::Unavailable => ProvisionError::Network(status.into()),
-        _ => ProvisionError::Internal(status.to_string()),
+        Code::Unavailable => {
+            ProvisionError::Network(anyhow::anyhow!("[{address}] {status}").into())
+        }
+        _ => ProvisionError::Internal(format!("[{address}] {status}")),
     }
 }
 
