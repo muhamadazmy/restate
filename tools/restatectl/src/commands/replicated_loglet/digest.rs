@@ -27,13 +27,13 @@ use restate_log_server::protobuf::GetDigestRequest;
 use restate_types::logs::metadata::Logs;
 use restate_types::logs::{LogletId, LogletOffset, SequenceNumber, TailState};
 use restate_types::net::log_server::RecordStatus;
-use restate_types::nodes_config::{NodesConfiguration, Role};
+use restate_types::nodes_config::Role;
 use restate_types::replicated_loglet::LogNodeSetExt;
 use restate_types::storage::StorageCodec;
 use restate_types::Versioned;
 
-use crate::app::ConnectionInfo;
 use crate::commands::replicated_loglet::digest_util::DigestsHelper;
+use crate::connection::ConnectionInfo;
 use crate::util::grpc_channel;
 
 #[derive(Run, Parser, Collect, Clone, Debug)]
@@ -41,9 +41,7 @@ use crate::util::grpc_channel;
 pub struct DigestOpts {
     /// The replicated loglet id
     loglet_id: LogletId,
-    /// Sync metadata from metadata store first
-    #[arg(long)]
-    sync_metadata: bool,
+
     /// From offset. Requests from oldest if unset.
     #[arg(long, default_value = "1")]
     from: u32,
@@ -53,13 +51,22 @@ pub struct DigestOpts {
 }
 
 async fn get_digest(connection: &ConnectionInfo, opts: &DigestOpts) -> anyhow::Result<()> {
-    let channel = grpc_channel(connection.cluster_controller.clone());
-    let mut client = NodeCtlSvcClient::new(channel).accept_compressed(CompressionEncoding::Gzip);
     let req = GetMetadataRequest {
         kind: MetadataKind::Logs.into(),
-        sync: opts.sync_metadata,
+        sync: connection.sync_metadata,
     };
-    let mut response = client.get_metadata(req).await?.into_inner();
+
+    let mut response = connection
+        .try_each(None, |channel| async {
+            let mut client = NodeCtlSvcClient::new(channel)
+                .accept_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Gzip);
+
+            client.get_metadata(req).await
+        })
+        .await?
+        .into_inner();
+
     let logs = StorageCodec::decode::<Logs, _>(&mut response.encoded)?;
 
     c_println!("Log Configuration ({})", logs.version());
@@ -67,12 +74,7 @@ async fn get_digest(connection: &ConnectionInfo, opts: &DigestOpts) -> anyhow::R
         return Err(anyhow::anyhow!("loglet {} not found", opts.loglet_id));
     };
 
-    let req = GetMetadataRequest {
-        kind: MetadataKind::NodesConfiguration.into(),
-        sync: opts.sync_metadata,
-    };
-    let mut response = client.get_metadata(req).await?.into_inner();
-    let nodes_config = StorageCodec::decode::<NodesConfiguration, _>(&mut response.encoded)?;
+    let nodes_config = connection.get_nodes_configuration().await?;
     c_println!("Nodes Configuration ({})", nodes_config.version());
     c_println!();
 
