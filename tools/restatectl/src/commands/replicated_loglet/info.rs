@@ -20,28 +20,31 @@ use restate_types::logs::LogletId;
 use restate_types::storage::StorageCodec;
 use restate_types::Versioned;
 
-use crate::app::ConnectionInfo;
-use crate::util::grpc_channel;
+use crate::connection::ConnectionInfo;
 
 #[derive(Run, Parser, Collect, Clone, Debug)]
 #[cling(run = "get_info")]
 pub struct InfoOpts {
     /// The replicated loglet id
     loglet_id: LogletId,
-    /// Sync metadata from metadata store first
-    #[arg(long)]
-    sync_metadata: bool,
 }
 
 async fn get_info(connection: &ConnectionInfo, opts: &InfoOpts) -> anyhow::Result<()> {
-    let channel = grpc_channel(connection.cluster_controller.clone());
-    let mut client = NodeCtlSvcClient::new(channel).accept_compressed(CompressionEncoding::Gzip);
-
     let req = GetMetadataRequest {
         kind: MetadataKind::Logs.into(),
-        sync: opts.sync_metadata,
+        sync: connection.sync_metadata,
     };
-    let mut response = client.get_metadata(req).await?.into_inner();
+
+    let mut response = connection
+        .try_each(None, |channel| async {
+            let mut client = NodeCtlSvcClient::new(channel)
+                .accept_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Gzip);
+
+            client.get_metadata(req).await
+        })
+        .await?
+        .into_inner();
 
     let logs = StorageCodec::decode::<Logs, _>(&mut response.encoded)?;
     c_println!("Log Configuration ({})", logs.version());
