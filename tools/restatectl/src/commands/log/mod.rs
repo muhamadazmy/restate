@@ -22,9 +22,16 @@ use cling::prelude::*;
 
 use restate_cli_util::_comfy_table::{Cell, Color};
 use restate_cli_util::c_println;
-use restate_types::logs::metadata::{ProviderKind, Segment};
+use restate_core::protobuf::node_ctl_svc::node_ctl_svc_client::NodeCtlSvcClient;
+use restate_core::protobuf::node_ctl_svc::GetMetadataRequest;
+use restate_core::MetadataKind;
+use restate_types::logs::metadata::{Logs as LogsMetadata, ProviderKind, Segment};
 use restate_types::logs::LogId;
 use restate_types::replicated_loglet::ReplicatedLogletParams;
+use restate_types::storage::StorageCodec;
+use tonic::codec::CompressionEncoding;
+
+use crate::connection::ConnectionInfo;
 
 #[derive(Run, Subcommand, Clone)]
 pub enum Logs {
@@ -129,4 +136,25 @@ pub fn deserialize_replicated_log_params(segment: &Segment) -> Option<Replicated
         }
         _ => None,
     }
+}
+
+pub async fn get_logs(connection: &ConnectionInfo) -> anyhow::Result<LogsMetadata> {
+    let req = GetMetadataRequest {
+        kind: MetadataKind::Logs.into(),
+        sync: false,
+    };
+
+    let mut response = connection
+        .try_each(None, |channel| async {
+            let mut client = NodeCtlSvcClient::new(channel)
+                .accept_compressed(CompressionEncoding::Gzip)
+                .send_compressed(CompressionEncoding::Gzip);
+
+            client.get_metadata(req).await
+        })
+        .await?
+        .into_inner();
+
+    let logs = StorageCodec::decode::<LogsMetadata, _>(&mut response.encoded)?;
+    Ok(logs)
 }

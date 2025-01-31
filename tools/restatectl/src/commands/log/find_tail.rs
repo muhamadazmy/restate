@@ -9,16 +9,16 @@
 // by the Apache License, Version 2.0.
 
 use cling::prelude::*;
-use restate_cli_util::_comfy_table::{Cell, Color, Table};
+use restate_cli_util::_comfy_table::{Cell, Table};
 use restate_cli_util::ui::console::StyledTable;
+use restate_types::nodes_config::Role;
 use tonic::codec::CompressionEncoding;
 
 use restate_admin::cluster_controller::protobuf::cluster_ctrl_svc_client::ClusterCtrlSvcClient;
 use restate_admin::cluster_controller::protobuf::{FindTailRequest, TailState};
 use restate_cli_util::c_println;
 
-use crate::app::ConnectionInfo;
-use crate::util::grpc_channel;
+use crate::connection::ConnectionInfo;
 
 use super::LogIdRange;
 
@@ -31,10 +31,6 @@ pub struct FindTailOpts {
 }
 
 async fn find_tail(connection: &ConnectionInfo, opts: &FindTailOpts) -> anyhow::Result<()> {
-    let channel = grpc_channel(connection.cluster_controller.clone());
-    let mut client =
-        ClusterCtrlSvcClient::new(channel).accept_compressed(CompressionEncoding::Gzip);
-
     let mut chain_table = Table::new_styled();
     let header_row = vec!["LOG-ID", "SEGMENT", "STATE", "TAIL-LSN"];
 
@@ -42,17 +38,16 @@ async fn find_tail(connection: &ConnectionInfo, opts: &FindTailOpts) -> anyhow::
 
     for log_id in opts.log_id.clone().into_iter().flatten() {
         let find_tail_request = FindTailRequest { log_id };
-        let response = match client.find_tail(find_tail_request).await {
-            Ok(response) => response.into_inner(),
-            Err(err) => {
-                chain_table.add_row(vec![
-                    Cell::new(log_id),
-                    Cell::new(err.code()).fg(Color::DarkRed),
-                    Cell::new(err.message()).fg(Color::DarkRed),
-                ]);
-                continue;
-            }
-        };
+        let response = connection
+            .try_each(Some(Role::Admin), |channel| async {
+                let mut client = ClusterCtrlSvcClient::new(channel)
+                    .accept_compressed(CompressionEncoding::Gzip)
+                    .send_compressed(CompressionEncoding::Gzip);
+
+                client.find_tail(find_tail_request).await
+            })
+            .await?
+            .into_inner();
 
         chain_table.add_row(vec![
             Cell::new(response.log_id),
