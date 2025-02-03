@@ -14,17 +14,24 @@ use crate::grpc::{
     DeleteRequest, GetRequest, GetResponse, GetVersionResponse,
     ProvisionRequest as ProtoProvisionRequest, ProvisionResponse, PutRequest, StatusResponse,
 };
+use crate::metric_definitions::{
+    METADATA_SERVER_DELETE_DURATION, METADATA_SERVER_DELETE_TOTAL, METADATA_SERVER_GET_DURATION,
+    METADATA_SERVER_GET_TOTAL, METADATA_SERVER_GET_VERSION_DURATION,
+    METADATA_SERVER_GET_VERSION_TOTAL, METADATA_SERVER_PUT_DURATION, METADATA_SERVER_PUT_TOTAL,
+};
 use crate::{
     prepare_initial_nodes_configuration, MetadataStoreRequest, MetadataStoreSummary,
     ProvisionError, ProvisionRequest, ProvisionSender, RequestError, RequestSender, StatusWatch,
 };
 use async_trait::async_trait;
+use metrics::{counter, histogram};
 use restate_core::metadata_store::{serialize_value, Precondition};
 use restate_types::config::Configuration;
 use restate_types::metadata_store::keys::NODES_CONFIG_KEY;
 use restate_types::nodes_config::NodesConfiguration;
 use restate_types::storage::StorageCodec;
 use std::ops::Deref;
+use std::time::Instant;
 use tokio::sync::{oneshot, watch};
 use tonic::{Request, Response, Status};
 
@@ -53,6 +60,9 @@ impl MetadataStoreHandler {
 #[async_trait]
 impl MetadataServerSvc for MetadataStoreHandler {
     async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
+        counter!(METADATA_SERVER_GET_TOTAL).increment(1);
+
+        let start_time = Instant::now();
         let (result_tx, result_rx) = oneshot::channel();
 
         let request = request.into_inner();
@@ -68,6 +78,8 @@ impl MetadataServerSvc for MetadataStoreHandler {
             .await
             .map_err(|_| Status::unavailable("metadata store is shut down"))??;
 
+        histogram!(METADATA_SERVER_GET_DURATION).record(start_time.elapsed());
+
         Ok(Response::new(GetResponse {
             value: result.map(Into::into),
         }))
@@ -77,6 +89,8 @@ impl MetadataServerSvc for MetadataStoreHandler {
         &self,
         request: Request<GetRequest>,
     ) -> Result<Response<GetVersionResponse>, Status> {
+        counter!(METADATA_SERVER_GET_VERSION_TOTAL).increment(1);
+        let start_time = Instant::now();
         let (result_tx, result_rx) = oneshot::channel();
 
         let request = request.into_inner();
@@ -92,12 +106,16 @@ impl MetadataServerSvc for MetadataStoreHandler {
             .await
             .map_err(|_| Status::unavailable("metadata store is shut down"))??;
 
+        histogram!(METADATA_SERVER_GET_VERSION_DURATION).record(start_time.elapsed());
+
         Ok(Response::new(GetVersionResponse {
             version: result.map(Into::into),
         }))
     }
 
     async fn put(&self, request: Request<PutRequest>) -> Result<Response<()>, Status> {
+        counter!(METADATA_SERVER_PUT_TOTAL).increment(1);
+        let start_time = Instant::now();
         let (result_tx, result_rx) = oneshot::channel();
 
         let request = request.into_inner();
@@ -123,10 +141,13 @@ impl MetadataServerSvc for MetadataStoreHandler {
             .await
             .map_err(|_| Status::unavailable("metadata store is shut down"))??;
 
+        histogram!(METADATA_SERVER_PUT_DURATION).record(start_time.elapsed());
         Ok(Response::new(()))
     }
 
     async fn delete(&self, request: Request<DeleteRequest>) -> Result<Response<()>, Status> {
+        counter!(METADATA_SERVER_DELETE_TOTAL).increment(1);
+        let start_time = Instant::now();
         let (result_tx, result_rx) = oneshot::channel();
 
         let request = request.into_inner();
@@ -147,6 +168,7 @@ impl MetadataServerSvc for MetadataStoreHandler {
             .await
             .map_err(|_| Status::unavailable("metadata store is shut down"))??;
 
+        histogram!(METADATA_SERVER_DELETE_DURATION).record(start_time.elapsed());
         Ok(Response::new(()))
     }
 
