@@ -8,8 +8,13 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use crate::metric_definitions::{
+    METADATA_SERVER_RAFT_RECV_MESSAGE_BYTES, METADATA_SERVER_RAFT_RECV_MESSAGE_TOTAL,
+    METADATA_SERVER_RAFT_SENT_MESSAGE_BYTES, METADATA_SERVER_RAFT_SENT_MESSAGE_TOTAL,
+};
 use crate::raft::network::{grpc_svc, NetworkMessage};
 use futures::StreamExt;
+use metrics::counter;
 use restate_core::{cancellation_watcher, ShutdownError, TaskCenter, TaskKind};
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -74,7 +79,7 @@ where
             return Ok(());
         }
 
-        let connection = Connection::new(outgoing_tx);
+        let connection = Connection::new(remote_peer, outgoing_tx);
         guard.insert(remote_peer, connection);
 
         let reactor = ConnectionReactor {
@@ -123,6 +128,11 @@ where
                         Some(message) => {
                             match message {
                                 Ok(message) => {
+                                    counter!(METADATA_SERVER_RAFT_RECV_MESSAGE_TOTAL, "peer" => self.remote_peer.to_string())
+                                        .increment(1);
+                                    counter!(METADATA_SERVER_RAFT_RECV_MESSAGE_BYTES, "peer" => self.remote_peer.to_string())
+                                        .increment(message.payload.len() as u64);
+
                                     let mut cursor = Cursor::new(&message.payload);
                                     let message = M::deserialize(&mut cursor)?;
 
@@ -183,18 +193,32 @@ impl<M> ConnectionManagerInner<M> {
 
 #[derive(Debug, Clone)]
 pub struct Connection {
+    remote_peer: u64,
     tx: mpsc::Sender<grpc_svc::NetworkMessage>,
 }
 
 impl Connection {
-    pub fn new(tx: mpsc::Sender<grpc_svc::NetworkMessage>) -> Self {
-        Connection { tx }
+    pub fn new(remote_peer: u64, tx: mpsc::Sender<grpc_svc::NetworkMessage>) -> Self {
+        Connection { remote_peer, tx }
     }
 
     pub fn try_send(
         &self,
         message: grpc_svc::NetworkMessage,
     ) -> Result<(), TrySendError<grpc_svc::NetworkMessage>> {
-        self.tx.try_send(message)
+        let size = message.payload.len();
+
+        self.tx.try_send(message)?;
+
+        // note that we assume that this message is sent while in fact
+        // it's just queued. The actual message might still not get
+        // sent
+
+        counter!(METADATA_SERVER_RAFT_SENT_MESSAGE_TOTAL, "peer" => self.remote_peer.to_string())
+            .increment(1);
+        counter!(METADATA_SERVER_RAFT_SENT_MESSAGE_BYTES, "peer" => self.remote_peer.to_string())
+            .increment(size as u64);
+
+        Ok(())
     }
 }
