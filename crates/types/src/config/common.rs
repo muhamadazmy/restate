@@ -628,6 +628,7 @@ enum MetadataClientKindShadow {
     #[serde(alias = "embedded")]
     Native {
         address: Option<AdvertisedAddress>,
+        #[serde(default)]
         addresses: Vec<AdvertisedAddress>,
     },
     Etcd {
@@ -657,8 +658,15 @@ impl TryFrom<MetadataClientKindShadow> for MetadataClientKind {
 
                 Self::Native {
                     addresses: match address {
-                        Some(address) if addresses == vec![default_address] => vec![address],
-                        Some(_) => return Err("Conflicting configuration, embedded metadata-store-client cannot have both `address` and `addresses`"),
+                        Some(address)
+                            if addresses == vec![default_address] || addresses.is_empty() =>
+                        {
+                            vec![address]
+                        }
+                        Some(_) => {
+                            println!("address: {address:?}, addresses: {addresses:?}");
+                            return Err("Conflicting configuration, embedded metadata-store-client cannot have both `address` and `addresses`");
+                        }
                         None => addresses,
                     },
                 }
