@@ -17,8 +17,8 @@ use std::sync::{
 
 use crossbeam_utils::CachePadded;
 use tokio::sync::Semaphore;
-use tokio_util::task::TaskTracker;
-use tracing::{debug, instrument, trace};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tracing::{debug, info, instrument, trace};
 
 use restate_core::{
     network::{rpc_router::RpcRouter, Networking, TransportConnect},
@@ -39,6 +39,11 @@ use super::{
     replication::spread_selector::{SelectorStrategy, SpreadSelector},
 };
 use crate::loglet::{util::TailOffsetWatch, LogletCommit, OperationError};
+
+/// A soft-limit of the actual number of records we want to allow in a loglet, this
+/// leaves plenty of space for slop in the overflow check. The actual loglet records are allowed to
+/// be more than this number if they were written. It's not an invariant of the replicated loglet.
+const MAX_OFFSET_SOFT: u32 = (i32::MAX) as u32;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SequencerError {
@@ -111,6 +116,8 @@ pub struct Sequencer<T> {
     record_permits: Arc<Semaphore>,
     in_flight_appends: TaskTracker,
     record_cache: RecordCache,
+    /// this is the parent token for all appenders.
+    cancellation_token: CancellationToken,
 }
 
 impl<T> Sequencer<T> {
@@ -175,6 +182,7 @@ impl<T: TransportConnect> Sequencer<T> {
             record_cache,
             max_inflight_records_in_config: AtomicUsize::new(max_in_flight_records_in_config),
             in_flight_appends: TaskTracker::default(),
+            cancellation_token: CancellationToken::default(),
         }
     }
 
@@ -186,16 +194,17 @@ impl<T: TransportConnect> Sequencer<T> {
     /// observed global_tail with is_sealed=true)
     ///
     /// This method is cancellation safe.
-    pub async fn drain(&self) -> Result<(), ShutdownError> {
+    pub async fn drain(&self) {
         // stop issuing new permits
         self.record_permits.close();
         // required to allow in_flight.wait() to finish.
         self.in_flight_appends.close();
+        self.cancellation_token.cancel();
 
         // we are assuming here that seal has been already executed on majority of nodes. This is
         // important since in_flight.close() doesn't prevent new tasks from being spawned.
         if self.sequencer_shared_state.known_global_tail.is_sealed() {
-            return Ok(());
+            return;
         }
 
         // wait for in-flight tasks to complete before returning
@@ -210,8 +219,6 @@ impl<T: TransportConnect> Sequencer<T> {
             loglet_id = %self.sequencer_shared_state.my_params.loglet_id,
             "Sequencer drained",
         );
-
-        Ok(())
     }
 
     fn ensure_enough_permits(&self, required: usize) {
@@ -256,6 +263,22 @@ impl<T: TransportConnect> Sequencer<T> {
             return Ok(LogletCommit::sealed());
         };
 
+        // note: len is technically u32 but we enforce
+        if self
+            .next_write_offset
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .checked_add(len)
+            .is_none_or(|o| o >= MAX_OFFSET_SOFT)
+        {
+            // fail the append to ask for reconfiguration. We'll consider this loglet done.
+            info!("Loglet offset exhausted, draining this sequencer");
+            drop(permit);
+            self.drain().await;
+            return Ok(LogletCommit::reconfiguration_needed(
+                "loglet reached its soft-limit",
+            ));
+        }
+
         // Note: We don't need to sync order across threads here since the ordering requirement
         // requires that the user calls enqueue_batch sequentially to guarantee that original batch ordering
         // is maintained.
@@ -288,7 +311,9 @@ impl<T: TransportConnect> Sequencer<T> {
             commit_resolver,
         );
 
-        let fut = self.in_flight_appends.track_future(appender.run());
+        let fut = self
+            .in_flight_appends
+            .track_future(appender.run(self.cancellation_token.child_token()));
         // Why not managed tasks, because managed tasks are not designed to manage a potentially
         // very large number of tasks, they also require a lock acquistion on start and that might
         // be a contention point.

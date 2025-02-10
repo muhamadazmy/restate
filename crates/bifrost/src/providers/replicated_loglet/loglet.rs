@@ -219,7 +219,7 @@ impl<T: TransportConnect> ReplicatedLoglet<T> {
                             }
                             CheckSealOutcome::FullySealed => {
                                 // already fully sealed, just make sure the sequencer is drained.
-                                handle.drain().await?;
+                                handle.drain().await;
                                 // note that we can only do that if we are the sequencer because
                                 // our known_global_tail is authoritative. We have no doubt about
                                 // whether the tail needs to be repaired or not.
@@ -370,8 +370,6 @@ impl<T: TransportConnect> Loglet for ReplicatedLoglet<T> {
     /// trim_point is inclusive (will be trimmed)
     async fn trim(&self, trim_point: LogletOffset) -> Result<(), OperationError> {
         trace!("trim() called");
-        let trim_point = trim_point.min(self.known_global_tail.latest_offset().prev_unchecked());
-
         TrimTask::new(
             &self.my_params,
             self.logservers_rpc.clone(),
@@ -420,7 +418,7 @@ impl<T: TransportConnect> Loglet for ReplicatedLoglet<T> {
         .await?;
         // If we are the sequencer, we need to wait until the sequencer is drained.
         if let SequencerAccess::Local { handle } = &self.sequencer {
-            handle.drain().await?;
+            handle.drain().await;
             self.known_global_tail.notify_seal();
         };
         // Primarily useful for remote sequencer to enforce seal check on the next find_tail() call
