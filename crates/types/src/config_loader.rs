@@ -65,6 +65,7 @@ impl ConfigLoader {
         let mut config: Configuration = figment.extract()?;
 
         config.common.set_derived_values();
+        config.admin.set_derived_values();
         Ok(config.apply_cascading_values())
     }
 
