@@ -8,7 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use crate::commands::cluster::config::cluster_config_string;
+use crate::commands::config::cluster_config_string;
 use crate::connection::ConnectionInfo;
 use crate::util::grpc_channel;
 use clap::Parser;
@@ -55,15 +55,15 @@ async fn provision_cluster(
     connection: &ConnectionInfo,
     provision_opts: &ProvisionOpts,
 ) -> anyhow::Result<()> {
-    let address = match connection.addresses.len().cmp(&1) {
+    let address = match connection.address.len().cmp(&1) {
         Ordering::Greater => {
-            let address = &connection.addresses[0];
+            let address = &connection.address[0];
             c_println!(
                 "Cluster provisioning must be performed on a single node. Using {address} for provisioning.",
             );
             address
         }
-        Ordering::Equal => &connection.addresses[0],
+        Ordering::Equal => &connection.address[0],
         Ordering::Less => {
             anyhow::bail!("At least one address must be specified to provision");
         }
