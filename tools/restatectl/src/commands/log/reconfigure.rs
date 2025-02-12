@@ -38,7 +38,7 @@ pub struct ReconfigureOpts {
     #[clap(long, short)]
     provider: Option<ProviderKind>,
     /// Option segment index to seal. The tail segment is chosen automatically if not provided.
-    #[clap(long, short)]
+    #[clap(long)]
     segment_index: Option<u32>,
     /// The [minimum] expected metadata version
     #[clap(long, short, default_value = "1")]
