@@ -32,7 +32,7 @@ pub struct GenerateLogMetadataOpts {
     #[clap(long, required = true, value_delimiter=',', num_args = 1..)]
     nodeset: Vec<PlainNodeId>,
     /// The generational node id of the sequencer node, e.g. N1:1
-    #[clap(long, short)]
+    #[clap(long)]
     sequencer: GenerationalNodeId,
     /// The number of logs
     #[clap(long, short)]
