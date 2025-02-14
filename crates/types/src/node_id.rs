@@ -37,6 +37,33 @@ pub enum NodeId {
     Generational(GenerationalNodeId),
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("invalid node id: {0}")]
+pub struct MalformedNodeId(String);
+
+impl FromStr for NodeId {
+    type Err = MalformedNodeId;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let node_id = match s.split_once(':') {
+            Some((id_part, gen_part)) => {
+                let id: PlainNodeId = id_part
+                    .parse()
+                    .map_err(|_| MalformedNodeId(id_part.to_string()))?;
+
+                let generation = gen_part
+                    .parse()
+                    .map_err(|_| MalformedNodeId(s.to_string()))?;
+
+                NodeId::Generational(GenerationalNodeId::new(id.into(), generation))
+            }
+            None => NodeId::Plain(s.parse().map_err(|_| MalformedNodeId(s.to_string()))?),
+        };
+
+        Ok(node_id)
+    }
+}
+
 #[derive(
     PartialEq,
     Eq,
@@ -400,6 +427,22 @@ mod tests {
         assert!("25".parse::<GenerationalNodeId>().is_err());
         // invalid
         assert!("N25".parse::<GenerationalNodeId>().is_err());
+    }
+
+    #[test]
+    fn test_parse_node_id_string() {
+        assert!(
+            matches!("25".parse::<NodeId>(), Ok(NodeId::Plain(id)) if id == PlainNodeId::new(25))
+        );
+        assert!(
+            matches!("N25".parse::<NodeId>(), Ok(NodeId::Plain(id)) if id == PlainNodeId::new(25))
+        );
+        assert!(
+            matches!("N25:18".parse::<NodeId>(), Ok(NodeId::Generational(id)) if id == GenerationalNodeId::new(25, 18))
+        );
+
+        assert!("N25:".parse::<NodeId>().is_err());
+        assert!("N25:X".parse::<NodeId>().is_err());
     }
 
     #[test]

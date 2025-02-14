@@ -90,12 +90,19 @@ message CreatePartitionSnapshotRequest { uint32 partition_id = 1; }
 message CreatePartitionSnapshotResponse { string snapshot_id = 1; }
 
 message ChainExtension {
+  reserved 5;
   // segment_index will be automatically selected (to the index of last segment)
   // if not set.
   optional uint32 segment_index = 2;
   // check `ProviderKind` for possible values.
   string provider = 4;
-  string params = 5;
+
+  // replication_property is required if provider=="replicated"
+  optional restate.cluster.ReplicationProperty replication = 6;
+  // optional if provider=="replicated", otherwise ignored
+  optional restate.common.NodeId sequencer = 7;
+  // optional if provider="replicated", otherwise ignored
+  repeated restate.common.NodeId nodeset = 8;
 }
 
 message SealAndExtendChainRequest {
