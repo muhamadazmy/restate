@@ -21,7 +21,7 @@ use restate_types::metadata_store::keys::{BIFROST_CONFIG_KEY, NODES_CONFIG_KEY};
 use restate_types::nodes_config::NodesConfiguration;
 use restate_types::protobuf::cluster::ClusterConfiguration;
 use restate_types::storage::{StorageCodec, StorageEncode};
-use restate_types::{Version, Versioned};
+use restate_types::{PlainNodeId, Version, Versioned};
 
 use crate::cluster_controller::protobuf::cluster_ctrl_svc_server::ClusterCtrlSvc;
 use crate::cluster_controller::protobuf::{
@@ -199,7 +199,23 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
                     .provider
                     .parse()
                     .map_err(|_| Status::invalid_argument("Provider type is not supported"))?,
-                params: ext.params.into(),
+
+                nodeset: if !ext.nodeset.is_empty() {
+                    Some(
+                        ext.nodeset
+                            .iter()
+                            .map(|node_id| PlainNodeId::new(node_id.id))
+                            .collect(),
+                    )
+                } else {
+                    None
+                },
+                sequencer: ext.sequencer.map(Into::into),
+                replication: ext
+                    .replication
+                    .map(|p| p.try_into())
+                    .transpose()
+                    .map_err(|_| Status::invalid_argument("Invalid replication property"))?,
             }),
             None => None,
         };
