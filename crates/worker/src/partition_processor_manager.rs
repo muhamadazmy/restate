@@ -433,10 +433,14 @@ impl PartitionProcessorManager {
                                 .remove(processor.as_ref().expect("must be some").key_range());
 
                             match result {
-                                Err(ProcessorError::TrimGapEncountered { gap_to_lsn: to_lsn }) => {
+                                Err(ProcessorError::TrimGapEncountered {
+                                    trim_gap_end: to_lsn,
+                                    read_pointer: sequence_number,
+                                }) => {
                                     if self.snapshot_repository.is_some() {
                                         info!(
                                             trim_gap_to_lsn = ?to_lsn,
+                                            ?sequence_number,
                                             "Partition processor stopped due to a log trim gap, will attempt to fast-forward on restart",
                                         );
                                         self.fast_forward_on_startup.insert(partition_id, to_lsn);
@@ -761,6 +765,7 @@ impl PartitionProcessorManager {
                     metadata.partition_id,
                     Ok(SnapshotCreated {
                         snapshot_id: metadata.snapshot_id,
+                        min_applied_lsn: metadata.min_applied_lsn,
                         partition_id: metadata.partition_id,
                     }),
                 )
@@ -781,6 +786,10 @@ impl PartitionProcessorManager {
     }
 
     fn trigger_periodic_partition_snapshots(&mut self) {
+        let Some(snapshot_repository) = self.snapshot_repository.clone() else {
+            return;
+        };
+
         let Some(records_per_snapshot) = self
             .updateable_config
             .live_load()
@@ -819,11 +828,7 @@ impl PartitionProcessorManager {
                 last_applied_lsn = %status.last_applied_log_lsn.unwrap_or(SequenceNumber::INVALID),
                 "Requesting partition snapshot",
             );
-            self.spawn_create_snapshot_task(
-                partition_id,
-                self.snapshot_repository.clone().expect("is some"), // validated on startup
-                None,
-            );
+            self.spawn_create_snapshot_task(partition_id, snapshot_repository.clone(), None);
         }
     }
 
