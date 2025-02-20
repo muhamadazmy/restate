@@ -18,6 +18,7 @@ use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use futures::{stream, StreamExt, TryStreamExt};
+use restate_types::time::MillisSinceEpoch;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, instrument, warn};
@@ -522,6 +523,7 @@ where
         reciprocal: Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
         partition_key: PartitionKey,
         cmd: Command,
+        request_created_at: MillisSinceEpoch,
     ) {
         match &mut self.state {
             State::Follower | State::Candidate { .. } => {
@@ -534,7 +536,13 @@ where
             }
             State::Leader(leader_state) => {
                 leader_state
-                    .handle_rpc_proposal_command(request_id, reciprocal, partition_key, cmd)
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        reciprocal,
+                        partition_key,
+                        cmd,
+                        request_created_at,
+                    )
                     .await;
             }
         }

@@ -33,6 +33,7 @@ pub struct PartitionProcessorRpcRequest {
     pub request_id: PartitionProcessorRpcRequestId,
     pub partition_id: PartitionId,
     pub inner: PartitionProcessorRpcRequestInner,
+    pub created_at: MillisSinceEpoch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

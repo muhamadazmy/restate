@@ -9,6 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use assert2::let_assert;
+use restate_types::time::MillisSinceEpoch;
 use tracing::trace;
 
 use restate_types::identifiers::{
@@ -367,6 +368,7 @@ where
                     request_id,
                     partition_id,
                     inner: inner_request,
+                    created_at: MillisSinceEpoch::now(),
                 },
             )
             .await?

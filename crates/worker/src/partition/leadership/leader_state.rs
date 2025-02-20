@@ -8,7 +8,10 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use crate::metric_definitions::{PARTITION_ACTUATOR_HANDLED, PARTITION_HANDLE_LEADER_ACTIONS};
+use crate::metric_definitions::{
+    PARTITION_ACTUATOR_HANDLED, PARTITION_HANDLE_LEADER_ACTIONS, PARTITION_LABEL,
+    PARTITION_REQUEST_TO_OUTPUT_DURATION, PARTITION_REQUEST_TO_SUBMITTED_DURATION,
+};
 use crate::partition::invoker_storage_reader::InvokerStorageReader;
 use crate::partition::leadership::self_proposer::SelfProposer;
 use crate::partition::leadership::{ActionEffect, Error, InvokerStream, TimerService};
@@ -18,7 +21,7 @@ use crate::partition::{respond_to_rpc, shuffle};
 use futures::future::OptionFuture;
 use futures::stream::FuturesUnordered;
 use futures::{stream, FutureExt, StreamExt};
-use metrics::{counter, Counter};
+use metrics::{counter, histogram, Counter, Histogram};
 use restate_bifrost::CommitToken;
 use restate_core::network::Reciprocal;
 use restate_core::{TaskCenter, TaskHandle, TaskId};
@@ -46,6 +49,30 @@ use tracing::{debug, trace};
 
 const BATCH_READY_UP_TO: usize = 10;
 
+struct RpcReciprocal {
+    inner: Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
+    // only used for metrics
+    request_created_at: MillisSinceEpoch,
+}
+
+impl RpcReciprocal {
+    fn new(
+        request_created_at: MillisSinceEpoch,
+        reciprocal: Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
+    ) -> Self {
+        Self {
+            request_created_at,
+            inner: reciprocal,
+        }
+    }
+
+    fn into_inner(
+        self,
+    ) -> Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>> {
+        self.inner
+    }
+}
+
 pub struct LeaderState {
     partition_id: PartitionId,
     pub leader_epoch: LeaderEpoch,
@@ -61,16 +88,16 @@ pub struct LeaderState {
     pub timer_service: Pin<Box<TimerService>>,
     self_proposer: SelfProposer,
 
-    pub awaiting_rpc_actions: HashMap<
-        PartitionProcessorRpcRequestId,
-        Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
-    >,
+    awaiting_rpc_actions: HashMap<PartitionProcessorRpcRequestId, RpcReciprocal>,
     awaiting_rpc_self_propose: FuturesUnordered<SelfAppendFuture>,
 
     invoker_stream: InvokerStream,
     shuffle_stream: ReceiverStream<shuffle::OutboxTruncation>,
     pub pending_cleanup_timers_to_schedule: VecDeque<(InvocationId, Duration)>,
     cleaner_task_id: TaskId,
+
+    submitted_histogram: Histogram,
+    output_histogram: Histogram,
 }
 
 impl LeaderState {
@@ -102,6 +129,9 @@ impl LeaderState {
             invoker_stream: invoker_rx,
             shuffle_stream: ReceiverStream::new(shuffle_rx),
             pending_cleanup_timers_to_schedule: Default::default(),
+
+            submitted_histogram: histogram!(PARTITION_REQUEST_TO_SUBMITTED_DURATION, PARTITION_LABEL=>partition_id.to_string()),
+            output_histogram: histogram!(PARTITION_REQUEST_TO_OUTPUT_DURATION, PARTITION_LABEL=>partition_id.to_string()),
         }
     }
 
@@ -209,11 +239,9 @@ impl LeaderState {
                 %request_id,
                 "Failing rpc because I lost leadership",
             );
-            respond_to_rpc(
-                reciprocal.prepare(Err(PartitionProcessorRpcError::LostLeadership(
-                    self.partition_id,
-                ))),
-            );
+            respond_to_rpc(reciprocal.into_inner().prepare(Err(
+                PartitionProcessorRpcError::LostLeadership(self.partition_id),
+            )));
         }
         for fut in self.awaiting_rpc_self_propose.iter_mut() {
             fut.fail_with_lost_leadership(self.partition_id);
@@ -277,19 +305,17 @@ impl LeaderState {
         reciprocal: Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
         partition_key: PartitionKey,
         cmd: Command,
+        request_created_at: MillisSinceEpoch,
     ) {
         match self.awaiting_rpc_actions.entry(request_id) {
-            Entry::Occupied(o) => {
+            Entry::Occupied(mut o) => {
                 // In this case, someone already proposed this command,
                 // let's just replace the reciprocal and fail the old one to avoid keeping it dangling
-                let old_reciprocal = o.remove();
+                let old_reciprocal = o.insert(RpcReciprocal::new(request_created_at, reciprocal));
                 trace!(%request_id, "Replacing rpc with newer request");
-                respond_to_rpc(
-                    old_reciprocal.prepare(Err(PartitionProcessorRpcError::Internal(
-                        "retried".to_string(),
-                    ))),
-                );
-                self.awaiting_rpc_actions.insert(request_id, reciprocal);
+                respond_to_rpc(old_reciprocal.into_inner().prepare(Err(
+                    PartitionProcessorRpcError::Internal("retried".to_string()),
+                )));
             }
             Entry::Vacant(v) => {
                 // In this case, no one proposed this command yet, let's try to propose it
@@ -299,7 +325,7 @@ impl LeaderState {
                             .prepare(Err(PartitionProcessorRpcError::Internal(e.to_string()))),
                     );
                 } else {
-                    v.insert(reciprocal);
+                    v.insert(RpcReciprocal::new(request_created_at, reciprocal));
                 }
             }
         }
@@ -407,16 +433,16 @@ impl LeaderState {
                 ..
             } => {
                 if let Some(response_tx) = self.awaiting_rpc_actions.remove(&request_id) {
-                    respond_to_rpc(
-                        response_tx.prepare(Ok(PartitionProcessorRpcResponse::Output(
-                            InvocationOutput {
-                                request_id,
-                                invocation_id,
-                                completion_expiry_time,
-                                response,
-                            },
-                        ))),
-                    );
+                    self.output_histogram
+                        .record(response_tx.request_created_at.elapsed());
+                    respond_to_rpc(response_tx.into_inner().prepare(Ok(
+                        PartitionProcessorRpcResponse::Output(InvocationOutput {
+                            request_id,
+                            invocation_id,
+                            completion_expiry_time,
+                            response,
+                        }),
+                    )));
                 } else {
                     debug!(%request_id, "Ignoring sending ingress response because there is no awaiting rpc");
                 }
@@ -428,7 +454,10 @@ impl LeaderState {
                 ..
             } => {
                 if let Some(response_tx) = self.awaiting_rpc_actions.remove(&request_id) {
-                    respond_to_rpc(response_tx.prepare(Ok(
+                    self.submitted_histogram
+                        .record(response_tx.request_created_at.elapsed());
+
+                    respond_to_rpc(response_tx.into_inner().prepare(Ok(
                         PartitionProcessorRpcResponse::Submitted(SubmittedInvocationNotification {
                             request_id,
                             execution_time,
@@ -507,7 +536,7 @@ impl Future for SelfAppendFuture {
         let append_result = ready!(self.commit_token.poll_unpin(cx));
 
         if append_result.is_err() {
-            self.get_mut().fail_with_internal();
+            self.fail_with_internal();
             return Poll::Ready(());
         }
         self.succeed_with_appended();
