@@ -9,6 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use bytes::{Bytes, BytesMut};
+use restate_bifrost::loglet::FindTailAttr;
 use tonic::{async_trait, Request, Response, Status};
 use tracing::info;
 
@@ -279,7 +280,7 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
             })?;
 
         let tail_state = writable_loglet
-            .find_tail()
+            .find_tail(FindTailAttr::default())
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
 
