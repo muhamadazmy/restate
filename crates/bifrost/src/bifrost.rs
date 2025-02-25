@@ -198,6 +198,7 @@ impl Bifrost {
     ///
     /// ```no_run
     /// use restate_bifrost::{Bifrost, LogReadStream};
+    /// use restate_bifrost::loglet::FindTailAttr;
     /// use restate_types::logs::{KeyFilter, LogId, SequenceNumber};
     ///
     /// async fn reader(bifrost: &Bifrost, log_id: LogId) -> LogReadStream {
@@ -205,7 +206,7 @@ impl Bifrost {
     ///        log_id,
     ///        KeyFilter::Any,
     ///        bifrost.get_trim_point(log_id).await.unwrap(),
-    ///        bifrost.find_tail(log_id).await.unwrap().offset().prev(),
+    ///        bifrost.find_tail(log_id, FindTailAttr::default()).await.unwrap().offset().prev(),
     ///     ).unwrap()
     /// }
     /// ```
