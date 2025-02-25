@@ -18,6 +18,7 @@ use assert2::let_assert;
 use enumset::EnumSet;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt as _};
 use metrics::histogram;
+use restate_bifrost::loglet::FindTailAttr;
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, instrument, trace, warn, Span};
@@ -328,7 +329,7 @@ where
         // propagate errors and let the PPM handle error retries
         let current_tail = self
             .bifrost
-            .find_tail(LogId::from(self.partition_id))
+            .find_tail(LogId::from(self.partition_id), FindTailAttr::Durable)
             .await?;
 
         debug!(
