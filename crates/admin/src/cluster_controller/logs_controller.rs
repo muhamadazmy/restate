@@ -12,6 +12,7 @@ use futures::future;
 use futures::never::Never;
 use rand::prelude::IteratorRandom;
 use rand::rng;
+use restate_bifrost::loglet::FindTailAttr;
 use std::collections::HashMap;
 use std::iter;
 use std::ops::Deref;
@@ -1095,7 +1096,7 @@ impl LogsController {
                     }
 
                     debug!(%log_id, segment_index=%writeable_loglet.segment_index(), "Attempting to find tail for loglet");
-                    let found_tail = match writeable_loglet.find_tail().await {
+                    let found_tail = match writeable_loglet.find_tail(FindTailAttr::Durable).await {
                         Ok(tail) => tail,
                         Err(err) => {
                             debug!(error=%err, %log_id, segment_index=%writeable_loglet.segment_index(), "Failed to find tail for loglet");

@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context};
 use cling::prelude::*;
 use futures_util::StreamExt;
+use restate_bifrost::loglet::FindTailAttr;
 use tracing::{debug, info};
 
 use restate_bifrost::BifrostService;
@@ -98,7 +99,7 @@ async fn dump_log(opts: &DumpLogOpts) -> anyhow::Result<()> {
 
         let log_id = LogId::from(opts.log_id);
         debug!("Finding log tail");
-        let tail = bifrost.find_tail(log_id).await?;
+        let tail = bifrost.find_tail(log_id, FindTailAttr::default()).await?;
         debug!("Log tail is {:?}", tail);
         let trim_point = bifrost.get_trim_point(log_id).await?;
         debug!("Trim point is {:?}", trim_point);

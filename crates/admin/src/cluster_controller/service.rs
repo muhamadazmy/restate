@@ -809,6 +809,7 @@ mod tests {
 
     use googletest::assert_that;
     use googletest::matchers::eq;
+    use restate_bifrost::loglet::FindTailAttr;
     use test_log::test;
     use tracing::{debug, info, warn};
 
@@ -980,7 +981,12 @@ mod tests {
             assert_eq!(Lsn::from(i), lsn);
         }
         applied_lsn.store(
-            bifrost.find_tail(LOG_ID).await?.offset().prev().as_u64(),
+            bifrost
+                .find_tail(LOG_ID, FindTailAttr::default())
+                .await?
+                .offset()
+                .prev()
+                .as_u64(),
             Ordering::Relaxed,
         );
 
@@ -1057,7 +1063,12 @@ mod tests {
             assert_eq!(Lsn::from(i), lsn);
         }
         applied_lsn.store(
-            bifrost.find_tail(LOG_ID).await?.offset().prev().as_u64(),
+            bifrost
+                .find_tail(LOG_ID, FindTailAttr::default())
+                .await?
+                .offset()
+                .prev()
+                .as_u64(),
             Ordering::Relaxed,
         );
         tokio::time::sleep(interval_duration * 2).await;
@@ -1134,7 +1145,12 @@ mod tests {
             assert_eq!(Lsn::from(i), lsn);
         }
         applied_lsn.store(
-            bifrost.find_tail(LOG_ID).await?.offset().prev().as_u64(),
+            bifrost
+                .find_tail(LOG_ID, FindTailAttr::default())
+                .await?
+                .offset()
+                .prev()
+                .as_u64(),
             Ordering::Relaxed,
         );
         tokio::time::sleep(interval_duration * 10).await;
@@ -1214,7 +1230,12 @@ mod tests {
             assert_eq!(Lsn::from(i), lsn);
         }
         applied_persisted_lsn.store(
-            bifrost.find_tail(LOG_ID).await?.offset().prev().as_u64(),
+            bifrost
+                .find_tail(LOG_ID, FindTailAttr::default())
+                .await?
+                .offset()
+                .prev()
+                .as_u64(),
             Ordering::Relaxed,
         );
 
@@ -1292,7 +1313,12 @@ mod tests {
             assert_eq!(Lsn::from(i), lsn);
         }
         applied_lsn.store(
-            bifrost.find_tail(LOG_ID).await?.offset().prev().as_u64(),
+            bifrost
+                .find_tail(LOG_ID, FindTailAttr::default())
+                .await?
+                .offset()
+                .prev()
+                .as_u64(),
             Ordering::Relaxed,
         );
         tokio::time::sleep(interval_duration * 2).await;
