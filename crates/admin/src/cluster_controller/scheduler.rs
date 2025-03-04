@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use itertools::Itertools;
 use rand::seq::IteratorRandom;
+use restate_types::metadata::Precondition;
 use tracing::{Level, debug, enabled, info, instrument, trace};
 
-use restate_core::metadata_store::{Precondition, ReadError, ReadWriteError, WriteError};
+use restate_core::metadata_store::{ReadError, ReadWriteError, WriteError};
 use restate_core::network::{NetworkSender, Networking, Outgoing, TransportConnect};
 use restate_core::{
     Metadata, MetadataKind, MetadataWriter, ShutdownError, SyncError, TargetVersion, TaskCenter,
