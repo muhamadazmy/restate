@@ -17,7 +17,6 @@ use googletest::internal::test_outcome::TestAssertionFailure;
 
 use restate_bifrost::{Bifrost, loglet::Loglet};
 use restate_core::TaskCenter;
-use restate_core::metadata_store::Precondition;
 use restate_core::{MetadataWriter, metadata_store::MetadataStoreClient};
 use restate_local_cluster_runner::{
     cluster::{Cluster, MaybeTempDir, StartedCluster},
@@ -27,6 +26,7 @@ use restate_rocksdb::RocksDbManager;
 use restate_types::logs::LogletId;
 use restate_types::logs::builder::LogsBuilder;
 use restate_types::logs::metadata::{Chain, LogletParams, SegmentIndex};
+use restate_types::metadata::Precondition;
 use restate_types::metadata_store::keys::BIFROST_CONFIG_KEY;
 use restate_types::{
     GenerationalNodeId, PlainNodeId,
