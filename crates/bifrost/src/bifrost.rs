@@ -603,6 +603,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use googletest::prelude::*;
+    use restate_types::metadata::Precondition;
     use test_log::test;
     use tokio::time::Duration;
     use tracing::info;
@@ -855,7 +856,7 @@ mod tests {
             .put(
                 BIFROST_CONFIG_KEY.clone(),
                 &new_metadata,
-                restate_metadata_server::Precondition::MatchesVersion(old_version),
+                Precondition::MatchesVersion(old_version),
             )
             .await?;
 

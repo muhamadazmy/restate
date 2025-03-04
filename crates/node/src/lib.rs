@@ -16,14 +16,13 @@ mod roles;
 use anyhow::Context;
 use bytestring::ByteString;
 use prost_dto::IntoProst;
+use restate_types::metadata::Precondition;
 use std::num::NonZeroU16;
 use tracing::{debug, error, info, trace, warn};
 
 use codederror::CodedError;
 use restate_bifrost::BifrostService;
-use restate_core::metadata_store::{
-    Precondition, ReadWriteError, WriteError, retry_on_retryable_error,
-};
+use restate_core::metadata_store::{ReadWriteError, WriteError, retry_on_retryable_error};
 use restate_core::network::{
     GrpcConnector, MessageRouterBuilder, NetworkServerBuilder, Networking,
 };

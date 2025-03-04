@@ -12,6 +12,7 @@ use futures::future;
 use futures::never::Never;
 use rand::prelude::IteratorRandom;
 use rand::rng;
+use restate_types::metadata::Precondition;
 use std::collections::HashMap;
 use std::iter;
 use std::ops::Deref;
@@ -22,7 +23,7 @@ use tokio::task::JoinSet;
 use tracing::{Instrument, Level, debug, enabled, error, info, trace_span};
 
 use restate_bifrost::{Bifrost, Error as BifrostError};
-use restate_core::metadata_store::{Precondition, WriteError};
+use restate_core::metadata_store::WriteError;
 use restate_core::{
     Metadata, MetadataKind, MetadataWriter, ShutdownError, TargetVersion, TaskCenterFutureExt,
 };
