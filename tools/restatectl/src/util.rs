@@ -15,12 +15,28 @@ use std::{
     str::FromStr,
 };
 
+use bytes::BytesMut;
 use cling::{Collect, prelude::Parser};
-use tonic::transport::Channel;
+use tonic::{Code, Status, codec::CompressionEncoding, transport::Channel};
 
 use restate_cli_util::CliContext;
-use restate_core::network::net_util::create_tonic_channel;
-use restate_types::{logs::metadata::ProviderConfiguration, net::AdvertisedAddress};
+use restate_core::{
+    network::net_util::create_tonic_channel,
+    protobuf::metadata_proxy_svc::{
+        GetRequest, PutRequest, metadata_proxy_svc_client::MetadataProxySvcClient,
+    },
+};
+use restate_types::{
+    Versioned,
+    errors::GenericError,
+    logs::metadata::ProviderConfiguration,
+    metadata::Precondition,
+    net::AdvertisedAddress,
+    protobuf::metadata::VersionedValue,
+    storage::{StorageCodec, StorageDecode, StorageEncode},
+};
+
+use crate::connection::NodeOperationError;
 
 pub fn grpc_channel(address: AdvertisedAddress) -> Channel {
     let ctx = CliContext::get();
@@ -150,4 +166,93 @@ pub enum RangeParamError {
     InvalidSyntax(String),
     #[error(transparent)]
     ParseError(#[from] ParseIntError),
+}
+
+pub async fn read_modify_write<F, T, E>(
+    channel: &mut Channel,
+    key: impl Into<String>,
+    mut modify: F,
+) -> Result<(), ReadModifyWriteError<E>>
+where
+    F: FnMut(Option<T>) -> Result<T, E>,
+    E: Display,
+    T: Versioned + StorageEncode + StorageDecode,
+{
+    let mut client = MetadataProxySvcClient::new(channel)
+        .accept_compressed(CompressionEncoding::Gzip)
+        .send_compressed(CompressionEncoding::Gzip);
+
+    let key = key.into();
+
+    let mut buf = BytesMut::new();
+    loop {
+        let old_value: Option<T> = client
+            .get(GetRequest { key: key.clone() })
+            .await?
+            .into_inner()
+            .value
+            .map(|mut value| StorageCodec::decode(&mut value.bytes))
+            .transpose()
+            .map_err(|err| ReadModifyWriteError::Codec(err.into()))?;
+
+        let precondition = old_value
+            .as_ref()
+            .map(|v| Precondition::MatchesVersion(v.version()))
+            .unwrap_or(Precondition::DoesNotExist);
+
+        let new_value = match modify(old_value) {
+            Ok(value) => value,
+            Err(err) => return Err(ReadModifyWriteError::OperationFailed(err)),
+        };
+
+        StorageCodec::encode(&new_value, &mut buf)
+            .map_err(|err| ReadModifyWriteError::Codec(err.into()))?;
+
+        let versioned_value = VersionedValue {
+            version: Some(new_value.version().into()),
+            bytes: buf.split().into(),
+        };
+
+        let request = PutRequest {
+            key: key.clone(),
+            precondition: Some(precondition.into()),
+            value: Some(versioned_value),
+        };
+
+        return match client.put(request).await {
+            Err(status) if status.code() == Code::FailedPrecondition => {
+                continue;
+            }
+            Err(status) => Err(status.into()),
+            Ok(_) => Ok(()),
+        };
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum ReadModifyWriteError<E: Display> {
+    #[error(transparent)]
+    Codec(GenericError),
+    #[error(transparent)]
+    RemoteError(Status),
+    #[error("failed read-modify-write operation: {0}")]
+    OperationFailed(E),
+}
+
+impl<E: Display> From<Status> for ReadModifyWriteError<E> {
+    fn from(value: Status) -> Self {
+        Self::RemoteError(value)
+    }
+}
+
+impl<E: Display> From<ReadModifyWriteError<E>> for NodeOperationError {
+    fn from(value: ReadModifyWriteError<E>) -> Self {
+        match value {
+            ReadModifyWriteError::Codec(err) => Self::Terminal(Status::unknown(err.to_string())),
+            ReadModifyWriteError::OperationFailed(err) => {
+                Self::Terminal(Status::unknown(format!("Update operation failed: {err}")))
+            }
+            ReadModifyWriteError::RemoteError(status) => Self::RetryableElsewhere(status),
+        }
+    }
 }
