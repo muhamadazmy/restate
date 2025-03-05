@@ -122,7 +122,18 @@ impl<T: TransportConnect> ClusterStateRefresher<T> {
                 .await;
             let nodes_config = metadata.nodes_config_snapshot();
 
-            let mut nodes = BTreeMap::new();
+            let mut nodes: BTreeMap<_, _> = nodes_config
+                .tombstones()
+                .map(|node_id| {
+                    (
+                        node_id,
+                        NodeState::Dead(DeadNode {
+                            last_seen_alive: None,
+                        }),
+                    )
+                })
+                .collect();
+
             let mut join_set = tokio::task::JoinSet::new();
             for (_, node_config) in nodes_config.iter() {
                 let node_id = node_config.current_generation;

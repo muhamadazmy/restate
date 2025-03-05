@@ -298,6 +298,16 @@ impl NodesConfiguration {
         })
     }
 
+    pub fn tombstones(&self) -> impl Iterator<Item = PlainNodeId> {
+        self.nodes.iter().filter_map(|(id, v)| {
+            if matches!(v, MaybeNode::Tombstone) {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (PlainNodeId, &'_ mut NodeConfig)> {
         self.nodes.iter_mut().filter_map(|(k, v)| {
             if let MaybeNode::Node(node) = v {
