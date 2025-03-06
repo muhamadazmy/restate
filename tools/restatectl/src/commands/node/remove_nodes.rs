@@ -8,20 +8,22 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use crate::commands::node::disable_node_checker::DisableNodeChecker;
-use crate::connection::ConnectionInfo;
 use anyhow::Context;
 use clap::Parser;
 use cling::{Collect, Run};
 use itertools::Itertools;
+
 use restate_cli_util::c_println;
-use restate_core::metadata_store::MetadataStoreClient;
-use restate_metadata_server::create_client;
+use restate_core::protobuf::metadata_proxy_svc::MetadataStoreProxy;
+use restate_metadata_server::MetadataStoreClient;
 use restate_types::PlainNodeId;
-use restate_types::config::{MetadataClientKind, MetadataClientOptions};
-use restate_types::metadata::Precondition;
+use restate_types::config::MetadataClientOptions;
+use restate_types::logs::metadata::Logs;
 use restate_types::metadata_store::keys::NODES_CONFIG_KEY;
-use restate_types::nodes_config::{NodesConfiguration, Role};
+use restate_types::nodes_config::NodesConfiguration;
+
+use crate::commands::node::disable_node_checker::DisableNodeChecker;
+use crate::connection::{ConnectionInfo, NodeOperationError};
 
 #[derive(Run, Parser, Collect, Clone, Debug)]
 #[clap(alias = "rm")]
@@ -37,33 +39,18 @@ pub async fn remove_nodes(
     connection: &ConnectionInfo,
     opts: &RemoveNodesOpts,
 ) -> anyhow::Result<()> {
-    let nodes_configuration = connection.get_nodes_configuration().await?;
-    let metadata_client = create_metadata_client(&nodes_configuration).await?;
     let logs = connection.get_logs().await?;
 
-    let disable_node_checker = DisableNodeChecker::new(nodes_configuration, logs);
+    let backoff_policy = &MetadataClientOptions::default().backoff_policy;
 
-    for node_id in &opts.nodes {
-        disable_node_checker
-            .safe_to_disable_node(*node_id)
-            .context("It is not safe to disable node {node_id}")?
-    }
+    connection
+        .try_each(None, |channel| async {
+            let metadata_store_proxy = MetadataStoreProxy::new(channel);
+            let metadata_store_client =
+                MetadataStoreClient::new(metadata_store_proxy, Some(backoff_policy.clone()));
 
-    let nodes_configuration = disable_node_checker.nodes_configuration();
-    let mut updated_nodes_configuration = nodes_configuration.clone();
-
-    for node_id in &opts.nodes {
-        updated_nodes_configuration.remove_node_unchecked(*node_id);
-    }
-
-    updated_nodes_configuration.increment_version();
-
-    metadata_client
-        .put(
-            NODES_CONFIG_KEY.clone(),
-            &updated_nodes_configuration,
-            Precondition::MatchesVersion(nodes_configuration.version()),
-        )
+            update_nodes_configuration(&metadata_store_client, &logs, opts).await
+        })
         .await?;
 
     c_println!(
@@ -74,28 +61,36 @@ pub async fn remove_nodes(
     Ok(())
 }
 
-async fn create_metadata_client(
-    nodes_configuration: &NodesConfiguration,
-) -> anyhow::Result<MetadataStoreClient> {
-    // find metadata nodes
-    let addresses: Vec<_> = nodes_configuration
-        .iter_role(Role::MetadataServer)
-        .map(|(_, config)| config.address.clone())
-        .collect();
-    if addresses.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No nodes are configured to run metadata-server role, this command only \
-             supports replicated metadata deployment"
-        ));
-    }
+async fn update_nodes_configuration(
+    client: &MetadataStoreClient,
+    logs: &Logs,
+    opts: &RemoveNodesOpts,
+) -> Result<(), NodeOperationError> {
+    client
+        .read_modify_write::<_, _, anyhow::Error>(
+            NODES_CONFIG_KEY.clone(),
+            |nodes_configuration: Option<NodesConfiguration>| {
+                let mut nodes_configuration =
+                    nodes_configuration.context("Missing nodes configuration")?;
 
-    // todo make this work with other metadata client kinds as well; maybe proxy through Restate server
-    let metadata_store_client_options = MetadataClientOptions {
-        kind: MetadataClientKind::Replicated { addresses },
-        ..Default::default()
-    };
+                let disable_node_checker = DisableNodeChecker::new(&nodes_configuration, logs);
 
-    create_client(metadata_store_client_options)
+                for node_id in &opts.nodes {
+                    disable_node_checker
+                        .safe_to_disable_node(*node_id)
+                        .context("It is not safe to disable node {node_id}")?;
+                }
+
+                for node_id in &opts.nodes {
+                    nodes_configuration.remove_node_unchecked(*node_id);
+                }
+
+                nodes_configuration.increment_version();
+
+                Ok(nodes_configuration)
+            },
+        )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create metadata store client: {}", e))
+        .map(|_| ())
+        .map_err(Into::into)
 }
