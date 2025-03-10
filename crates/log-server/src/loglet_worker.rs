@@ -406,7 +406,7 @@ impl<S: LogStore> LogletWorker<S> {
             return (Status::OutOfBounds, None);
         }
 
-        let set_sequncer_in_metadata = if known_sequencer.is_none() {
+        let set_sequencer_in_metadata = if known_sequencer.is_none() {
             self.loglet_state.set_sequencer(body.sequencer)
         } else {
             // sequencer is already known, no need to store it in log-store's metadata
@@ -416,7 +416,7 @@ impl<S: LogStore> LogletWorker<S> {
         // exhausted.
         match self
             .log_store
-            .enqueue_store(body, set_sequncer_in_metadata)
+            .enqueue_store(body, set_sequencer_in_metadata)
             .await
         {
             Ok(store_token) => {
@@ -1213,7 +1213,7 @@ mod tests {
         }
 
         // Apply memory limits (2 bytes) should always see the first real record.
-        // We expect to see [FILTERED(5), 10]. (11 is not returend due to budget)
+        // We expect to see [FILTERED(5), 10]. (11 is not returned due to budget)
         worker
             .enqueue_get_records(Incoming::for_testing(
                 connection.downgrade(),

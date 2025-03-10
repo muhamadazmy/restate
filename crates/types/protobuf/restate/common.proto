@@ -35,6 +35,20 @@ message Lsn { uint64 value = 1; }
 // A generic type for versioned metadata
 message Version { uint32 value = 1; }
 
+// Represents the API versioning information.
+message ApiVersion {
+  // The minimum API version supported.
+  // This should only be set when introducing a breaking change,
+  // such as modifying an existing request message.
+  // Adding new API handlers does not require updating this value,
+  // as older clients remain compatible with new services.
+  optional uint32 min_version = 1;
+
+  // The maximum API version supported.
+  // This always corresponds to the current API version.
+  uint32 max_version = 2;
+}
+
 // The handle name or type tag of the message. For every target there must be
 // exactly one message handler implementation.
 enum TargetName {

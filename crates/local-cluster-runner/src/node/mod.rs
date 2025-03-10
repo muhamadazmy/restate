@@ -33,6 +33,7 @@ use restate_types::{
 };
 use rev_lines::RevLines;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::num::NonZeroU16;
 use std::{
     ffi::OsString,
@@ -179,10 +180,12 @@ impl Node {
 
         base_config.common.auto_provision = false;
         base_config.common.log_disable_ansi_codes = true;
-        if !matches!(
-            base_config.metadata_server.kind(),
-            MetadataServerKind::Raft(_)
-        ) {
+        if roles.contains(Role::MetadataServer)
+            && !matches!(
+                base_config.metadata_server.kind(),
+                MetadataServerKind::Raft(_)
+            )
+        {
             info!("Setting the metadata server to replicated");
             base_config
                 .metadata_server
@@ -197,19 +200,6 @@ impl Node {
                 // the first node will be responsible for bootstrapping the cluster
                 effective_config.common.auto_provision = true;
             }
-
-            // Create a separate ingress role when running a worker
-            let roles = if roles.contains(Role::Worker) {
-                effective_config
-                    .ingress
-                    .experimental_feature_enable_separate_ingress_role = true;
-                roles | Role::HttpIngress
-            } else {
-                roles
-            };
-
-            // every node runs the admin and the metadata server role
-            let roles = roles | Role::Admin | Role::MetadataServer;
 
             let node = Self::new_test_node(
                 format!("node-{node_id}"),
@@ -229,10 +219,12 @@ impl Node {
                 .clone(),
         ];
 
-        // update nodes with the addresses of the other nodes
-        for node in &mut nodes {
-            *node.metadata_store_client_mut() = MetadataClientKind::Replicated {
-                addresses: node_addresses.clone(),
+        if roles.contains(Role::MetadataServer) {
+            // if we are running the replicated metadata server, then update client addresses
+            for node in &mut nodes {
+                *node.metadata_store_client_mut() = MetadataClientKind::Replicated {
+                    addresses: node_addresses.clone(),
+                }
             }
         }
 
@@ -325,6 +317,10 @@ impl Node {
                 .write_all(config_dump.as_bytes())
                 .await
                 .map_err(NodeStartError::CreateConfig)?;
+            config_file
+                .flush()
+                .await
+                .map_err(NodeStartError::CreateConfig)?;
         }
 
         let node_log_filename = node_base_dir.join("restate.log");
@@ -356,13 +352,36 @@ impl Node {
 
         let mut child = cmd.spawn().map_err(NodeStartError::SpawnError)?;
         let pid = child.id().expect("child to have a pid");
+
+        let admin_address = if self.config().has_role(Role::Admin) {
+            Cow::Owned(self.config().admin.bind_address.to_string())
+        } else {
+            Cow::Borrowed("None")
+        };
+
+        let ingress_address = if self.config().has_role(Role::Worker) {
+            Cow::Owned(self.config().ingress.bind_address.to_string())
+        } else {
+            Cow::Borrowed("None")
+        };
+
         info!(
+            node_address = %self.config().common.advertised_address,
+            %admin_address,
+            %ingress_address,
             "Started node {} in {} (pid {pid})",
             base_config.node_name(),
             node_base_dir.display(),
         );
         let stdout = child.stdout.take().expect("child to have a stdout pipe");
         let stderr = child.stderr.take().expect("child to have a stderr pipe");
+
+        if self.config().has_role(Role::Admin) {
+            info!(
+                "To connect to node {} using restate CLI:\nexport RESTATE_ADMIN_URL=http://{admin_address}",
+                base_config.node_name()
+            );
+        }
 
         let stdout_reader =
             stream::try_unfold(BufReader::new(stdout).lines(), |mut lines| async move {
