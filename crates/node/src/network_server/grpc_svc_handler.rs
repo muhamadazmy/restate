@@ -18,6 +18,7 @@ use restate_core::protobuf::metadata_proxy_svc::metadata_proxy_svc_server::Metad
 use restate_core::protobuf::metadata_proxy_svc::{
     DeleteRequest, GetRequest, GetResponse, GetVersionResponse, PutRequest,
 };
+use restate_types::protobuf::common::ApiVersion;
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
@@ -49,6 +50,8 @@ pub struct NodeCtlSvcHandler {
 }
 
 impl NodeCtlSvcHandler {
+    const VERSION: u32 = 1;
+
     pub fn new(metadata_store_client: MetadataStoreClient) -> Self {
         Self {
             metadata_store_client,
@@ -108,6 +111,13 @@ impl NodeCtlSvcHandler {
 
 #[async_trait::async_trait]
 impl NodeCtlSvc for NodeCtlSvcHandler {
+    async fn get_version(&self, _: Request<()>) -> Result<Response<ApiVersion>, Status> {
+        Ok(Response::new(ApiVersion {
+            max_version: Self::VERSION,
+            ..Default::default()
+        }))
+    }
+
     async fn get_ident(&self, _request: Request<()>) -> Result<Response<IdentResponse>, Status> {
         let identification = Identification::get();
         Ok(Response::new(IdentResponse::from(identification)))

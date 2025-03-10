@@ -16,6 +16,8 @@ import "restate/common.proto";
 package restate.node_ctl_svc;
 
 service NodeCtlSvc {
+  rpc GetVersion(google.protobuf.Empty) returns (restate.common.ApiVersion);
+
   // Get identity information from this node.
   rpc GetIdent(google.protobuf.Empty) returns (IdentResponse);
 

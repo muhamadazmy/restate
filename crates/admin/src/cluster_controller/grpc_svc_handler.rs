@@ -9,6 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use bytes::{Bytes, BytesMut};
+use restate_types::protobuf::common::ApiVersion;
 use tonic::{Request, Response, Status, async_trait};
 use tracing::info;
 
@@ -47,6 +48,8 @@ pub(crate) struct ClusterCtrlSvcHandler {
 }
 
 impl ClusterCtrlSvcHandler {
+    const VERSION: u32 = 1;
+
     pub fn new(
         controller_handle: ClusterControllerHandle,
         bifrost: Bifrost,
@@ -71,6 +74,13 @@ impl ClusterCtrlSvcHandler {
 
 #[async_trait]
 impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
+    async fn get_version(&self, _: Request<()>) -> Result<Response<ApiVersion>, Status> {
+        Ok(Response::new(ApiVersion {
+            max_version: Self::VERSION,
+            ..Default::default()
+        }))
+    }
+
     async fn get_cluster_state(
         &self,
         _request: Request<ClusterStateRequest>,

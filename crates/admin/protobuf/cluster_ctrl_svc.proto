@@ -16,6 +16,8 @@ import "google/protobuf/empty.proto";
 package restate.cluster_ctrl;
 
 service ClusterCtrlSvc {
+  rpc GetVersion(google.protobuf.Empty) returns (restate.common.ApiVersion);
+
   rpc GetClusterState(ClusterStateRequest) returns (ClusterStateResponse);
 
   rpc ListLogs(ListLogsRequest) returns (ListLogsResponse);
