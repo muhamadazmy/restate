@@ -7667,6 +7667,7 @@ dependencies = [
  "restate-types",
  "restate-wal-protocol",
  "rlimit",
+ "semver",
  "serde",
  "serde_json",
  "strum",
