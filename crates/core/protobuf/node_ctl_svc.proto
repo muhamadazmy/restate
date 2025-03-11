@@ -16,6 +16,8 @@ import "restate/common.proto";
 package restate.node_ctl_svc;
 
 service NodeCtlSvc {
+  rpc GetVersion(google.protobuf.Empty) returns (restate.common.ApiVersion);
+
   // Get identity information from this node.
   rpc GetIdent(google.protobuf.Empty) returns (IdentResponse);
 
@@ -70,6 +72,7 @@ message IdentResponse {
   uint32 logs_version = 11;
   uint32 schema_version = 12;
   uint32 partition_table_version = 13;
+  string server_version = 14;
 }
 
 message GetMetadataRequest {
