@@ -18,8 +18,6 @@ package restate.cluster_ctrl;
 service ClusterCtrlSvc {
   rpc GetClusterState(ClusterStateRequest) returns (ClusterStateResponse);
 
-  rpc ListLogs(ListLogsRequest) returns (ListLogsResponse);
-
   rpc DescribeLog(DescribeLogRequest) returns (DescribeLogResponse);
 
   rpc TrimLog(TrimLogRequest) returns (google.protobuf.Empty);
@@ -53,13 +51,6 @@ message ClusterStateRequest {}
 
 message ClusterStateResponse { restate.cluster.ClusterState cluster_state = 1; }
 
-message ListLogsRequest {}
-
-message ListLogsResponse {
-  // Serialized restate_types::logs::metadata::Logs
-  bytes logs = 1;
-}
-
 enum TailState {
   TailState_UNKNOWN = 0;
   OPEN = 1;
@@ -91,11 +82,13 @@ message TrimLogRequest {
 // error with the same inputs.
 message CreatePartitionSnapshotRequest {
   uint32 partition_id = 1;
-  // Minimum LSN (inclusive) which must be covered by the snapshot; if set it is treated as a hard
-  // requirement and the operation will return an error if it cannot be met
+  // Minimum LSN (inclusive) which must be covered by the snapshot; if set it is
+  // treated as a hard requirement and the operation will return an error if it
+  // cannot be met
   optional uint64 min_target_lsn = 2;
-  // Optionally, also trim the log to the archived LSN; trim only occurs after a successful snapshot
-  // and so will honor the min_target_lsn requirement, if set to true
+  // Optionally, also trim the log to the archived LSN; trim only occurs after a
+  // successful snapshot and so will honor the min_target_lsn requirement, if
+  // set to true
   bool trim_log = 3;
 }
 
