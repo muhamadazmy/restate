@@ -29,8 +29,8 @@ use crate::cluster_controller::protobuf::cluster_ctrl_svc_server::ClusterCtrlSvc
 use crate::cluster_controller::protobuf::{
     ClusterStateRequest, ClusterStateResponse, CreatePartitionSnapshotRequest,
     CreatePartitionSnapshotResponse, DescribeLogRequest, DescribeLogResponse, FindTailRequest,
-    FindTailResponse, ListLogsRequest, ListLogsResponse, SealAndExtendChainRequest,
-    SealAndExtendChainResponse, SealedSegment, TailState, TrimLogRequest,
+    FindTailResponse, SealAndExtendChainRequest, SealAndExtendChainResponse, SealedSegment,
+    TailState, TrimLogRequest,
 };
 
 use super::ClusterControllerHandle;
@@ -85,15 +85,6 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
             cluster_state: Some((*cluster_state).clone().into()),
         };
         Ok(Response::new(resp))
-    }
-
-    async fn list_logs(
-        &self,
-        _request: Request<ListLogsRequest>,
-    ) -> Result<Response<ListLogsResponse>, Status> {
-        Ok(Response::new(ListLogsResponse {
-            logs: serialize_value(self.get_logs().await?),
-        }))
     }
 
     async fn describe_log(
