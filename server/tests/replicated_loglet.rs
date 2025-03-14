@@ -21,10 +21,6 @@ mod tests {
 
     use futures_util::StreamExt;
     use googletest::prelude::*;
-    use test_log::test;
-    use tokio::task::{JoinHandle, JoinSet};
-    use tokio_util::sync::CancellationToken;
-
     use restate_bifrost::{
         ErrorRecoveryStrategy,
         loglet::{AppendError, FindTailOptions},
@@ -42,6 +38,10 @@ mod tests {
         storage::PolyBytes,
         time::NanosSinceEpoch,
     };
+    use test_log::test;
+    use tokio::task::{JoinHandle, JoinSet};
+    use tokio_util::sync::CancellationToken;
+    use tracing::info;
 
     use super::common::replicated_loglet::run_in_test_env;
 
@@ -226,12 +226,12 @@ mod tests {
 
 
                 let mut appenders: JoinSet<googletest::Result<_>> = JoinSet::new();
-                let cancel_appenders = CancellationToken::new();
+                let stop_signal = CancellationToken::new();
 
                 for appender_id in 0..CONCURRENT_APPENDERS {
                     appenders.spawn({
                         let bifrost = test_env.bifrost.clone();
-                        let cancel_appenders = cancel_appenders.clone();
+                        let cancel_appenders = stop_signal.clone();
                         async move {
                             let mut i = 1;
                             let mut committed = Vec::new();
@@ -253,13 +253,14 @@ mod tests {
 
                 let mut sealer_handle: JoinHandle<googletest::Result<()>> = tokio::task::spawn({
                     let bifrost = test_env.bifrost.clone();
+                    let stop_signal = stop_signal.clone();
                     async move {
 
                         let mut chain = metadata.updateable_logs_metadata().map(|logs| logs.chain(&log_id).expect("a chain to exist"));
 
                         let mut last_loglet_id = None;
 
-                        loop {
+                        while !stop_signal.is_cancelled() {
                             tokio::time::sleep(SEAL_PERIOD).await;
 
                             let mut params = ReplicatedLogletParams::deserialize_from(
@@ -269,7 +270,7 @@ mod tests {
                                 fail!("Could not seal as metadata has not caught up from the last seal (version={})", metadata.logs_version())?;
                             }
                             last_loglet_id = Some(params.loglet_id);
-                            eprintln!("Sealing loglet {} and creating new loglet {}", params.loglet_id, params.loglet_id.next());
+                            info!("Sealing loglet {} and creating new loglet {}", params.loglet_id, params.loglet_id.next());
                             params.loglet_id = params.loglet_id.next();
 
                             bifrost
@@ -283,6 +284,8 @@ mod tests {
                                 )
                                 .await?;
                         }
+
+                        Ok(())
                     }.in_current_tc()
                 });
 
@@ -294,19 +297,14 @@ mod tests {
                         fail!("sealer exited early: {res:?}")?;
                     }
                     _ = tokio::time::sleep(TEST_DURATION) => {
-                        eprintln!("cancelling appenders and running validation")
+                        info!("cancelling appenders and running validation")
                     }
                 }
 
-                // stop appending
-                cancel_appenders.cancel();
-                // stop sealing
-                sealer_handle.abort();
+                // stop appending and sealing
+                stop_signal.cancel();
 
-                match sealer_handle.await {
-                    Err(err) if err.is_cancelled() => {}
-                    res => fail!("unexpected error from sealer handle: {res:?}")?,
-                }
+                sealer_handle.await??;
 
                 let mut all_committed = BTreeSet::new();
                 while let Some(handle) = appenders.join_next().await {
@@ -314,7 +312,7 @@ mod tests {
                     let committed_len = committed.len();
                     assert_that!(committed_len, ge(0));
                     let tail_record = committed.last().unwrap();
-                    println!(
+                    info!(
                         "Committed len={committed_len}, last appended={tail_record}"
                     );
                     // ensure that all committed records are unique
@@ -342,7 +340,7 @@ mod tests {
 
                 // every record committed must be observed exactly once in readstream
                 assert!(all_committed.eq(&records));
-                eprintln!("Validated {} committed records", all_committed.len());
+                info!("Validated {} committed records", all_committed.len());
 
                 Ok(())
             },
