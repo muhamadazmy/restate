@@ -173,6 +173,7 @@ impl QueryContext {
         let metadata = Metadata::current();
         crate::node::register_self(&ctx, metadata.clone())?;
         crate::partition::register_self(&ctx, metadata.clone())?;
+        crate::log::register_self(&ctx, metadata)?;
 
         let ctx = ctx
             .datafusion_context
