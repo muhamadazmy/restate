@@ -170,6 +170,8 @@ impl QueryContext {
             local_partition_store_manager,
         )?;
 
+        crate::node::register_self(&ctx, Metadata::current())?;
+
         let ctx = ctx
             .datafusion_context
             .sql(SYS_INVOCATION_VIEW)
