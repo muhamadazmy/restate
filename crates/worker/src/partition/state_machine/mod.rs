@@ -29,7 +29,6 @@ use restate_service_protocol::codec::ProtobufRawEntryCodec;
 use restate_service_protocol_v4::entry_codec::ServiceProtocolV4Codec;
 use restate_storage_api::Result as StorageResult;
 use restate_storage_api::fsm_table::FsmTable;
-use restate_storage_api::idempotency_table::IdempotencyMetadata;
 use restate_storage_api::idempotency_table::{IdempotencyTable, ReadOnlyIdempotencyTable};
 use restate_storage_api::inbox_table::{InboxEntry, InboxTable};
 use restate_storage_api::invocation_status_table::{
@@ -106,14 +105,7 @@ use tracing::error;
 use utils::SpanExt;
 
 #[derive(Debug, Hash, enumset::EnumSetType, strum::Display)]
-pub enum ExperimentalFeature {
-    /// This is used to disable writing to idempotency table/virtual object status table for idempotent invocations/workflow invocations.
-    /// From Restate 1.2 invocation ids are generated deterministically, so this additional index is not needed.
-    DisableIdempotencyTable,
-    /// If true, kill should wait for end signal from invoker, in order to implement the restart functionality.
-    /// This is enabled by experimental_feature_kill_and_restart.
-    InvocationStatusKilled,
-}
+pub enum ExperimentalFeature {}
 
 pub struct StateMachine {
     // initialized from persistent storage
@@ -228,6 +220,7 @@ pub(crate) struct StateMachineApplyContext<'a, S> {
     outbox_head_seq_number: &'a mut Option<MessageIndex>,
     partition_key_range: RangeInclusive<PartitionKey>,
     invoker_apply_latency: &'a Histogram,
+    #[allow(dead_code)]
     experimental_features: &'a EnumSet<ExperimentalFeature>,
     is_leader: bool,
 }
@@ -374,17 +367,15 @@ impl<S> StateMachineApplyContext<'_, S> {
         });
     }
 
-    fn send_abort_invocation_to_invoker(&mut self, invocation_id: InvocationId, acknowledge: bool) {
+    fn send_abort_invocation_to_invoker(&mut self, invocation_id: InvocationId) {
         debug_if_leader!(
             self.is_leader,
             restate.invocation.id = %invocation_id,
             "Send abort command to invoker"
         );
 
-        self.action_collector.push(Action::AbortInvocation {
-            invocation_id,
-            acknowledge,
-        });
+        self.action_collector
+            .push(Action::AbortInvocation { invocation_id });
     }
 
     async fn on_apply(&mut self, command: Command) -> Result<(), Error>
@@ -656,38 +647,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                 self.is_leader,
                 "First time we see this invocation id, invocation will be processed"
             );
-
-            // Store the invocation id mapping if we have to and continue the processing
-            // TODO get rid of this code when we remove the usage of the virtual object table for workflows
-            if is_workflow_run
-                && !self
-                    .experimental_features
-                    .contains(ExperimentalFeature::DisableIdempotencyTable)
-            {
-                self.storage
-                        .put_virtual_object_status(
-                            &service_invocation
-                                .invocation_target
-                                .as_keyed_service_id()
-                                .expect("When the handler type is Workflow, the invocation target must have a key"),
-                            &VirtualObjectStatus::Locked(invocation_id),
-                        )
-                        .await.map_err(Error::Storage)?;
-            }
-            // TODO get rid of this code when we remove the idempotency table
-            if has_idempotency_key
-                && !self
-                    .experimental_features
-                    .contains(ExperimentalFeature::DisableIdempotencyTable)
-            {
-                self.do_store_idempotency_id(
-                    service_invocation
-                        .compute_idempotency_id()
-                        .expect("Idempotency key must be present"),
-                    service_invocation.invocation_id,
-                )
-                .await?;
-            }
             return Ok(Some(service_invocation));
         }
 
@@ -746,16 +705,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                             .await?
                     }
                 }
-            }
-            InvocationStatus::Killed(metadata) => {
-                self.send_response_to_sinks(
-                    service_invocation.response_sink.take().into_iter(),
-                    KILLED_INVOCATION_ERROR,
-                    Some(invocation_id),
-                    None,
-                    Some(&metadata.invocation_target),
-                )
-                .await?;
             }
             InvocationStatus::Completed(completed) => {
                 // SAFETY: We use this field to send back the notification to ingress, and not as part of the PP deterministic logic.
@@ -1086,13 +1035,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                 )
                 .await?
             }
-            InvocationStatus::Killed(_) => {
-                trace!(
-                    "Received kill command for an already killed invocation with id '{invocation_id}'."
-                );
-                // Nothing to do here really, let's send again the abort signal to the invoker just in case
-                self.do_send_abort_invocation_to_invoker(invocation_id, true);
-            }
             InvocationStatus::Completed(_) => {
                 debug!(
                     "Received kill command for completed invocation '{invocation_id}'. To cleanup the invocation after it's been completed, use the purge invocation command."
@@ -1106,7 +1048,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 // This can happen because the invoke/resume and the abort invoker messages end up in different queues,
                 // and the abort message can overtake the invoke/resume.
                 // Consequently the invoker might have not received the abort and the user tried to send it again.
-                self.do_send_abort_invocation_to_invoker(invocation_id, false);
+                self.do_send_abort_invocation_to_invoker(invocation_id);
             }
         };
 
@@ -1223,13 +1165,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                 )
                 .await?
             }
-            InvocationStatus::Killed(_) => {
-                trace!(
-                    "Received cancel command for an already killed invocation '{invocation_id}'."
-                );
-                // Nothing to do here really, let's send again the abort signal to the invoker just in case
-                self.do_send_abort_invocation_to_invoker( invocation_id, true);
-            }
             InvocationStatus::Completed(_) => {
                 debug!("Received cancel command for completed invocation '{invocation_id}'. To cleanup the invocation after it's been completed, use the purge invocation command.");
             }
@@ -1241,7 +1176,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 // This can happen because the invoke/resume and the abort invoker messages end up in different queues,
                 // and the abort message can overtake the invoke/resume.
                 // Consequently the invoker might have not received the abort and the user tried to send it again.
-                self.do_send_abort_invocation_to_invoker(invocation_id, false);
+                self.do_send_abort_invocation_to_invoker(invocation_id);
             }
         };
 
@@ -1381,30 +1316,13 @@ impl<S> StateMachineApplyContext<'_, S> {
         self.kill_child_invocations(&invocation_id, metadata.journal_metadata.length, &metadata)
             .await?;
 
-        if self
-            .experimental_features
-            .contains(ExperimentalFeature::InvocationStatusKilled)
-        {
-            debug_if_leader!(
-                self.is_leader,
-                restate.invocation.id = %invocation_id,
-                "Effect: Store killed invocation"
-            );
-
-            self.storage
-                .put_invocation_status(&invocation_id, &InvocationStatus::Killed(metadata))
-                .await
-                .map_err(Error::Storage)?;
-            self.do_send_abort_invocation_to_invoker(invocation_id, true);
-        } else {
-            self.end_invocation(
-                invocation_id,
-                metadata,
-                Some(ResponseResult::Failure(KILLED_INVOCATION_ERROR)),
-            )
-            .await?;
-            self.do_send_abort_invocation_to_invoker(invocation_id, false);
-        }
+        self.end_invocation(
+            invocation_id,
+            metadata,
+            Some(ResponseResult::Failure(KILLED_INVOCATION_ERROR)),
+        )
+        .await?;
+        self.do_send_abort_invocation_to_invoker(invocation_id);
         Ok(())
     }
 
@@ -1427,15 +1345,13 @@ impl<S> StateMachineApplyContext<'_, S> {
         self.kill_child_invocations(&invocation_id, metadata.journal_metadata.length, &metadata)
             .await?;
 
-        // No need to go through the Killed state when we're suspended,
-        // because it means we already got a terminal state from the invoker.
         self.end_invocation(
             invocation_id,
             metadata,
             Some(ResponseResult::Failure(KILLED_INVOCATION_ERROR)),
         )
         .await?;
-        self.do_send_abort_invocation_to_invoker(invocation_id, false);
+        self.do_send_abort_invocation_to_invoker(invocation_id);
         Ok(())
     }
 
@@ -1829,21 +1745,12 @@ impl<S> StateMachineApplyContext<'_, S> {
             + journal_table_v2::JournalTable,
     {
         let is_status_invoked = matches!(invocation_status, InvocationStatus::Invoked(_));
-        let is_status_killed = matches!(invocation_status, InvocationStatus::Killed(_));
 
-        if !is_status_invoked && !is_status_killed {
+        if !is_status_invoked {
             trace!(
-                "Received invoker effect for invocation not in invoked nor killed status. Ignoring the effect."
+                "Received invoker effect for invocation not in invoked status. Ignoring the effect."
             );
-            self.do_send_abort_invocation_to_invoker(invocation_id, false);
-            return Ok(());
-        }
-        if is_status_killed
-            && !matches!(kind, InvokerEffectKind::Failed(_) | InvokerEffectKind::End)
-        {
-            warn!(
-                "Received non terminal invoker effect for killed invocation. Ignoring the effect."
-            );
+            self.do_send_abort_invocation_to_invoker(invocation_id);
             return Ok(());
         }
 
@@ -1864,7 +1771,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                     entry,
                     invocation_status
                         .into_invocation_metadata()
-                        .expect("Must be present if status is killed or invoked"),
+                        .expect("Must be present if status is invoked"),
                 )
                 .await?;
             }
@@ -1891,7 +1798,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             } => {
                 let invocation_metadata = invocation_status
                     .into_invocation_metadata()
-                    .expect("Must be present if status is killed or invoked");
+                    .expect("Must be present if status is invoked");
                 debug_assert!(
                     !waiting_for_completed_entries.is_empty(),
                     "Expecting at least one entry on which the invocation {invocation_id} is waiting."
@@ -1943,13 +1850,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                     invocation_id,
                     invocation_status
                         .into_invocation_metadata()
-                        .expect("Must be present if status is killed or invoked"),
-                    if is_status_killed {
-                        // It doesn't matter that the invocation successfully completed, we return failed anyway in this case.
-                        Some(ResponseResult::Failure(KILLED_INVOCATION_ERROR))
-                    } else {
-                        None
-                    },
+                        .expect("Must be present if status is invoked"),
+                    None,
                 )
                 .await?;
             }
@@ -1958,7 +1860,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                     invocation_id,
                     invocation_status
                         .into_invocation_metadata()
-                        .expect("Must be present if status is killed or invoked"),
+                        .expect("Must be present if status is invoked"),
                     Some(ResponseResult::Failure(e)),
                 )
                 .await?;
@@ -3472,16 +3374,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                     .await?;
                 }
             }
-            InvocationStatus::Killed(metadata) => {
-                self.send_response_to_sinks(
-                    vec![attach_invocation_request.response_sink],
-                    KILLED_INVOCATION_ERROR,
-                    Some(invocation_id),
-                    None,
-                    Some(&metadata.invocation_target),
-                )
-                .await?;
-            }
             InvocationStatus::Completed(completed) => {
                 // SAFETY: We use this field to send back the notification to ingress, and not as part of the PP deterministic logic.
                 let completion_expiry_time = unsafe { completed.completion_expiry_time() };
@@ -4141,29 +4033,6 @@ impl<S> StateMachineApplyContext<'_, S> {
         Ok(())
     }
 
-    async fn do_store_idempotency_id(
-        &mut self,
-        idempotency_id: IdempotencyId,
-        invocation_id: InvocationId,
-    ) -> Result<(), Error>
-    where
-        S: IdempotencyTable,
-    {
-        debug_if_leader!(
-            self.is_leader,
-            restate.invocation.id = %invocation_id,
-            "Effect: Store idempotency id {:?}",
-            idempotency_id
-        );
-
-        self.storage
-            .put_idempotency_metadata(&idempotency_id, &IdempotencyMetadata { invocation_id })
-            .await
-            .map_err(Error::Storage)?;
-
-        Ok(())
-    }
-
     async fn do_delete_idempotency_id(&mut self, idempotency_id: IdempotencyId) -> Result<(), Error>
     where
         S: IdempotencyTable,
@@ -4182,17 +4051,11 @@ impl<S> StateMachineApplyContext<'_, S> {
         Ok(())
     }
 
-    fn do_send_abort_invocation_to_invoker(
-        &mut self,
-        invocation_id: InvocationId,
-        acknowledge: bool,
-    ) {
+    fn do_send_abort_invocation_to_invoker(&mut self, invocation_id: InvocationId) {
         debug_if_leader!(self.is_leader, restate.invocation.id = %invocation_id, "Send abort command to invoker");
 
-        self.action_collector.push(Action::AbortInvocation {
-            invocation_id,
-            acknowledge,
-        });
+        self.action_collector
+            .push(Action::AbortInvocation { invocation_id });
     }
 
     async fn do_mutate_state(&mut self, state_mutation: ExternalStateMutation) -> Result<(), Error>
