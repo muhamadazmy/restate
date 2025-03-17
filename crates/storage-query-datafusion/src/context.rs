@@ -87,6 +87,13 @@ const SYS_INVOCATION_VIEW: &str = "CREATE VIEW sys_invocation as SELECT
         FROM sys_invocation_status ss
         LEFT JOIN sys_invocation_state sis ON ss.id = sis.id";
 
+const CLUSTER_LOG_TAIL_VIEW: &str = "CREATE VIEW cluster_log_tail as SELECT
+    l.* FROM cluster_log AS l JOIN (
+        SELECT id, max(segment_index) as segment_index FROM cluster_log GROUP BY id
+    ) m
+    ON m.id=l.id AND l.segment_index=m.segment_index
+";
+
 #[derive(Debug, thiserror::Error, CodedError)]
 pub enum BuildError {
     #[error(transparent)]
@@ -173,10 +180,17 @@ impl QueryContext {
         let metadata = Metadata::current();
         crate::node::register_self(&ctx, metadata.clone())?;
         crate::partition::register_self(&ctx, metadata.clone())?;
+        crate::log::register_self(&ctx, metadata)?;
 
         let ctx = ctx
             .datafusion_context
             .sql(SYS_INVOCATION_VIEW)
+            .await
+            .map(|_| ctx)?;
+
+        let ctx = ctx
+            .datafusion_context
+            .sql(CLUSTER_LOG_TAIL_VIEW)
             .await
             .map(|_| ctx)?;
 
