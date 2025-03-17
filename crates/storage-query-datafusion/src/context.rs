@@ -170,7 +170,9 @@ impl QueryContext {
             local_partition_store_manager,
         )?;
 
-        crate::node::register_self(&ctx, Metadata::current())?;
+        let metadata = Metadata::current();
+        crate::node::register_self(&ctx, metadata.clone())?;
+        crate::partition::register_self(&ctx, metadata.clone())?;
 
         let ctx = ctx
             .datafusion_context
