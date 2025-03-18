@@ -193,7 +193,8 @@ pub struct ClusterTables;
 impl TableRegisterer for ClusterTables {
     async fn register(&self, ctx: &QueryContext) -> Result<(), BuildError> {
         let metadata = Metadata::current();
-        crate::node::register_self(ctx, metadata)?;
+        crate::node::register_self(ctx, metadata.clone())?;
+        crate::partition::register_self(ctx, metadata)?;
 
         Ok(())
     }
