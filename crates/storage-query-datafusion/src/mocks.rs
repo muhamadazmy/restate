@@ -186,7 +186,7 @@ impl MockQueryEngine {
         Self(
             manager.clone(),
             partition_store,
-            QueryContext::create(
+            QueryContext::with_sys_tables(
                 &QueryEngineOptions::default(),
                 MockPartitionSelector,
                 Some(manager),
