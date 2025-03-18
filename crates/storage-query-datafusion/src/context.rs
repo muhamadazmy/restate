@@ -99,6 +99,94 @@ pub trait SelectPartitions: Send + Sync + Debug + 'static {
     async fn get_live_partitions(&self) -> Result<Vec<(PartitionId, Partition)>, GenericError>;
 }
 
+#[async_trait]
+pub trait TableRegisterer: Send + Sync + 'static {
+    async fn register(&self, ctx: &QueryContext) -> Result<(), BuildError>;
+}
+
+pub struct SysTables<P, S, D> {
+    partition_selector: P,
+    local_partition_store_manager: Option<PartitionStoreManager>,
+    status: Option<S>,
+    schemas: Live<D>,
+}
+
+impl<P, S, D> SysTables<P, S, D> {
+    pub fn new(
+        partition_selector: P,
+        local_partition_store_manager: Option<PartitionStoreManager>,
+        status: Option<S>,
+        schemas: Live<D>,
+    ) -> Self {
+        Self {
+            partition_selector,
+            local_partition_store_manager,
+            status,
+            schemas,
+        }
+    }
+}
+
+#[async_trait]
+impl<P, S, D> TableRegisterer for SysTables<P, S, D>
+where
+    P: SelectPartitions + Clone,
+    S: StatusHandle + Send + Sync + Debug + Clone + 'static,
+    D: DeploymentResolver + ServiceMetadataResolver + Send + Sync + Debug + Clone + 'static,
+{
+    async fn register(&self, ctx: &QueryContext) -> Result<(), BuildError> {
+        // ----- non partitioned tables -----
+        crate::deployment::register_self(ctx, self.schemas.clone())?;
+        crate::service::register_self(ctx, self.schemas.clone())?;
+        // ----- partition-key-based -----
+        crate::invocation_state::register_self(
+            ctx,
+            self.partition_selector.clone(),
+            self.status.clone(),
+            self.local_partition_store_manager.clone(),
+        )?;
+        crate::invocation_status::register_self(
+            ctx,
+            self.partition_selector.clone(),
+            self.local_partition_store_manager.clone(),
+        )?;
+        crate::keyed_service_status::register_self(
+            ctx,
+            self.partition_selector.clone(),
+            self.local_partition_store_manager.clone(),
+        )?;
+        crate::state::register_self(
+            ctx,
+            self.partition_selector.clone(),
+            self.local_partition_store_manager.clone(),
+        )?;
+        crate::journal::register_self(
+            ctx,
+            self.partition_selector.clone(),
+            self.local_partition_store_manager.clone(),
+        )?;
+        crate::inbox::register_self(
+            ctx,
+            self.partition_selector.clone(),
+            self.local_partition_store_manager.clone(),
+        )?;
+        crate::idempotency::register_self(
+            ctx,
+            self.partition_selector.clone(),
+            self.local_partition_store_manager.clone(),
+        )?;
+        crate::promise::register_self(
+            ctx,
+            self.partition_selector.clone(),
+            self.local_partition_store_manager.clone(),
+        )?;
+
+        ctx.datafusion_context.sql(SYS_INVOCATION_VIEW).await?;
+
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct QueryContext {
     sql_options: SQLOptions,
@@ -107,8 +195,41 @@ pub struct QueryContext {
 }
 
 impl QueryContext {
+    pub async fn create<T: TableRegisterer>(
+        options: &QueryEngineOptions,
+        remote_scanner_manager: RemoteScannerManager,
+        registerer: T,
+    ) -> Result<Self, BuildError> {
+        let boxed: Box<dyn TableRegisterer> = Box::new(registerer);
+        Self::from_iter(options, remote_scanner_manager, std::iter::once(boxed)).await
+    }
+
+    pub async fn from_iter<I>(
+        options: &QueryEngineOptions,
+        remote_scanner_manager: RemoteScannerManager,
+        tables: I,
+    ) -> Result<Self, BuildError>
+    where
+        I: IntoIterator<Item = Box<dyn TableRegisterer>>,
+    {
+        let ctx = QueryContext::new(
+            options.memory_size.get(),
+            options.tmp_dir.clone(),
+            options.query_parallelism(),
+            remote_scanner_manager,
+        );
+
+        for registerer in tables {
+            registerer.register(&ctx).await?;
+        }
+
+        Ok(ctx)
+    }
+
+    /// A short cut to create a query context with built in
+    /// SysTables
     #[allow(clippy::too_many_arguments)]
-    pub async fn create(
+    pub async fn with_sys_tables(
         options: &QueryEngineOptions,
         partition_selector: impl SelectPartitions + Clone,
         local_partition_store_manager: Option<PartitionStoreManager>,
@@ -118,65 +239,14 @@ impl QueryContext {
         >,
         remote_scanner_manager: RemoteScannerManager,
     ) -> Result<QueryContext, BuildError> {
-        let ctx = QueryContext::new(
-            options.memory_size.get(),
-            options.tmp_dir.clone(),
-            options.query_parallelism(),
-            remote_scanner_manager,
-        );
-        // ----- non partitioned tables -----
-        crate::deployment::register_self(&ctx, schemas.clone())?;
-        crate::service::register_self(&ctx, schemas)?;
-        // ----- partition-key-based -----
-        crate::invocation_state::register_self(
-            &ctx,
-            partition_selector.clone(),
-            status,
-            local_partition_store_manager.clone(),
-        )?;
-        crate::invocation_status::register_self(
-            &ctx,
-            partition_selector.clone(),
-            local_partition_store_manager.clone(),
-        )?;
-        crate::keyed_service_status::register_self(
-            &ctx,
-            partition_selector.clone(),
-            local_partition_store_manager.clone(),
-        )?;
-        crate::state::register_self(
-            &ctx,
-            partition_selector.clone(),
-            local_partition_store_manager.clone(),
-        )?;
-        crate::journal::register_self(
-            &ctx,
-            partition_selector.clone(),
-            local_partition_store_manager.clone(),
-        )?;
-        crate::inbox::register_self(
-            &ctx,
-            partition_selector.clone(),
-            local_partition_store_manager.clone(),
-        )?;
-        crate::idempotency::register_self(
-            &ctx,
-            partition_selector.clone(),
-            local_partition_store_manager.clone(),
-        )?;
-        crate::promise::register_self(
-            &ctx,
-            partition_selector.clone(),
+        let sys_tables = SysTables::new(
+            partition_selector,
             local_partition_store_manager,
-        )?;
+            status,
+            schemas,
+        );
 
-        let ctx = ctx
-            .datafusion_context
-            .sql(SYS_INVOCATION_VIEW)
-            .await
-            .map(|_| ctx)?;
-
-        Ok(ctx)
+        Self::create(options, remote_scanner_manager, sys_tables).await
     }
 
     pub(crate) fn register_partitioned_table(
