@@ -89,7 +89,7 @@ impl<T: TransportConnect> AdminRole<T> {
             );
 
             // need to create a remote query context since we are not co-located with a worker role
-            QueryContext::create(
+            QueryContext::sys_tables(
                 &config.admin.query_engine,
                 SelectPartitionsFromMetadata,
                 None,
