@@ -226,6 +226,7 @@ impl TableRegisterer for ClusterTables {
         crate::partition::register_self(ctx, metadata.clone())?;
         crate::log::register_self(ctx, metadata)?;
         crate::node_state::register_self(ctx, self.cluster_state_watch.clone())?;
+        crate::partition_state::register_self(ctx, self.cluster_state_watch.clone())?;
 
         ctx.datafusion_context
             .sql(CLUSTER_LOG_TAIL_SEGMENT_VIEW)
