@@ -89,7 +89,7 @@ impl<T: TransportConnect> AdminRole<T> {
             );
 
             // need to create a remote query context since we are not co-located with a worker role
-            QueryContext::with_user_tables(
+            restate_storage_datafusion::user_query_context(
                 &config.admin.query_engine,
                 SelectPartitionsFromMetadata,
                 None,
