@@ -16,6 +16,7 @@ replicated-loglet = ["restate-bifrost/replicated-loglet"]
 serve-web-ui = ["restate-web-ui", "mime_guess"]
 storage-query = ["dep:restate-datafusion", "dep:datafusion"]
 metadata-api = []
+table_docs = ["restate-datafusion/table_docs"]
 
 [dependencies]
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
