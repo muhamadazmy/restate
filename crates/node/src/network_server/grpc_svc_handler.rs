@@ -66,8 +66,12 @@ impl NodeCtlSvcHandler {
             })
             .transpose()?
             .unwrap_or(config.common.default_num_partitions);
-        let partition_replication = request.partition_replication.try_into()?;
 
+        let partition_replication = request
+            .partition_replication
+            .map(TryInto::try_into)
+            .transpose()?
+            .unwrap_or(config.admin.default_partition_replication.clone());
         let log_provider = request
             .log_provider
             .map(|log_provider| log_provider.parse())

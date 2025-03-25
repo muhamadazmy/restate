@@ -18,8 +18,10 @@ use restate_cli_util::{c_error, c_println, c_warn};
 use restate_core::protobuf::node_ctl_svc::ProvisionClusterRequest;
 use restate_core::protobuf::node_ctl_svc::node_ctl_svc_client::NodeCtlSvcClient;
 use restate_types::logs::metadata::{ProviderConfiguration, ProviderKind};
+use restate_types::partition_table::PartitionReplication;
 use restate_types::replication::ReplicationProperty;
 use std::cmp::Ordering;
+use std::str::FromStr;
 use tonic::Code;
 use tonic::codec::CompressionEncoding;
 
@@ -30,11 +32,11 @@ pub struct ProvisionOpts {
     #[clap(long)]
     num_partitions: Option<u16>,
 
-    /// Optional partition placement strategy. By default replicates
-    /// partitions on all nodes. Accepts replication property
-    /// string as a value
-    #[clap(long)]
-    partition_replication: Option<ReplicationProperty>,
+    /// Optional partition placement strategy. If omitted, uses the
+    /// configured `default-partition-replication` instead. Possible value are `everywhere`
+    /// or a valid replication property string.
+    #[clap(long, value_parser=parse_partition_replication)]
+    partition_replication: Option<PartitionReplication>,
 
     /// Default log provider kind
     #[clap(long)]
@@ -48,6 +50,15 @@ pub struct ProvisionOpts {
     /// It's recommended to leave it unset (defaults to 0)
     #[clap(long)]
     log_default_nodeset_size: Option<u16>,
+}
+
+pub fn parse_partition_replication(input: &str) -> anyhow::Result<PartitionReplication> {
+    match input {
+        "*" | "everywhere" => Ok(PartitionReplication::Everywhere),
+        _ => Ok(PartitionReplication::Limit(ReplicationProperty::from_str(
+            input,
+        )?)),
+    }
 }
 
 async fn provision_cluster(

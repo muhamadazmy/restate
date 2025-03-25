@@ -827,7 +827,7 @@ impl StartedNode {
         let request = ProtoProvisionClusterRequest {
             dry_run: false,
             num_partitions: num_partitions.map(|num| u32::from(num.get())),
-            partition_replication: partition_replication.into(),
+            partition_replication: Some(partition_replication.into()),
             log_provider: provider_configuration
                 .as_ref()
                 .map(|config| config.kind().to_string()),

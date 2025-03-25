@@ -92,8 +92,15 @@ message BifrostProvider {
   uint32 target_nodeset_size = 3;
 }
 
+message PartitionReplication {
+  oneof replication {
+    ReplicationProperty limited = 1;
+    google.protobuf.Empty everywhere = 2;
+  }
+}
+
 message ClusterConfiguration {
   uint32 num_partitions = 1;
-  optional ReplicationProperty partition_replication = 2;
+  PartitionReplication partition_replication = 2;
   BifrostProvider bifrost_provider = 3;
 }
