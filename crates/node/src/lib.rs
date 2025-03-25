@@ -16,7 +16,6 @@ mod roles;
 use anyhow::Context;
 use bytestring::ByteString;
 use prost_dto::IntoProst;
-use std::num::NonZeroU16;
 use tracing::{debug, error, info, trace, warn};
 
 use codederror::CodedError;
@@ -584,22 +583,17 @@ impl Node {
 #[derive(Clone, Debug, IntoProst)]
 #[prost(target = "restate_types::protobuf::cluster::ClusterConfiguration")]
 pub struct ClusterConfiguration {
-    #[into_prost(map = "num_partitions_to_u32")]
-    pub num_partitions: NonZeroU16,
-    pub partition_replication: PartitionReplication,
+    pub num_partitions: u16,
+    pub partition_replication: Option<PartitionReplication>,
     #[prost(required)]
     pub bifrost_provider: ProviderConfiguration,
-}
-
-fn num_partitions_to_u32(num_partitions: NonZeroU16) -> u32 {
-    u32::from(num_partitions.get())
 }
 
 impl ClusterConfiguration {
     pub fn from_configuration(configuration: &Configuration) -> Self {
         ClusterConfiguration {
             num_partitions: configuration.common.default_num_partitions,
-            partition_replication: configuration.admin.default_partition_replication.clone(),
+            partition_replication: Some(configuration.admin.default_partition_replication.clone()),
             bifrost_provider: ProviderConfiguration::from_configuration(configuration),
         }
     }
@@ -676,10 +670,13 @@ fn generate_initial_metadata(
 ) -> (NodesConfiguration, PartitionTable, Logs) {
     let mut initial_partition_table_builder = PartitionTableBuilder::default();
     initial_partition_table_builder
-        .with_equally_sized_partitions(cluster_configuration.num_partitions.get())
+        .with_equally_sized_partitions(cluster_configuration.num_partitions)
         .expect("Empty partition table should not have conflicts");
-    initial_partition_table_builder
-        .set_partition_replication(cluster_configuration.partition_replication.clone());
+
+    if let Some(partition_replication) = &cluster_configuration.partition_replication {
+        initial_partition_table_builder.set_partition_replication(partition_replication.clone());
+    }
+
     let initial_partition_table = initial_partition_table_builder.build();
 
     let initial_logs = Logs::with_logs_configuration(LogsConfiguration::from(

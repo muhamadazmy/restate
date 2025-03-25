@@ -9,7 +9,6 @@
 // by the Apache License, Version 2.0.
 
 use std::cmp::max_by_key;
-use std::num::NonZeroU16;
 
 use anyhow::Context;
 use bytes::BytesMut;
@@ -64,14 +63,17 @@ impl NodeCtlSvcHandler {
             .map(|num_partitions| {
                 u16::try_from(num_partitions)
                     .context("Restate only supports running up to 65535 partitions.")
-                    .and_then(|num_partitions| {
-                        NonZeroU16::try_from(num_partitions)
-                            .context("The number of partitions needs to be > 0")
-                    })
             })
             .transpose()?
             .unwrap_or(config.common.default_num_partitions);
-        let partition_replication = request.partition_replication.try_into()?;
+
+        // respect the configured partition replication otherwise fallback to the
+        // configured `default_partition_replication`
+        let partition_replication = request
+            .partition_replication
+            .map(TryInto::try_into)
+            .transpose()?
+            .unwrap_or(config.admin.default_partition_replication.clone());
 
         let log_provider = request
             .log_provider
@@ -100,7 +102,7 @@ impl NodeCtlSvcHandler {
 
         Ok(ClusterConfiguration {
             num_partitions,
-            partition_replication,
+            partition_replication: Some(partition_replication),
             bifrost_provider: provider_configuration,
         })
     }

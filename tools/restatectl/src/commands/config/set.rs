@@ -20,20 +20,21 @@ use restate_cli_util::ui::console::{StyledTable, confirm_or_exit};
 use restate_cli_util::{c_println, c_warn};
 use restate_types::logs::metadata::ProviderKind;
 use restate_types::nodes_config::Role;
+use restate_types::partition_table::PartitionReplication;
 use restate_types::replication::ReplicationProperty;
 use tonic::codec::CompressionEncoding;
 
 use super::cluster_config_string;
+use crate::commands::provision::parse_partition_replication;
 use crate::connection::ConnectionInfo;
 
 #[derive(Run, Parser, Collect, Clone, Debug)]
 #[cling(run = "config_set")]
 pub struct ConfigSetOpts {
-    /// Partition replication strategy. If not set places
-    /// partitions replicas on all nodes.
-    /// Accepts `replication property` as a value.
-    #[clap(long)]
-    partition_replication: Option<ReplicationProperty>,
+    /// Optional partition placement strategy. Possible value are `everywhere`
+    /// or a valid replication property string.
+    #[clap(long, value_parser=parse_partition_replication)]
+    partition_replication: Option<PartitionReplication>,
 
     /// Bifrost provider kind.
     #[clap(long)]
@@ -47,6 +48,13 @@ pub struct ConfigSetOpts {
     /// It's recommended to leave it unset (defaults to 0)
     #[clap(long)]
     log_default_nodeset_size: Option<u16>,
+
+    /// Number of partitions.
+    ///
+    /// It is only possible to change the number of partitions if the current cluster value is 0.
+    /// Otherwise, the set operation will fail.
+    #[clap(long)]
+    num_partitions: Option<u16>,
 }
 
 async fn config_set(connection: &ConnectionInfo, set_opts: &ConfigSetOpts) -> anyhow::Result<()> {
@@ -68,9 +76,9 @@ async fn config_set(connection: &ConnectionInfo, set_opts: &ConfigSetOpts) -> an
 
     let current_config_string = cluster_config_string(&current)?;
 
-    // todo: It's a bit confusing that not specifying the partition replication sets the partition
-    //  replication to everywhere. Everywhere should probably be an explicit value.
-    current.partition_replication = set_opts.partition_replication.clone().map(Into::into);
+    if let Some(partition_replication) = &set_opts.partition_replication {
+        current.partition_replication = Some(partition_replication.clone().into());
+    }
 
     set_opts.log_provider.inspect(|provider| {
         match provider {
@@ -99,6 +107,15 @@ async fn config_set(connection: &ConnectionInfo, set_opts: &ConfigSetOpts) -> an
 
     if let Some(nodeset_size) = set_opts.log_default_nodeset_size {
         bifrost_provider.target_nodeset_size = u32::from(nodeset_size);
+    }
+
+    if let Some(num_partitions) = set_opts.num_partitions {
+        if current.num_partitions != 0 {
+            anyhow::bail!(
+                "The cluster has already been provisioned with partitions. Restate does not support repartitioning, yet."
+            );
+        }
+        current.num_partitions = num_partitions.into();
     }
 
     let updated_config_string = cluster_config_string(&current)?;

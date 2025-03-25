@@ -16,7 +16,8 @@ use std::fmt::Write;
 use cling::prelude::*;
 
 use restate_types::{
-    logs::metadata::ProviderConfiguration, protobuf::cluster::ClusterConfiguration,
+    logs::metadata::ProviderConfiguration,
+    protobuf::cluster::{ClusterConfiguration, partition_replication::Replication},
 };
 
 use crate::util::{write_default_provider, write_leaf};
@@ -43,8 +44,14 @@ pub fn cluster_config_string(config: &ClusterConfiguration) -> anyhow::Result<St
     let strategy: &str = config
         .partition_replication
         .as_ref()
-        .map(|p| p.replication_property.as_str())
-        .unwrap_or("*");
+        .and_then(|p| p.replication.as_ref())
+        .map(|replication| match replication {
+            Replication::Everywhere(_) => "*",
+            Replication::Limited(replication_property) => {
+                replication_property.replication_property.as_str()
+            }
+        })
+        .unwrap_or("unknown"); // should never happen!
 
     write_leaf(&mut w, 0, false, "Partition replication", strategy)?;
 
