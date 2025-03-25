@@ -584,6 +584,7 @@ impl Node {
 #[prost(target = "restate_types::protobuf::cluster::ClusterConfiguration")]
 pub struct ClusterConfiguration {
     pub num_partitions: u16,
+    #[prost(required)]
     pub partition_replication: PartitionReplication,
     #[prost(required)]
     pub bifrost_provider: ProviderConfiguration,
@@ -672,8 +673,10 @@ fn generate_initial_metadata(
     initial_partition_table_builder
         .with_equally_sized_partitions(cluster_configuration.num_partitions)
         .expect("Empty partition table should not have conflicts");
+
     initial_partition_table_builder
         .set_partition_replication(cluster_configuration.partition_replication.clone());
+
     let initial_partition_table = initial_partition_table_builder.build();
 
     let initial_logs = Logs::with_logs_configuration(LogsConfiguration::from(

@@ -83,7 +83,7 @@ pub mod common {
 }
 
 pub mod cluster {
-    use crate::partition_table::PartitionReplication;
+    use anyhow::Context;
 
     include!(concat!(env!("OUT_DIR"), "/restate.cluster.rs"));
 
@@ -114,32 +114,48 @@ pub mod cluster {
         }
     }
 
-    impl TryFrom<Option<ReplicationProperty>> for PartitionReplication {
+    impl TryFrom<PartitionReplication> for crate::partition_table::PartitionReplication {
         type Error = anyhow::Error;
 
-        fn try_from(value: Option<ReplicationProperty>) -> Result<Self, Self::Error> {
-            Ok(value
-                .map(TryFrom::try_from)
-                .transpose()?
-                .map_or(PartitionReplication::Everywhere, |p| {
-                    PartitionReplication::Limit(p)
-                }))
+        fn try_from(value: PartitionReplication) -> Result<Self, Self::Error> {
+            use partition_replication::Replication;
+            let replication = value
+                .replication
+                .context("field `replication` is required")?;
+
+            let result = match replication {
+                Replication::Everywhere(_) => {
+                    crate::partition_table::PartitionReplication::Everywhere
+                }
+                Replication::Limited(replication_property) => {
+                    crate::partition_table::PartitionReplication::Limit(
+                        replication_property.try_into()?,
+                    )
+                }
+            };
+
+            Ok(result)
         }
     }
 
-    impl From<PartitionReplication> for Option<ReplicationProperty> {
-        fn from(value: PartitionReplication) -> Self {
+    impl From<crate::partition_table::PartitionReplication> for PartitionReplication {
+        fn from(value: crate::partition_table::PartitionReplication) -> Self {
+            use partition_replication::Replication;
             match value {
-                PartitionReplication::Everywhere => None,
-                PartitionReplication::Limit(replication_property) => {
-                    Some(replication_property.into())
+                crate::partition_table::PartitionReplication::Everywhere => PartitionReplication {
+                    replication: Some(Replication::Everywhere(())),
+                },
+                crate::partition_table::PartitionReplication::Limit(replication_property) => {
+                    PartitionReplication {
+                        replication: Some(Replication::Limited(replication_property.into())),
+                    }
                 }
             }
         }
     }
 
     impl ClusterConfiguration {
-        pub fn into_inner(self) -> (u32, Option<ReplicationProperty>, Option<BifrostProvider>) {
+        pub fn into_inner(self) -> (u32, Option<PartitionReplication>, Option<BifrostProvider>) {
             (
                 self.num_partitions,
                 self.partition_replication,

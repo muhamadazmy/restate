@@ -322,7 +322,7 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
         let response = GetClusterConfigurationResponse {
             cluster_configuration: Some(ClusterConfiguration {
                 num_partitions: u32::from(partition_table.num_partitions()),
-                partition_replication: partition_table.partition_replication().clone().into(),
+                partition_replication: Some(partition_table.partition_replication().clone().into()),
                 bifrost_provider: Some(logs.configuration().default_provider.clone().into()),
             }),
         };
@@ -343,7 +343,8 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
             .update_cluster_configuration(
                 cluster_configuration
                     .partition_replication
-                    .try_into()
+                    .map(TryInto::try_into)
+                    .transpose()
                     .map_err(|err| {
                         Status::invalid_argument(format!("invalid partition_replication: {err}"))
                     })?,
