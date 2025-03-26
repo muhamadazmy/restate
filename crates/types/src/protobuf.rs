@@ -83,6 +83,7 @@ pub mod common {
 }
 
 pub mod cluster {
+
     use crate::partition_table::PartitionReplication;
 
     include!(concat!(env!("OUT_DIR"), "/restate.cluster.rs"));
@@ -114,37 +115,19 @@ pub mod cluster {
         }
     }
 
-    impl TryFrom<Option<ReplicationProperty>> for PartitionReplication {
-        type Error = anyhow::Error;
-
-        fn try_from(value: Option<ReplicationProperty>) -> Result<Self, Self::Error> {
-            Ok(value
-                .map(TryFrom::try_from)
-                .transpose()?
-                .map_or(PartitionReplication::Everywhere, |p| {
-                    PartitionReplication::Limit(p)
-                }))
-        }
+    pub trait PartitionReplicationExt {
+        fn into_proto_parts(self) -> (PartitionReplicationKind, Option<ReplicationProperty>);
     }
 
-    impl From<PartitionReplication> for Option<ReplicationProperty> {
-        fn from(value: PartitionReplication) -> Self {
-            match value {
-                PartitionReplication::Everywhere => None,
-                PartitionReplication::Limit(replication_property) => {
-                    Some(replication_property.into())
-                }
+    impl PartitionReplicationExt for PartitionReplication {
+        fn into_proto_parts(self) -> (PartitionReplicationKind, Option<ReplicationProperty>) {
+            match self {
+                Self::Everywhere => (PartitionReplicationKind::Everywhere, None),
+                Self::Limit(replication_property) => (
+                    PartitionReplicationKind::Limited,
+                    Some(replication_property.into()),
+                ),
             }
-        }
-    }
-
-    impl ClusterConfiguration {
-        pub fn into_inner(self) -> (u32, Option<ReplicationProperty>, Option<BifrostProvider>) {
-            (
-                self.num_partitions,
-                self.partition_replication,
-                self.bifrost_provider,
-            )
         }
     }
 

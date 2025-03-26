@@ -34,8 +34,8 @@ message ProvisionClusterRequest {
   bool dry_run = 1;
   // if unset then the configured cluster num partitions will be used
   optional uint32 num_partitions = 2;
-  // if unset partition replication will default to `everywhere`. Otherwise
-  // it's limited to the provided replication property
+  // controls the partition_replication property based on the value of the
+  // partition_replication_kind.
   optional restate.cluster.ReplicationProperty partition_replication = 3;
   // if unset then the configured cluster default log provider will be used
   optional string log_provider = 4;
@@ -46,6 +46,8 @@ message ProvisionClusterRequest {
   // if unset then the configured cluster default target nodeset size will be
   // used
   optional uint32 target_nodeset_size = 6;
+  // Set the partition_replication kind.
+  restate.cluster.PartitionReplicationKind partition_replication_kind = 7;
 }
 
 message ProvisionClusterResponse {
