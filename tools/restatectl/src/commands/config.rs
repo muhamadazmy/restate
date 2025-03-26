@@ -11,12 +11,14 @@
 mod get;
 mod set;
 
-use std::fmt::Write;
+use std::{borrow::Cow, fmt::Write};
 
+use anyhow::Context;
 use cling::prelude::*;
 
 use restate_types::{
-    logs::metadata::ProviderConfiguration, protobuf::cluster::ClusterConfiguration,
+    logs::metadata::ProviderConfiguration,
+    protobuf::cluster::{ClusterConfiguration, PartitionReplicationKind},
 };
 
 use crate::util::{write_default_provider, write_leaf};
@@ -40,11 +42,30 @@ pub fn cluster_config_string(config: &ClusterConfiguration) -> anyhow::Result<St
         "Number of partitions",
         config.num_partitions,
     )?;
-    let strategy: &str = config
+    let partition_replication_kind: PartitionReplicationKind = config
+        .partition_replication_kind
+        .try_into()
+        .context("invalid partition_replication_kind")?;
+
+    let partition_replication = config
         .partition_replication
-        .as_ref()
-        .map(|p| p.replication_property.as_str())
-        .unwrap_or("*");
+        .clone()
+        .map(|p| p.replication_property);
+
+    let strategy = match partition_replication_kind {
+        PartitionReplicationKind::Everywhere => Cow::Borrowed("*"),
+        PartitionReplicationKind::Limit => Cow::Owned(
+            partition_replication
+                .context("partition_replication is required if replication kind is LIMITED")?,
+        ),
+        PartitionReplicationKind::Unknown => {
+            // backward compatibility with older servers.
+            // They will not set the kind field
+            partition_replication
+                .map(Cow::Owned)
+                .unwrap_or(Cow::Borrowed("*"))
+        }
+    };
 
     write_leaf(&mut w, 0, false, "Partition replication", strategy)?;
 

@@ -92,8 +92,34 @@ message BifrostProvider {
   uint32 target_nodeset_size = 3;
 }
 
+enum PartitionReplicationKind {
+  // UNKNOWN for backward compatibility will
+  // be handled as following
+  //
+  // in case of `provision`
+  // ````
+  // if partition_replication != null:
+  //    kind = LIMITED
+  // else:
+  //    partition_replication = configuration.default-partition-replication
+  // ````
+  // in case of `config set`
+  // ```
+  // if partition_replication != null:
+  //    kind = LIMITED
+  // else:
+  //    skip
+  // ```
+  PartitionReplicationKind_UNKNOWN = 0;
+  // Respect the `partition_replication`
+  LIMIT = 1;
+  // Replication to everywhere
+  EVERYWHERE = 2;
+}
+
 message ClusterConfiguration {
   uint32 num_partitions = 1;
-  optional ReplicationProperty partition_replication = 2;
+  ReplicationProperty partition_replication = 2;
   BifrostProvider bifrost_provider = 3;
+  PartitionReplicationKind partition_replication_kind = 4;
 }
