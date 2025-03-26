@@ -17,6 +17,7 @@ use restate_core::protobuf::metadata_proxy_svc::metadata_proxy_svc_server::Metad
 use restate_core::protobuf::metadata_proxy_svc::{
     DeleteRequest, GetRequest, GetResponse, GetVersionResponse, PutRequest,
 };
+use restate_types::partition_table::PartitionReplication;
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
@@ -37,7 +38,9 @@ use restate_types::errors::ConversionError;
 use restate_types::logs::metadata::{NodeSetSize, ProviderConfiguration};
 use restate_types::metadata::VersionedValue;
 use restate_types::nodes_config::Role;
-use restate_types::protobuf::cluster::ClusterConfiguration as ProtoClusterConfiguration;
+use restate_types::protobuf::cluster::{
+    ClusterConfiguration as ProtoClusterConfiguration, PartitionReplicationKind,
+};
 use restate_types::replication::ReplicationProperty;
 use restate_types::storage::StorageCodec;
 
@@ -66,7 +69,36 @@ impl NodeCtlSvcHandler {
             })
             .transpose()?
             .unwrap_or(config.common.default_num_partitions);
-        let partition_replication = request.partition_replication.try_into()?;
+
+        let partition_replication_kind: PartitionReplicationKind = request
+            .partition_replication_kind
+            .try_into()
+            .context("invalid partition_replication_kind")?;
+
+        let partition_replication: Option<ReplicationProperty> = request
+            .partition_replication
+            .map(TryInto::try_into)
+            .transpose()
+            .context("invalid partition_replication")?;
+
+        let partition_replication = match partition_replication_kind {
+            PartitionReplicationKind::Everywhere => PartitionReplication::Everywhere,
+            PartitionReplicationKind::Limit => {
+                PartitionReplication::Limit(partition_replication.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "partition_replication is a required field when kind is set to LIMITED"
+                    )
+                })?)
+            }
+            PartitionReplicationKind::Unknown => {
+                // backward compatibility
+                // respect the value of partition_replication iff set
+                // otherwise use the default configured partition replication
+                partition_replication
+                    .map(PartitionReplication::Limit)
+                    .unwrap_or_else(|| config.admin.default_partition_replication.clone())
+            }
+        };
 
         let log_provider = request
             .log_provider

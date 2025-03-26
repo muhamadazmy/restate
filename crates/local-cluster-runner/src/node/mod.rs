@@ -21,6 +21,7 @@ use restate_metadata_server::grpc::metadata_server_svc_client::MetadataServerSvc
 use restate_types::config::{InvalidConfigurationError, MetadataServerKind, RaftOptions};
 use restate_types::logs::metadata::ProviderConfiguration;
 use restate_types::partition_table::PartitionReplication;
+use restate_types::protobuf::cluster::PartitionReplicationExt;
 use restate_types::protobuf::common::MetadataServerStatus;
 use restate_types::retries::RetryPolicy;
 use restate_types::{
@@ -824,10 +825,13 @@ impl StartedNode {
             &Configuration::default().networking,
         );
 
+        let (kind, partition_replication_property) = partition_replication.into_proto_parts();
+
         let request = ProtoProvisionClusterRequest {
             dry_run: false,
             num_partitions: num_partitions.map(|num| u32::from(num.get())),
-            partition_replication: partition_replication.into(),
+            partition_replication_kind: kind.into(),
+            partition_replication: partition_replication_property,
             log_provider: provider_configuration
                 .as_ref()
                 .map(|config| config.kind().to_string()),

@@ -15,7 +15,6 @@ mod roles;
 
 use anyhow::Context;
 use bytestring::ByteString;
-use prost_dto::IntoProst;
 use tracing::{debug, error, info, trace, warn};
 
 use codederror::CodedError;
@@ -44,6 +43,9 @@ use restate_types::nodes_config::{
     LogServerConfig, MetadataServerConfig, NodeConfig, NodesConfiguration, Role,
 };
 use restate_types::partition_table::{PartitionReplication, PartitionTable, PartitionTableBuilder};
+use restate_types::protobuf::cluster::{
+    ClusterConfiguration as ProtoClusterConfiguration, PartitionReplicationExt,
+};
 use restate_types::protobuf::common::{
     AdminStatus, IngressStatus, LogServerStatus, NodeRpcStatus, WorkerStatus,
 };
@@ -580,12 +582,10 @@ impl Node {
     }
 }
 
-#[derive(Clone, Debug, IntoProst)]
-#[prost(target = "restate_types::protobuf::cluster::ClusterConfiguration")]
+#[derive(Clone, Debug)]
 pub struct ClusterConfiguration {
     pub num_partitions: u16,
     pub partition_replication: PartitionReplication,
-    #[prost(required)]
     pub bifrost_provider: ProviderConfiguration,
 }
 
@@ -595,6 +595,19 @@ impl ClusterConfiguration {
             num_partitions: configuration.common.default_num_partitions,
             partition_replication: configuration.admin.default_partition_replication.clone(),
             bifrost_provider: ProviderConfiguration::from_configuration(configuration),
+        }
+    }
+}
+
+impl From<ClusterConfiguration> for ProtoClusterConfiguration {
+    fn from(value: ClusterConfiguration) -> Self {
+        let (kind, partition_replication_property) = value.partition_replication.into_proto_parts();
+
+        ProtoClusterConfiguration {
+            num_partitions: value.num_partitions.into(),
+            bifrost_provider: Some(value.bifrost_provider.into()),
+            partition_replication_kind: kind.into(),
+            partition_replication: partition_replication_property,
         }
     }
 }
@@ -672,8 +685,10 @@ fn generate_initial_metadata(
     initial_partition_table_builder
         .with_equally_sized_partitions(cluster_configuration.num_partitions)
         .expect("Empty partition table should not have conflicts");
+
     initial_partition_table_builder
         .set_partition_replication(cluster_configuration.partition_replication.clone());
+
     let initial_partition_table = initial_partition_table_builder.build();
 
     let initial_logs = Logs::with_logs_configuration(LogsConfiguration::from(

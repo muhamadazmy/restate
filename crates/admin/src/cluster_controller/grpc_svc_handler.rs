@@ -13,6 +13,8 @@ use datafusion::arrow::ipc::writer::StreamWriter;
 use datafusion::error::DataFusionError;
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use restate_types::partition_table::PartitionReplication;
+use restate_types::replication::ReplicationProperty;
 use tonic::{Request, Response, Status, async_trait};
 use tracing::info;
 
@@ -26,7 +28,9 @@ use restate_types::logs::{LogId, Lsn, SequenceNumber};
 use restate_types::metadata_store::keys::{BIFROST_CONFIG_KEY, NODES_CONFIG_KEY};
 use restate_types::net::partition_processor_manager::Snapshot;
 use restate_types::nodes_config::NodesConfiguration;
-use restate_types::protobuf::cluster::ClusterConfiguration;
+use restate_types::protobuf::cluster::{
+    ClusterConfiguration, PartitionReplicationExt, PartitionReplicationKind,
+};
 use restate_types::storage::{StorageCodec, StorageEncode};
 use restate_types::{PlainNodeId, Version, Versioned};
 
@@ -319,10 +323,16 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
         let logs = Metadata::with_current(|m| m.logs_ref());
         let partition_table = Metadata::with_current(|m| m.partition_table_ref());
 
+        let (partition_replication_kind, partition_replication_property) = partition_table
+            .partition_replication()
+            .clone()
+            .into_proto_parts();
+
         let response = GetClusterConfigurationResponse {
             cluster_configuration: Some(ClusterConfiguration {
                 num_partitions: u32::from(partition_table.num_partitions()),
-                partition_replication: partition_table.partition_replication().clone().into(),
+                partition_replication_kind: partition_replication_kind.into(),
+                partition_replication: partition_replication_property,
                 bifrost_provider: Some(logs.configuration().default_provider.clone().into()),
             }),
         };
@@ -339,14 +349,39 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
             .cluster_configuration
             .ok_or_else(|| Status::invalid_argument("cluster_configuration is a required field"))?;
 
+        let partition_replication_kind: PartitionReplicationKind = cluster_configuration
+            .partition_replication_kind
+            .try_into()
+            .map_err(|err| {
+                Status::invalid_argument(format!("invalid partition_replication_kind: {err}"))
+            })?;
+
+        let partition_replication: Option<ReplicationProperty> = cluster_configuration
+            .partition_replication
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(|err| {
+                Status::invalid_argument(format!("invalid partition_replication: {err}"))
+            })?;
+
+        let partition_replication = match partition_replication_kind {
+            PartitionReplicationKind::Limit => Some(PartitionReplication::Limit(
+                partition_replication.ok_or_else(|| {
+                    Status::invalid_argument("partition_replication is a required field")
+                })?,
+            )),
+            PartitionReplicationKind::Everywhere => Some(PartitionReplication::Everywhere),
+            PartitionReplicationKind::Unknown => {
+                // backward compatibility.
+                // Set partition_replication to LIMIT if partition_replication property is set
+                // otherwise do not change current value
+                partition_replication.map(PartitionReplication::Limit)
+            }
+        };
+
         self.controller_handle
             .update_cluster_configuration(
-                cluster_configuration
-                    .partition_replication
-                    .try_into()
-                    .map_err(|err| {
-                        Status::invalid_argument(format!("invalid partition_replication: {err}"))
-                    })?,
+                partition_replication,
                 cluster_configuration
                     .bifrost_provider
                     .ok_or_else(|| {
