@@ -26,7 +26,6 @@ use restate_types::config::{MetadataServerKind, RaftOptions};
 use restate_types::logs::metadata::{
     NodeSetSize, ProviderConfiguration, ProviderKind, ReplicatedLogletConfig,
 };
-use restate_types::partition_table::PartitionReplication;
 use restate_types::replication::ReplicationProperty;
 use restate_types::{config::Configuration, nodes_config::Role};
 use std::convert::Infallible;
@@ -72,7 +71,7 @@ async fn replicated_loglet() -> googletest::Result<()> {
     cluster.nodes[0]
         .provision_cluster(
             None,
-            PartitionReplication::Everywhere,
+            ReplicationProperty::new(NonZeroU8::new(3).expect("is non zero")),
             Some(ProviderConfiguration::Replicated(replicated_loglet_config)),
         )
         .await
