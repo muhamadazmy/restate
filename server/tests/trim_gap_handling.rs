@@ -15,8 +15,6 @@ use std::time::Duration;
 use enumset::enum_set;
 use futures_util::StreamExt;
 use googletest::{IntoTestResult, fail};
-use restate_types::logs::metadata::{NodeSetSize, ProviderConfiguration, ReplicatedLogletConfig};
-use restate_types::partition_table::PartitionReplication;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tonic::codec::CompressionEncoding;
@@ -36,6 +34,7 @@ use restate_local_cluster_runner::{
 use restate_types::config::{LogFormat, MetadataClientKind};
 use restate_types::identifiers::PartitionId;
 use restate_types::logs::metadata::ProviderKind::Replicated;
+use restate_types::logs::metadata::{NodeSetSize, ProviderConfiguration, ReplicatedLogletConfig};
 use restate_types::protobuf::cluster::RunMode;
 use restate_types::protobuf::cluster::node_state::State;
 use restate_types::replication::ReplicationProperty;
@@ -89,7 +88,7 @@ async fn fast_forward_over_trim_gap() -> googletest::Result<()> {
     cluster.nodes[0]
         .provision_cluster(
             None,
-            PartitionReplication::Limit(ReplicationProperty::new_unchecked(3)),
+            ReplicationProperty::new_unchecked(3).into(),
             Some(ProviderConfiguration::Replicated(replicated_loglet_config)),
         )
         .await
