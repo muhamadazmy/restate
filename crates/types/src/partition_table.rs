@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroU8;
 use std::ops::RangeInclusive;
 
 use serde_with::serde_as;
@@ -49,21 +50,26 @@ impl From<KeyRange> for RangeInclusive<PartitionKey> {
 
 /// Specified how partitions are replicated across the cluster.
 #[serde_as]
-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PartitionReplication {
     /// All partitions are replicated on all nodes in the cluster.
-    #[default]
+    ///
+    /// #[deprecated]
+    ///
+    /// Note: It's only kept for backward compatibility with older metadata
+    /// but users can't select this value directly.
     Everywhere,
     /// Replication of partitions is limited to the specified replication property.
     /// for example a replication property of `{node: 2}` will run
     /// each partition on maximum of two nodes (one leader, and one follower)
-    Limit(
-        #[serde_as(
-            as = "serde_with::PickFirst<(serde_with::DisplayFromStr, crate::replication::ReplicationPropertyFromNonZeroU8)>"
-        )]
-        ReplicationProperty,
-    ),
+    Limit(#[serde_as(as = "crate::replication::ReplicationPropertyFromTo")] ReplicationProperty),
+}
+
+impl From<ReplicationProperty> for PartitionReplication {
+    fn from(value: ReplicationProperty) -> Self {
+        Self::Limit(value)
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -86,7 +92,7 @@ impl Default for PartitionTable {
             version: Version::INVALID,
             partitions: BTreeMap::default(),
             partition_key_index: BTreeMap::default(),
-            replication: PartitionReplication::default(),
+            replication: PartitionReplication::Everywhere,
         }
     }
 }
@@ -497,7 +503,11 @@ impl TryFrom<PartitionTableShadow> for PartitionTable {
     fn try_from(value: PartitionTableShadow) -> Result<Self, Self::Error> {
         let mut builder = PartitionTableBuilder::new(value.version);
         // replication strategy is unset if data has been written with version <= v1.1.3
-        builder.set_partition_replication(value.replication.unwrap_or_default());
+        builder.set_partition_replication(value.replication.unwrap_or(
+            PartitionReplication::Limit(ReplicationProperty::new(
+                NonZeroU8::new(1).expect("is non zero"),
+            )),
+        ));
 
         match value.partitions {
             Some(partitions) => {
