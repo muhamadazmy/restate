@@ -8,7 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::num::{NonZeroU8, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -22,7 +22,9 @@ use crate::logs::metadata::{NodeSetSize, ProviderKind};
 use crate::replication::ReplicationProperty;
 use crate::retries::RetryPolicy;
 
-use super::{CommonOptions, RocksDbOptions, RocksDbOptionsBuilder};
+use super::{
+    CommonOptions, RocksDbOptions, RocksDbOptionsBuilder, print_warning_deprecated_config_option,
+};
 
 /// # Bifrost options
 #[serde_as]
@@ -96,6 +98,11 @@ impl BifrostOptions {
             Some(self.append_retry_max_interval.into()),
         )
     }
+
+    pub fn apply_common(&mut self, common: &CommonOptions) {
+        self.local.apply_common(common);
+        self.replicated_loglet.apply_common(common);
+    }
 }
 
 impl Default for BifrostOptions {
@@ -163,7 +170,7 @@ pub struct LocalLogletOptions {
 }
 
 impl LocalLogletOptions {
-    pub fn apply_common(&mut self, common: &CommonOptions) {
+    fn apply_common(&mut self, common: &CommonOptions) {
         self.rocksdb.apply_common(&common.rocksdb);
         if self.rocksdb_memory_budget.is_none() {
             self.rocksdb_memory_budget = Some(
@@ -294,12 +301,10 @@ pub struct ReplicatedLogletOptions {
     /// To update existing clusters use the `restatectl` utility.
     // Also allow to specify the replication property as non-zero u8 value to make it simpler to
     // pass it in via an env variable.
-    #[serde_as(
-        as = "serde_with::PickFirst<(serde_with::DisplayFromStr, crate::replication::ReplicationPropertyFromNonZeroU8)>"
-    )]
-    #[serde(default = "default_log_replication")]
+    #[serde_as(as = "Option<crate::replication::ReplicationPropertyFromTo>")]
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub default_log_replication: ReplicationProperty,
+    #[deprecated]
+    default_log_replication: Option<ReplicationProperty>,
 
     /// # Default nodeset size
     ///
@@ -318,16 +323,25 @@ pub struct ReplicatedLogletOptions {
     pub default_nodeset_size: NodeSetSize,
 }
 
+impl ReplicatedLogletOptions {
+    fn apply_common(&mut self, _common: &CommonOptions) {
+        #[allow(deprecated)]
+        self.default_log_replication.as_ref().inspect(|_| {
+            print_warning_deprecated_config_option(
+                "bifrost.replicated-loglet.default-log-replication",
+                Some("default-replication"),
+            );
+        });
+    }
+}
+
 fn nodeset_size_is_zero(i: &NodeSetSize) -> bool {
     *i == NodeSetSize::ZERO
 }
 
-fn default_log_replication() -> ReplicationProperty {
-    ReplicationProperty::new(NonZeroU8::new(1).expect("to be non-zero"))
-}
-
 impl Default for ReplicatedLogletOptions {
     fn default() -> Self {
+        #[allow(deprecated)]
         Self {
             maximum_inflight_records: NonZeroUsize::new(1000).unwrap(),
 
@@ -348,7 +362,8 @@ impl Default for ReplicatedLogletOptions {
             readahead_records: NonZeroUsize::new(100).unwrap(),
             readahead_trigger_ratio: 0.5,
             default_nodeset_size: NodeSetSize::default(),
-            default_log_replication: default_log_replication(),
+            // remove in version > v1.3
+            default_log_replication: None,
         }
     }
 }

@@ -15,11 +15,12 @@ use std::time::Duration;
 
 use http::Uri;
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
+use serde_with::{DeserializeAs, serde_as};
 use tokio::sync::Semaphore;
 
+use crate::{partition_table::PartitionReplication, replication::ReplicationPropertyFromTo};
+
 use super::{QueryEngineOptions, print_warning_deprecated_config_option};
-use crate::partition_table::PartitionReplication;
 
 /// # Admin server options
 #[serde_as]
@@ -81,18 +82,6 @@ pub struct AdminOptions {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub log_tail_update_interval: humantime::Duration,
-
-    /// # Default partition replication factor
-    ///
-    /// The default replication factor for partition processors, this impacts how many replicas
-    /// each partition will have across the worker nodes of the cluster.
-    ///
-    /// Note that this value only impacts the cluster initial provisioning and will not be respected after
-    /// the cluster has been provisioned.
-    ///
-    /// To update existing clusters use the `restatectl` utility.
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub default_partition_replication: PartitionReplication,
 
     /// Disable serving the Restate Web UI on the admin port. Default is `false`.
     pub disable_web_ui: bool,
@@ -164,7 +153,6 @@ impl Default for AdminOptions {
             // check whether we can trim logs every hour
             log_trim_check_interval: Duration::from_secs(60 * 60).into(),
             log_trim_threshold: None,
-            default_partition_replication: PartitionReplication::default(),
             #[cfg(any(test, feature = "test-util"))]
             disable_cluster_controller: false,
             disable_web_ui: false,
@@ -179,11 +167,18 @@ impl From<AdminOptionsShadow> for AdminOptions {
             .log_trim_interval
             .inspect(|_| {
                 print_warning_deprecated_config_option(
-                    "log-trim-interval",
+                    "admin.log-trim-interval",
                     Some("admin.log-trim-check-interval"),
                 )
             })
             .unwrap_or(value.log_trim_check_interval);
+
+        value.default_partition_replication.inspect(|_| {
+            print_warning_deprecated_config_option(
+                "admin.default-partition-replication",
+                Some("default-replication"),
+            );
+        });
 
         Self {
             bind_address: value.bind_address,
@@ -194,7 +189,6 @@ impl From<AdminOptionsShadow> for AdminOptions {
             log_trim_check_interval,
             log_trim_threshold: value.log_trim_threshold,
             log_tail_update_interval: value.log_tail_update_interval,
-            default_partition_replication: value.default_partition_replication,
             disable_web_ui: value.disable_web_ui,
             #[cfg(any(test, feature = "test-util"))]
             disable_cluster_controller: value.disable_cluster_controller,
@@ -204,9 +198,10 @@ impl From<AdminOptionsShadow> for AdminOptions {
 
 /// Used to deserialize the [`AdminOptions`] in backwards compatible way.
 ///
-/// | Current Name              | Backwards Compatible Aliases  | Since   |
-/// |---------------------------|-------------------------------|---------|
-/// | `log_trim_check_interval` |`log_trim_interval`            | 1.2     |
+/// | Current Name                    | Backwards Compatible            | Since   |
+/// |---------------------------------|---------------------------------|---------|
+/// | `log_trim_check_interval`       | alias `log_trim_interval`       | 1.2     |
+/// |                                 | `default_partition_replication` | 1.3     |
 ///
 /// Once we no longer support the backwards compatible aliases, we can remove this struct.
 #[serde_as]
@@ -232,10 +227,24 @@ struct AdminOptionsShadow {
     #[serde_as(as = "serde_with::DisplayFromStr")]
     log_tail_update_interval: humantime::Duration,
 
-    default_partition_replication: PartitionReplication,
+    #[serde_as(
+        as = "Option<serde_with::PickFirst<(_, PartitionReplicationFromReplicationProperty)>>"
+    )]
+    default_partition_replication: Option<PartitionReplication>,
 
     disable_web_ui: bool,
 
     #[cfg(any(test, feature = "test-util"))]
     disable_cluster_controller: bool,
+}
+
+struct PartitionReplicationFromReplicationProperty;
+
+impl<'de> DeserializeAs<'de, PartitionReplication> for PartitionReplicationFromReplicationProperty {
+    fn deserialize_as<D>(deserializer: D) -> Result<PartitionReplication, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        ReplicationPropertyFromTo::deserialize_as(deserializer).map(PartitionReplication::Limit)
+    }
 }
