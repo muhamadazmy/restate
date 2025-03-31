@@ -98,11 +98,14 @@ impl NodeCtlSvcHandler {
             .map(ReplicationProperty::try_from)
             .transpose()?
             .unwrap_or_else(|| {
+                // remove in version 1.4
+                #[allow(deprecated)]
                 config
                     .bifrost
                     .replicated_loglet
                     .default_log_replication
                     .clone()
+                    .unwrap_or_else(|| config.common.default_replication.clone())
             });
 
         let provider_configuration =
