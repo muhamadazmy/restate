@@ -9,11 +9,14 @@
 // by the Apache License, Version 2.0.
 
 use std::net::SocketAddr;
+use std::num::NonZeroU8;
 use std::time::Duration;
 
 use enumset::enum_set;
 use futures_util::StreamExt;
-use googletest::fail;
+use googletest::{IntoTestResult, fail};
+use restate_types::logs::metadata::{NodeSetSize, ProviderConfiguration, ReplicatedLogletConfig};
+use restate_types::partition_table::PartitionReplication;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tonic::codec::CompressionEncoding;
@@ -35,6 +38,7 @@ use restate_types::identifiers::PartitionId;
 use restate_types::logs::metadata::ProviderKind::Replicated;
 use restate_types::protobuf::cluster::RunMode;
 use restate_types::protobuf::cluster::node_state::State;
+use restate_types::replication::ReplicationProperty;
 use restate_types::retries::RetryPolicy;
 use restate_types::{config::Configuration, nodes_config::Role};
 
@@ -47,6 +51,10 @@ async fn fast_forward_over_trim_gap() -> googletest::Result<()> {
     base_config.bifrost.default_provider = Replicated;
     base_config.common.log_filter = "restate=debug,warn".to_owned();
     base_config.common.log_format = LogFormat::Compact;
+    // since default (partition) replication does not support "everywhere" anymore,
+    // we need to explicitly set this to 3
+    base_config.common.default_replication =
+        ReplicationProperty::new(NonZeroU8::new(3).expect("is non zero"));
 
     let no_snapshot_repository_config = base_config.clone();
 
@@ -60,27 +68,45 @@ async fn fast_forward_over_trim_gap() -> googletest::Result<()> {
     let nodes = Node::new_test_nodes(
         base_config.clone(),
         BinarySource::CargoTest,
-        enum_set!(Role::MetadataServer | Role::Admin | Role::Worker | Role::LogServer),
+        enum_set!(Role::Admin | Role::MetadataServer | Role::Worker | Role::LogServer),
         2,
-        true,
+        false,
     );
 
-    let worker_1 = &nodes[0];
-    let worker_2 = &nodes[1];
-
-    let mut worker_1_ready = worker_1.lines("Partition [0-9]+ started".parse()?);
-    let mut worker_2_ready = worker_2.lines("Partition [0-0]+ started".parse()?);
-
     let mut cluster = Cluster::builder()
+        .cluster_name("cluster-1")
+        .nodes(nodes)
         .temp_base_dir()
-        .nodes(nodes.clone())
         .build()
         .start()
         .await?;
 
+    let replicated_loglet_config = ReplicatedLogletConfig {
+        target_nodeset_size: NodeSetSize::default(),
+        replication_property: ReplicationProperty::new(NonZeroU8::new(1).expect("to be non-zero")),
+    };
+
+    cluster.nodes[0]
+        .provision_cluster(
+            None,
+            PartitionReplication::Limit(ReplicationProperty::new_unchecked(3)),
+            Some(ProviderConfiguration::Replicated(replicated_loglet_config)),
+        )
+        .await
+        .into_test_result()?;
+
+    let worker_1 = &cluster.nodes[0];
+    let worker_2 = &cluster.nodes[1];
+
+    let mut worker_1_ready = worker_1.lines("Partition [0-9]+ started".parse()?);
+    let mut worker_2_ready = worker_2.lines("Partition [0-0]+ started".parse()?);
+
     cluster.wait_healthy(Duration::from_secs(10)).await?;
     tokio::time::timeout(Duration::from_secs(10), worker_1_ready.next()).await?;
     tokio::time::timeout(Duration::from_secs(10), worker_2_ready.next()).await?;
+
+    drop(worker_1_ready);
+    drop(worker_2_ready);
 
     let mut client = ClusterCtrlSvcClient::new(create_tonic_channel(
         cluster.nodes[0].node_address().clone(),

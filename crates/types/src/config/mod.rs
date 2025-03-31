@@ -226,7 +226,7 @@ impl Configuration {
 
     pub fn apply_cascading_values(mut self) -> Self {
         self.worker.storage.apply_common(&self.common);
-        self.bifrost.local.apply_common(&self.common);
+        self.bifrost.apply_common(&self.common);
         self.metadata_server.apply_common(&self.common);
         self.log_server.apply_common(&self.common);
         self

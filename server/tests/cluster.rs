@@ -102,10 +102,7 @@ async fn cluster_chaos_test() -> googletest::Result<()> {
         }));
     base_config.common.default_num_partitions = 4;
     base_config.bifrost.default_provider = ProviderKind::Replicated;
-    base_config
-        .bifrost
-        .replicated_loglet
-        .default_log_replication =
+    base_config.common.default_replication =
         ReplicationProperty::new(NonZeroU8::new(2).expect("to be non-zero"));
 
     let nodes = Node::new_test_nodes(
