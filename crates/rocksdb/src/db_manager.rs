@@ -281,8 +281,6 @@ impl RocksDbManager {
         }
 
         // no need to retain 1000 log files by default.
-        //
-        db_options.set_keep_log_file_num(2);
         if !opts.rocksdb_disable_wal() {
             // RocksDB does not support recycling wal log files if wal is disabled when writing
             db_options.set_recycle_log_file_num(4);
@@ -302,6 +300,9 @@ impl RocksDbManager {
         // block cache to up to 64 shards in memory.
         //
         db_options.set_table_cache_num_shard_bits(6);
+
+        // Speed up database open, useful for large databases and slow disk.
+        db_options.set_skip_stats_update_on_db_open(true);
 
         // Use Direct I/O for reads, do not use OS page cache to cache compressed blocks.
         db_options.set_use_direct_reads(!opts.rocksdb_disable_direct_io_for_reads());
