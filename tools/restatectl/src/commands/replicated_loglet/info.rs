@@ -111,9 +111,14 @@ async fn get_info(connection: &ConnectionInfo, opts: &InfoOpts) -> anyhow::Resul
 
     let mut loglet_infos: HashMap<PlainNodeId, _> = HashMap::default();
     for node_id in nodeset.iter().copied() {
-        let node = nodes_config.find_node_by_id(node_id).unwrap_or_else(|_| {
-            panic!("Node {node_id} doesn't seem to exist in nodes configuration");
-        });
+        let Ok(node) = nodes_config.find_node_by_id(node_id) else {
+            warn!(
+                "Node {} does not exist anymore, will not connect to it",
+                node_id
+            );
+            continue;
+        };
+
         if !node.has_role(Role::LogServer) {
             warn!(
                 "Node {} is not running the log-server role, will not connect to it",
