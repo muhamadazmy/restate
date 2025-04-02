@@ -8,10 +8,10 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
+use std::{net::SocketAddr, u8};
 
 use http::Uri;
 use serde::{Deserialize, Serialize};
@@ -208,8 +208,9 @@ impl From<AdminOptionsShadow> for AdminOptions {
                     print_warning_deprecated_value(
                         "admin.default-partition-replication",
                         "everywhere",
+                        &u8::MAX,
                     );
-                    ReplicationProperty::new_unchecked(1)
+                    ReplicationProperty::new_unchecked(u8::MAX)
                 }
                 PartitionReplication::Limit(replication_property) => replication_property,
             }
