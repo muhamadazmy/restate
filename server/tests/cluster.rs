@@ -68,6 +68,7 @@ async fn replicated_loglet() -> googletest::Result<()> {
         replication_property: ReplicationProperty::new(NonZeroU8::new(2).expect("to be non-zero")),
     };
 
+    info!("Provisioning the cluster");
     cluster.nodes[0]
         .provision_cluster(
             None,
@@ -94,11 +95,12 @@ async fn cluster_chaos_test() -> googletest::Result<()> {
     let mut base_config = Configuration::default();
     base_config
         .metadata_server
-        .set_kind(MetadataServerKind::Raft(RaftOptions {
-            raft_election_tick: NonZeroUsize::new(5).expect("5 to be non zero"),
-            raft_heartbeat_tick: NonZeroUsize::new(2).expect("2 to be non zero"),
-            ..RaftOptions::default()
-        }));
+        .set_kind(MetadataServerKind::Raft);
+    base_config.metadata_server.set_raft_options(RaftOptions {
+        raft_election_tick: NonZeroUsize::new(5).expect("5 to be non zero"),
+        raft_heartbeat_tick: NonZeroUsize::new(2).expect("2 to be non zero"),
+        ..RaftOptions::default()
+    });
     base_config.common.default_num_partitions = 4;
     base_config.bifrost.default_provider = ProviderKind::Replicated;
     base_config.common.log_filter = "warn,restate=debug".to_owned();

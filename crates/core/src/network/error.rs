@@ -13,7 +13,7 @@ use std::time::Duration;
 use tonic::Code;
 
 use restate_types::NodeId;
-use restate_types::net::MIN_SUPPORTED_PROTOCOL_VERSION;
+use restate_types::net::{CURRENT_PROTOCOL_VERSION, MIN_SUPPORTED_PROTOCOL_VERSION};
 use restate_types::nodes_config::NodesConfigError;
 
 use crate::ShutdownError;
@@ -125,10 +125,13 @@ pub enum HandshakeError {
     #[error("peer dropped connection during handshake")]
     PeerDropped,
     #[error(
-        "peer has unsupported protocol version {0}, minimum supported is '{p}'",
-        p = MIN_SUPPORTED_PROTOCOL_VERSION as i32
+        "peer has unsupported protocol version {0}, supported versions are '[{min}-{max}]'",
+        min = MIN_SUPPORTED_PROTOCOL_VERSION as i32,
+        max = CURRENT_PROTOCOL_VERSION as i32
     )]
     UnsupportedVersion(i32),
+    #[error("peer has unknown protocol version {0}")]
+    UnknownVersion(i32),
 }
 
 impl From<HandshakeError> for tonic::Status {
@@ -137,7 +140,7 @@ impl From<HandshakeError> for tonic::Status {
             HandshakeError::Failed(e) => tonic::Status::invalid_argument(e),
             HandshakeError::Timeout(e) => tonic::Status::deadline_exceeded(e),
             HandshakeError::PeerDropped => tonic::Status::cancelled("peer dropped"),
-            HandshakeError::UnsupportedVersion(_) => {
+            HandshakeError::UnsupportedVersion(_) | HandshakeError::UnknownVersion(_) => {
                 tonic::Status::invalid_argument(value.to_string())
             }
         }

@@ -12,7 +12,7 @@ mod server;
 
 use crate::local::storage::RocksDbStorage;
 use std::path::PathBuf;
-pub use {server::LocalMetadataServer, server::migrate_nodes_configuration};
+pub use {server::BuildError, server::LocalMetadataServer, server::migrate_nodes_configuration};
 
 pub mod storage;
 #[cfg(test)]
@@ -21,6 +21,7 @@ mod tests;
 const DATA_DIR: &str = "local-metadata-store";
 const DB_NAME: &str = "local-metadata-store";
 const KV_PAIRS: &str = "kv_pairs";
+const SEALED_KEY: &str = "##restate_internal_sealed##";
 
 /// Data directory of the local metadata server
 pub fn data_dir() -> PathBuf {

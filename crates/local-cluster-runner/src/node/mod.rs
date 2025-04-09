@@ -9,6 +9,7 @@
 // by the Apache License, Version 2.0.
 
 use crate::random_socket_address;
+use anyhow::bail;
 use arc_swap::ArcSwapOption;
 use enumset::EnumSet;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt, stream};
@@ -19,7 +20,7 @@ use restate_core::protobuf::node_ctl_svc::{
     ProvisionClusterRequest as ProtoProvisionClusterRequest, new_node_ctl_client,
 };
 use restate_metadata_server::grpc::new_metadata_server_client;
-use restate_types::config::{InvalidConfigurationError, MetadataServerKind, RaftOptions};
+use restate_types::config::{InvalidConfigurationError, MetadataServerKind};
 use restate_types::logs::metadata::ProviderConfiguration;
 use restate_types::protobuf::common::MetadataServerStatus;
 use restate_types::replication::ReplicationProperty;
@@ -184,15 +185,12 @@ impl Node {
         base_config.common.auto_provision = false;
         base_config.common.log_disable_ansi_codes = true;
         if roles.contains(Role::MetadataServer)
-            && !matches!(
-                base_config.metadata_server.kind(),
-                MetadataServerKind::Raft(_)
-            )
+            && !matches!(base_config.metadata_server.kind(), MetadataServerKind::Raft)
         {
             info!("Setting the metadata server to replicated");
             base_config
                 .metadata_server
-                .set_kind(MetadataServerKind::Raft(RaftOptions::default()));
+                .set_kind(MetadataServerKind::Raft);
         }
 
         for node_id in 1..=size {
@@ -846,7 +844,7 @@ impl StartedNode {
         let retry_policy = RetryPolicy::exponential(
             Duration::from_millis(100),
             2.0,
-            Some(10),
+            Some(60), // our test infra is sometimes slow until the node starts up
             Some(Duration::from_secs(1)),
         );
         let client = new_node_ctl_client(channel);
@@ -870,7 +868,10 @@ impl StartedNode {
                 if status.code() == Code::AlreadyExists {
                     Ok(false)
                 } else {
-                    Err(status.into())
+                    bail!(
+                        "failed to provision the cluster at node {}: {status}",
+                        self.node_address()
+                    );
                 }
             }
         }
