@@ -23,11 +23,11 @@ use tonic::transport::Channel;
 use tracing::info;
 use url::Url;
 
-use restate_admin::cluster_controller::protobuf::cluster_ctrl_svc_client::ClusterCtrlSvcClient;
-use restate_admin::cluster_controller::protobuf::{
-    ClusterStateRequest, CreatePartitionSnapshotRequest, new_cluster_ctrl_client,
-};
 use restate_core::network::net_util::create_tonic_channel;
+use restate_core::protobuf::cluster_ctrl_svc::{
+    ClusterStateRequest, CreatePartitionSnapshotRequest,
+    cluster_ctrl_svc_client::ClusterCtrlSvcClient, new_cluster_ctrl_client,
+};
 use restate_local_cluster_runner::{
     cluster::Cluster,
     node::{BinarySource, Node},
@@ -35,8 +35,8 @@ use restate_local_cluster_runner::{
 use restate_types::config::{LogFormat, MetadataClientKind, NetworkingOptions};
 use restate_types::identifiers::PartitionId;
 use restate_types::logs::metadata::ProviderKind::Replicated;
-use restate_types::protobuf::cluster::RunMode;
-use restate_types::protobuf::cluster::node_state::State;
+use restate_types::protobuf::net::cluster::RunMode;
+use restate_types::protobuf::net::cluster::node_state::State;
 use restate_types::retries::RetryPolicy;
 use restate_types::{config::Configuration, nodes_config::Role};
 

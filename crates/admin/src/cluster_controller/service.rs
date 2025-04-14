@@ -129,7 +129,7 @@ where
                 .into_server(),
                 WaitForReady::new(health_status.clone(), AdminStatus::Ready),
             ),
-            crate::cluster_controller::protobuf::FILE_DESCRIPTOR_SET,
+            restate_core::protobuf::cluster_ctrl_svc::FILE_DESCRIPTOR_SET,
         );
 
         Ok(Service {
@@ -777,7 +777,6 @@ impl SealAndExtendTask {
             Some(ext) => match ext.provider_kind {
                 #[cfg(any(test, feature = "memory-loglet"))]
                 ProviderKind::InMemory => ProviderConfiguration::InMemory,
-                #[cfg(any(test, feature = "local-loglet"))]
                 ProviderKind::Local => ProviderConfiguration::Local,
                 ProviderKind::Replicated => {
                     ProviderConfiguration::Replicated(ReplicatedLogletConfig {
@@ -820,12 +819,10 @@ impl SealAndExtendTask {
                 ProviderKind::InMemory,
                 u64::from(next_loglet_id).to_string().into(),
             ),
-            #[cfg(any(test, feature = "local-loglet"))]
             ProviderConfiguration::Local => (
                 ProviderKind::Local,
                 u64::from(next_loglet_id).to_string().into(),
             ),
-            #[cfg(feature = "replicated-loglet")]
             ProviderConfiguration::Replicated(config) => {
                 let loglet_params = logs_controller::build_new_replicated_loglet_configuration(
                     self.log_id,

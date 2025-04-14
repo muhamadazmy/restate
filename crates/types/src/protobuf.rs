@@ -87,17 +87,6 @@ pub mod cluster {
 
     include!(concat!(env!("OUT_DIR"), "/restate.cluster.rs"));
 
-    impl std::fmt::Display for RunMode {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            let o = match self {
-                RunMode::Unknown => "UNKNOWN",
-                RunMode::Leader => "Leader",
-                RunMode::Follower => "Follower",
-            };
-            write!(f, "{o}")
-        }
-    }
-
     impl From<crate::replication::ReplicationProperty> for ReplicationProperty {
         fn from(value: crate::replication::ReplicationProperty) -> Self {
             ReplicationProperty {
@@ -142,17 +131,6 @@ pub mod cluster {
                 self.replication_property,
                 self.target_nodeset_size,
             )
-        }
-    }
-}
-
-pub mod log_server_common {
-
-    include!(concat!(env!("OUT_DIR"), "/restate.log_server_common.rs"));
-
-    impl std::fmt::Display for RecordStatus {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            std::fmt::Display::fmt(&crate::net::log_server::RecordStatus::from(*self as i32), f)
         }
     }
 }
@@ -224,5 +202,48 @@ pub mod metadata {
                 }
             }
         }
+    }
+}
+
+pub mod net {
+    pub mod log_server {
+        include!(concat!(env!("OUT_DIR"), "/restate.net.log_server.rs"));
+
+        impl std::fmt::Display for RecordStatus {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                std::fmt::Display::fmt(&crate::net::log_server::RecordStatus::from(*self as i32), f)
+            }
+        }
+    }
+
+    pub mod metadata {
+        include!(concat!(env!("OUT_DIR"), "/restate.net.metadata.rs"));
+    }
+
+    pub mod cluster {
+
+        include!(concat!(env!("OUT_DIR"), "/restate.net.cluster.rs"));
+
+        impl std::fmt::Display for RunMode {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let o = match self {
+                    RunMode::Unknown => "UNKNOWN",
+                    RunMode::Leader => "Leader",
+                    RunMode::Follower => "Follower",
+                };
+                write!(f, "{o}")
+            }
+        }
+    }
+
+    pub mod replicated_loglet {
+        include!(concat!(
+            env!("OUT_DIR"),
+            "/restate.net.replicated_loglet.rs"
+        ));
+    }
+
+    pub mod query_scanner {
+        include!(concat!(env!("OUT_DIR"), "/restate.net.query_scanner.rs"));
     }
 }

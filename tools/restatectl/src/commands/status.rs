@@ -18,16 +18,16 @@ use itertools::Itertools;
 use tonic::{Code, IntoRequest};
 use tracing::{error, warn};
 
-use restate_admin::cluster_controller::protobuf::{ClusterStateRequest, new_cluster_ctrl_client};
 use restate_cli_util::_comfy_table::{Cell, Color, Row, Table};
 use restate_cli_util::c_println;
 use restate_cli_util::ui::console::StyledTable;
+use restate_core::protobuf::cluster_ctrl_svc::{ClusterStateRequest, new_cluster_ctrl_client};
 use restate_metadata_server::grpc::new_metadata_server_client;
 use restate_types::health::MetadataServerStatus;
 use restate_types::logs::metadata::Logs;
 use restate_types::nodes_config::{NodeConfig, NodesConfiguration, Role};
-use restate_types::protobuf::cluster::node_state::State;
-use restate_types::protobuf::cluster::{AliveNode, RunMode};
+use restate_types::protobuf::net::cluster::node_state::State;
+use restate_types::protobuf::net::cluster::{AliveNode, RunMode};
 use restate_types::{GenerationalNodeId, NodeId};
 
 use crate::commands::log::list_logs::{ListLogsOpts, list_logs};
