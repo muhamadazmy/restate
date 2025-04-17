@@ -121,24 +121,45 @@ pub struct SuspectNode {
     pub last_attempt: MillisSinceEpoch,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, IntoProst, strum::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    IntoProst,
+    strum::Display,
+    bilrost::Enumeration,
+)]
 #[prost(target = "crate::protobuf::cluster::RunMode")]
 #[strum(serialize_all = "snake_case")]
 pub enum RunMode {
-    Leader,
-    Follower,
+    Follower = 0,
+    Leader = 1,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, IntoProst, strum::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    IntoProst,
+    strum::Display,
+    bilrost::Enumeration,
+)]
 #[prost(target = "crate::protobuf::cluster::ReplayStatus")]
 #[strum(serialize_all = "snake_case")]
 pub enum ReplayStatus {
-    Starting,
-    Active,
-    CatchingUp,
+    Starting = 0,
+    Active = 1,
+    CatchingUp = 2,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, IntoProst)]
+#[derive(Debug, Clone, Serialize, Deserialize, IntoProst, bilrost::Message)]
 #[prost(target = "crate::protobuf::cluster::PartitionProcessorStatus")]
 pub struct PartitionProcessorStatus {
     #[prost(required)]
