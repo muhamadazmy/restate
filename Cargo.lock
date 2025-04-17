@@ -10389,6 +10389,7 @@ dependencies = [
  "indexmap 1.9.3",
  "indexmap 2.7.1",
  "itertools 0.12.1",
+ "itertools 0.14.0",
  "libc",
  "libz-sys",
  "log",
