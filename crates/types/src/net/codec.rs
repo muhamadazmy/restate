@@ -125,28 +125,34 @@ where
 /// Utility method to raw-encode a [`Serialize`] type as flexbuffers using serde without adding
 /// version tag. This must be decoded with `decode_from_untagged_flexbuffers`. This is used as the default
 /// encoding for network messages since networking has its own protocol versioning.
-pub fn encode_default<T: Serialize>(value: T, protocol_version: ProtocolVersion) -> Vec<u8> {
-    match protocol_version {
-        ProtocolVersion::V1 => {
-            flexbuffers::to_vec(value).expect("network message serde can't fail")
-        }
-        ProtocolVersion::Unknown => {
-            unreachable!("unknown protocol version should never be set")
-        }
-    }
+pub fn encode_v1_default<T: Serialize>(value: T, protocol_version: ProtocolVersion) -> Vec<u8> {
+    assert_eq!(protocol_version, ProtocolVersion::V1);
+    flexbuffers::to_vec(value).expect("network message serde can't fail")
 }
 
 /// Utility method to decode a [`DeserializeOwned`] type from flexbuffers using serde. the buffer
 /// must have the complete message and not internally chunked.
-pub fn decode_default<T: DeserializeOwned>(
+pub fn decode_v1_default<T: DeserializeOwned>(
     buf: impl Buf,
     protocol_version: ProtocolVersion,
 ) -> Result<T, anyhow::Error> {
-    match protocol_version {
-        ProtocolVersion::V1 => flexbuffers::from_slice(buf.chunk())
-            .context("failed decoding V1 (flexbuffers) network message"),
-        ProtocolVersion::Unknown => {
-            unreachable!("unknown protocol version should never be set")
-        }
-    }
+    assert_eq!(protocol_version, ProtocolVersion::V1);
+    flexbuffers::from_slice(buf.chunk()).context("failed decoding V1 (flexbuffers) network message")
+}
+
+pub fn encode_v2_bilrost<T: bilrost::Message>(
+    value: T,
+    protocol_version: ProtocolVersion,
+) -> Bytes {
+    //todo(azmy): experiment with ReverseBuffer.
+    assert!(protocol_version >= ProtocolVersion::Bilrost);
+    value.encode_to_bytes()
+}
+
+pub fn decode_v2_bilrost<T: bilrost::OwnedMessage>(
+    buf: impl Buf,
+    protocol_version: ProtocolVersion,
+) -> Result<T, anyhow::Error> {
+    assert!(protocol_version >= ProtocolVersion::Bilrost);
+    T::decode(buf).context("failed decoding V2 (bilrost) network message")
 }

@@ -30,7 +30,7 @@ pub use crate::protobuf::common::ProtocolVersion;
 pub use crate::protobuf::common::TargetName;
 
 pub static MIN_SUPPORTED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V1;
-pub static CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V1;
+pub static CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::Bilrost;
 
 #[derive(
     Debug,
@@ -209,9 +209,58 @@ macro_rules! define_message {
         impl $crate::net::codec::WireEncode for $message {
             fn encode_to_bytes(
                 self,
+                _protocol_version: $crate::net::ProtocolVersion,
+            ) -> ::bytes::Bytes {
+                ::bytes::Bytes::from($crate::net::codec::encode_v1_default(
+                    self,
+                    $crate::net::ProtocolVersion::V1,
+                ))
+            }
+        }
+
+        impl $crate::net::codec::WireDecode for $message {
+            type Error = anyhow::Error;
+
+            fn try_decode(
+                buf: impl bytes::Buf,
+                _protocol_version: $crate::net::ProtocolVersion,
+            ) -> Result<Self, anyhow::Error>
+            where
+                Self: Sized,
+            {
+                $crate::net::codec::decode_v1_default(buf, $crate::net::ProtocolVersion::V1)
+            }
+        }
+    };
+
+    (
+        @proto = ProtocolVersion::Bilrost,
+        @message = $message:ty,
+        @target = $target:expr,
+    ) => {
+        impl $crate::net::Targeted for $message {
+            const TARGET: $crate::net::TargetName = $target;
+            fn kind(&self) -> &'static str {
+                stringify!($message)
+            }
+        }
+
+        impl $crate::net::codec::WireEncode for $message {
+            fn encode_to_bytes(
+                self,
                 protocol_version: $crate::net::ProtocolVersion,
             ) -> ::bytes::Bytes {
-                ::bytes::Bytes::from($crate::net::codec::encode_default(self, protocol_version))
+                match protocol_version {
+                    $crate::net::ProtocolVersion::Unknown => {
+                        unreachable!("unknown protocol version should never be set")
+                    }
+                    $crate::net::ProtocolVersion::V1 => ::bytes::Bytes::from(
+                        crate::net::codec::encode_v1_default(self, protocol_version),
+                    ),
+                    $crate::net::ProtocolVersion::Bilrost => {
+                        crate::net::codec::encode_v2_bilrost(self, protocol_version)
+                    }
+                }
             }
         }
 
@@ -225,7 +274,17 @@ macro_rules! define_message {
             where
                 Self: Sized,
             {
-                $crate::net::codec::decode_default(buf, protocol_version)
+                match protocol_version {
+                    $crate::net::ProtocolVersion::Unknown => {
+                        unreachable!("unknown protocol version should never be set")
+                    }
+                    $crate::net::ProtocolVersion::V1 => {
+                        crate::net::codec::decode_v1_default(buf, protocol_version)
+                    }
+                    $crate::net::ProtocolVersion::Bilrost => {
+                        crate::net::codec::decode_v2_bilrost(buf, protocol_version)
+                    }
+                }
             }
         }
     };
@@ -263,6 +322,29 @@ macro_rules! define_rpc {
         }
 
         $crate::net::define_message! {
+            @message = $response,
+            @target = $response_target,
+        }
+    };
+    (
+        @proto = ProtocolVersion::Bilrost,
+        @request = $request:ty,
+        @response = $response:ty,
+        @request_target = $request_target:expr,
+        @response_target = $response_target:expr,
+    ) => {
+        impl $crate::net::RpcRequest for $request {
+            type ResponseMessage = $response;
+        }
+
+        $crate::net::define_message! {
+            @proto = ProtocolVersion::Bilrost,
+            @message = $request,
+            @target = $request_target,
+        }
+
+        $crate::net::define_message! {
+            @proto = ProtocolVersion::Bilrost,
             @message = $response,
             @target = $response_target,
         }
