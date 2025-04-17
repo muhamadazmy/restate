@@ -26,6 +26,7 @@ use std::time::{Duration, SystemTime};
     serde::Serialize,
     serde::Deserialize,
     derive_more::Into,
+    bilrost::Message,
 )]
 #[serde(transparent)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
