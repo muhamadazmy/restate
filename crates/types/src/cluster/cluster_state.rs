@@ -163,18 +163,30 @@ pub enum ReplayStatus {
 #[prost(target = "crate::protobuf::cluster::PartitionProcessorStatus")]
 pub struct PartitionProcessorStatus {
     #[prost(required)]
+    #[bilrost(1)]
     pub updated_at: MillisSinceEpoch,
+    #[bilrost(2)]
     pub planned_mode: RunMode,
+    #[bilrost(3)]
     pub effective_mode: RunMode,
+    #[bilrost(4)]
     pub last_observed_leader_epoch: Option<LeaderEpoch>,
+    #[bilrost(5)]
     pub last_observed_leader_node: Option<GenerationalNodeId>,
+    #[bilrost(6)]
     pub last_applied_log_lsn: Option<Lsn>,
+    #[bilrost(7)]
     pub last_record_applied_at: Option<MillisSinceEpoch>,
+    #[bilrost(8)]
     pub num_skipped_records: u64,
+    #[bilrost(9)]
     pub replay_status: ReplayStatus,
+    #[bilrost(10)]
     pub last_persisted_log_lsn: Option<Lsn>,
+    #[bilrost(11)]
     pub last_archived_log_lsn: Option<Lsn>,
     // Set if replay_status is CatchingUp
+    #[bilrost(12)]
     pub target_tail_lsn: Option<Lsn>,
 }
 

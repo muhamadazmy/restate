@@ -8,6 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::convert::Infallible;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -15,9 +16,10 @@ use bitflags::bitflags;
 use prost_dto::{FromProst, IntoProst};
 use serde::{Deserialize, Serialize};
 
-use super::codec::{WireDecode, WireEncode};
+use super::codec::{V2Convertible, WireDecode, WireEncode};
 use super::{RpcRequest, TargetName};
 use crate::GenerationalNodeId;
+use crate::errors::ConversionError;
 use crate::logs::{KeyFilter, LogletId, LogletOffset, Record, SequenceNumber, TailState};
 use crate::time::MillisSinceEpoch;
 
@@ -67,32 +69,74 @@ macro_rules! define_logserver_rpc {
             }
         }
     };
+    (
+        @proto = ProtocolVersion::Bilrost,
+        @request = $request:ty,
+        @response = $response:ty,
+        @request_target = $request_target:expr,
+        @response_target = $response_target:expr,
+    ) => {
+        crate::net::define_rpc! {
+            @proto = ProtocolVersion::Bilrost,
+            @request = $request,
+            @response = $response,
+            @request_target = $request_target,
+            @response_target = $response_target,
+        }
+
+        impl LogServerRequest for $request {
+            fn header(&self) -> &LogServerRequestHeader {
+                &self.header
+            }
+
+            fn header_mut(&mut self) -> &mut LogServerRequestHeader {
+                &mut self.header
+            }
+        }
+
+        impl LogServerResponse for $response {
+            fn header(&self) -> &LogServerResponseHeader {
+                &self.header
+            }
+        }
+    };
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, IntoProst, FromProst)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    IntoProst,
+    FromProst,
+    bilrost::Enumeration,
+)]
 #[prost(target = "crate::protobuf::log_server_common::Status")]
 #[repr(u8)]
 pub enum Status {
     /// Operation was successful
     Ok = 1,
     /// The node's storage system is disabled and cannot accept operations at the moment.
-    Disabled,
+    Disabled = 2,
     /// If the operation expired or not completed due to load shedding. The operation can be
     /// retried by the client. It's guaranteed that this store has not been persisted by the node.
-    Dropped,
+    Dropped = 3,
     /// Operation rejected on a sealed loglet
-    Sealed,
+    Sealed = 4,
     /// Loglet is being sealed and operation cannot be accepted
-    Sealing,
+    Sealing = 5,
     /// Operation has been rejected. Operation requires that the sender is the authoritative
     /// sequencer.
-    SequencerMismatch,
+    SequencerMismatch = 6,
     /// This indicates that the operation cannot be accepted due to the offset being out of bounds.
     /// For instance, if a store is sent to a log-server that with a lagging local commit offset.
-    OutOfBounds,
+    OutOfBounds = 7,
     /// The record is malformed, this could be because it has too many records or any other reason
     /// that leads the server to reject processing it.
-    Malformed,
+    Malformed = 8,
 }
 
 // ----- LogServer API -----
@@ -101,6 +145,7 @@ pub enum Status {
 
 // Store
 define_logserver_rpc! {
+    @proto = ProtocolVersion::Bilrost,
     @request = Store,
     @response = Stored,
     @request_target = TargetName::LogServerStore,
@@ -163,11 +208,13 @@ define_logserver_rpc! {
     @response_target = TargetName::LogServerDigest,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bilrost::Message)]
 pub struct LogServerRequestHeader {
+    #[bilrost(tag(1))]
     pub loglet_id: LogletId,
     /// If the sender has now knowledge of this value, it can safely be set to
     /// `LogletOffset::INVALID`
+    #[bilrost(tag(2))]
     pub known_global_tail: LogletOffset,
 }
 
@@ -214,7 +261,7 @@ impl LogServerResponseHeader {
 }
 
 // ** STORE
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bilrost::Message)]
 pub struct StoreFlags(u32);
 bitflags! {
     impl StoreFlags: u32 {
@@ -262,10 +309,40 @@ impl Store {
     }
 }
 
+impl V2Convertible for Store {
+    type Target = message::Store;
+    type Error = Infallible;
+
+    fn from_v2(value: Self::Target) -> Result<Self, Self::Error> {
+        Ok(value.into())
+    }
+
+    fn into_v2(self) -> Self::Target {
+        self.into()
+    }
+}
+
 /// Response to a `Store` request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stored {
     pub header: LogServerResponseHeader,
+}
+
+impl V2Convertible for Stored {
+    // Since Stored message is just the header, we can implement
+    // Convertible directly to the LogServerResponseHeader type
+    type Target = message::LogServerResponseHeader;
+    type Error = ConversionError;
+
+    fn from_v2(value: Self::Target) -> Result<Self, Self::Error> {
+        Ok(Stored {
+            header: value.try_into()?,
+        })
+    }
+
+    fn into_v2(self) -> Self::Target {
+        self.header.into()
+    }
 }
 
 impl Deref for Stored {
@@ -735,5 +812,252 @@ impl Digest {
     pub fn with_status(mut self, status: Status) -> Self {
         self.header.status = status;
         self
+    }
+}
+
+mod message {
+
+    use std::sync::Arc;
+
+    use crate::{
+        GenerationalNodeId,
+        errors::ConversionError,
+        logs::LogletOffset,
+        storage::PolyBytes,
+        time::{MillisSinceEpoch, NanosSinceEpoch},
+    };
+
+    use super::{LogServerRequestHeader, Status, StoreFlags};
+
+    #[derive(Debug, Clone, bilrost::Message)]
+    pub struct LogServerResponseHeader {
+        /// The position after the last locally committed record on this node
+        #[bilrost(1)]
+        local_tail: LogletOffset,
+        /// The node's view of the last global tail of the loglet. If unknown, it
+        /// can be safely set to `LogletOffset::INVALID`.
+        #[bilrost(2)]
+        known_global_tail: LogletOffset,
+        /// Whether this node has sealed or not (local to the log-server)
+        #[bilrost(3)]
+        sealed: bool,
+        #[bilrost(4)]
+        status: Option<Status>,
+    }
+
+    impl From<super::LogServerResponseHeader> for LogServerResponseHeader {
+        fn from(value: super::LogServerResponseHeader) -> Self {
+            let super::LogServerResponseHeader {
+                local_tail,
+                known_global_tail,
+                sealed,
+                status,
+            } = value;
+
+            Self {
+                local_tail,
+                known_global_tail,
+                sealed,
+                status: Some(status),
+            }
+        }
+    }
+
+    impl TryFrom<LogServerResponseHeader> for super::LogServerResponseHeader {
+        type Error = ConversionError;
+
+        fn try_from(value: LogServerResponseHeader) -> Result<Self, Self::Error> {
+            let LogServerResponseHeader {
+                known_global_tail,
+                local_tail,
+                sealed,
+                status,
+            } = value;
+
+            Ok(Self {
+                known_global_tail,
+                local_tail,
+                sealed,
+                status: status.ok_or_else(|| ConversionError::missing_field("status"))?,
+            })
+        }
+    }
+
+    #[derive(Debug, Clone, Default, bilrost::Oneof)]
+    /// The keys that are associated with a record. This is used to filter the log when reading.
+    pub enum Keys {
+        /// No keys are associated with the record. This record will appear to *all* readers regardless
+        /// of the KeyFilter they use.
+        #[default]
+        None,
+        /// A single key is associated with the record
+        #[bilrost(3)]
+        Single(u64),
+        /// A pair of keys are associated with the record
+        #[bilrost(4)]
+        Pair((u64, u64)),
+        /// The record is associated with all keys within this range (inclusive)
+        #[bilrost(5)]
+        RangeInclusive((u64, u64)),
+    }
+
+    impl From<crate::logs::Keys> for Keys {
+        fn from(value: crate::logs::Keys) -> Self {
+            match value {
+                crate::logs::Keys::None => Self::None,
+                crate::logs::Keys::Single(key) => Self::Single(key),
+                crate::logs::Keys::Pair(k1, k2) => Self::Pair((k1, k2)),
+                crate::logs::Keys::RangeInclusive(range) => {
+                    Self::RangeInclusive((*range.start(), *range.end()))
+                }
+            }
+        }
+    }
+
+    impl From<Keys> for crate::logs::Keys {
+        fn from(value: Keys) -> Self {
+            match value {
+                Keys::None => crate::logs::Keys::None,
+                Keys::Single(key) => crate::logs::Keys::Single(key),
+                Keys::Pair((k1, k2)) => crate::logs::Keys::Pair(k1, k2),
+                Keys::RangeInclusive((start, end)) => Self::RangeInclusive(start..=end),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, bilrost::Message)]
+    pub struct Record {
+        #[bilrost(1)]
+        created_at: NanosSinceEpoch,
+        #[bilrost(2)]
+        body: bytes::Bytes,
+        #[bilrost(oneof(3, 4, 5))]
+        keys: Keys,
+    }
+
+    impl From<crate::logs::Record> for Record {
+        fn from(value: crate::logs::Record) -> Self {
+            let (created_at, keys, body) = value.into_parts();
+
+            Self {
+                created_at,
+                body: match body {
+                    PolyBytes::Bytes(buf) => buf,
+                    PolyBytes::Typed(obj) => {
+                        // todo: create buf with enough capacity
+                        let mut buf = bytes::BytesMut::new();
+                        obj.encode(&mut buf).expect("should be serializable");
+                        buf.into()
+                    }
+                },
+                keys: keys.into(),
+            }
+        }
+    }
+
+    impl From<Record> for crate::logs::Record {
+        fn from(value: Record) -> Self {
+            let Record {
+                created_at,
+                body,
+                keys,
+            } = value;
+
+            Self::from_parts(created_at, keys.into(), PolyBytes::Bytes(body))
+        }
+    }
+
+    /// Store one or more records on a log-server
+    #[derive(Debug, Clone, bilrost::Message)]
+    pub struct Store {
+        #[bilrost(1)]
+        header: LogServerRequestHeader,
+        // The receiver should skip handling this message if it hasn't started to act on it
+        // before timeout expires.
+        #[bilrost(2)]
+        timeout_at: Option<MillisSinceEpoch>,
+        #[bilrost(3)]
+        flags: StoreFlags,
+        /// Offset of the first record in the batch of payloads. Payloads in the batch get a gap-less
+        /// range of offsets that starts with (includes) the value of `first_offset`.
+        #[bilrost(4)]
+        first_offset: LogletOffset,
+        /// This is the sequencer identifier for this log. This should be set even for repair store messages.
+        #[bilrost(5)]
+        sequencer: GenerationalNodeId,
+        /// Denotes the last record that has been safely uploaded to an archiving data store.
+        #[bilrost(6)]
+        known_archived: LogletOffset,
+        #[bilrost(7)]
+        payloads: Vec<Record>,
+    }
+
+    impl From<super::Store> for Store {
+        fn from(value: super::Store) -> Self {
+            let super::Store {
+                header,
+                timeout_at,
+                flags,
+                first_offset,
+                sequencer,
+                known_archived,
+                payloads,
+            } = value;
+
+            Self {
+                header,
+                timeout_at,
+                flags,
+                first_offset,
+                sequencer,
+                known_archived,
+                payloads: {
+                    // todo: can we use payloads.iter().cloned().map(Into::into).collect()
+                    // or it's better to create the vec ahead with capacity! will collect
+                    // respect length hint?
+
+                    let mut values = Vec::with_capacity(payloads.len());
+                    for record in payloads.iter() {
+                        values.push(record.clone().into());
+                    }
+                    values
+                },
+            }
+        }
+    }
+
+    impl From<Store> for super::Store {
+        fn from(value: Store) -> Self {
+            let Store {
+                header,
+                timeout_at,
+                flags,
+                first_offset,
+                sequencer,
+                known_archived,
+                payloads,
+            } = value;
+
+            Self {
+                header,
+                timeout_at,
+                flags,
+                first_offset,
+                sequencer,
+                known_archived,
+                payloads: {
+                    // todo: can we use payloads.iter().cloned().map(Into::into).collect()
+                    // or it's better to create the vec ahead with capacity! will collect
+                    // respect length hint?
+
+                    let mut values = Vec::with_capacity(payloads.len());
+                    for record in payloads.iter() {
+                        values.push(record.clone().into());
+                    }
+
+                    Arc::from(values)
+                },
+            }
+        }
     }
 }
