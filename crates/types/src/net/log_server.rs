@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::codec::{V2Convertible, WireDecode, WireEncode};
 use super::{RpcRequest, TargetName};
+
 use crate::GenerationalNodeId;
 use crate::errors::ConversionError;
 use crate::logs::{KeyFilter, LogletId, LogletOffset, Record, SequenceNumber, TailState};
