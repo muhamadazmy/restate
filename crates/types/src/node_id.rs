@@ -50,6 +50,7 @@ pub enum NodeId {
     derive_more::Debug,
     serde::Serialize,
     serde::Deserialize,
+    bilrost::Message,
 )]
 #[display("{}:{}", _0, _1)]
 #[debug("{}:{}", _0, _1)]
@@ -146,6 +147,7 @@ impl From<u64> for GenerationalNodeId {
     derive_more::Debug,
     serde::Serialize,
     serde::Deserialize,
+    bilrost::Message,
 )]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(transparent))]

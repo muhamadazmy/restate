@@ -47,6 +47,7 @@ use crate::time::MillisSinceEpoch;
     derive_more::Debug,
     serde::Serialize,
     serde::Deserialize,
+    bilrost::Message,
 )]
 #[display("e{}", _0)]
 #[debug("e{}", _0)]
@@ -96,6 +97,7 @@ impl From<LeaderEpoch> for crate::protobuf::common::LeaderEpoch {
     derive_more::FromStr,
     serde::Serialize,
     serde::Deserialize,
+    bilrost::Message,
 )]
 #[repr(transparent)]
 #[serde(transparent)]
