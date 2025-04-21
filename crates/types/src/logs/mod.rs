@@ -92,6 +92,7 @@ impl From<u16> for LogId {
     derive_more::Display,
     Serialize,
     Deserialize,
+    bilrost::Message,
 )]
 pub struct Lsn(u64);
 
