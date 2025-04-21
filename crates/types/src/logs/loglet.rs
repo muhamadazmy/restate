@@ -34,6 +34,7 @@ use crate::logs::metadata::SegmentIndex;
     derive_more::From,
     derive_more::Deref,
     derive_more::Into,
+    bilrost::Message,
 )]
 #[serde(transparent)]
 #[repr(transparent)]
