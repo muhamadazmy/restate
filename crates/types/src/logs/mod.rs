@@ -317,6 +317,7 @@ where
     Serialize,
     Deserialize,
     Hash,
+    bilrost::Message,
 )]
 #[repr(transparent)]
 #[serde(transparent)]
