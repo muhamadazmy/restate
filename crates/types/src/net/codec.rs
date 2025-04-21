@@ -8,6 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -122,31 +123,64 @@ where
     }
 }
 
+pub trait V2Convertible: Sized {
+    type Target: bilrost::Message + bilrost::OwnedMessage;
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn into_v2(self) -> Self::Target;
+    fn from_v2(value: Self::Target) -> Result<Self, Self::Error>;
+}
+
+impl<T> V2Convertible for T
+where
+    T: bilrost::Message + bilrost::OwnedMessage,
+{
+    type Target = T;
+    type Error = Infallible;
+
+    fn from_v2(value: Self::Target) -> Result<Self, Self::Error> {
+        Ok(value)
+    }
+
+    fn into_v2(self) -> Self::Target {
+        self
+    }
+}
+
 /// Utility method to raw-encode a [`Serialize`] type as flexbuffers using serde without adding
 /// version tag. This must be decoded with `decode_from_untagged_flexbuffers`. This is used as the default
 /// encoding for network messages since networking has its own protocol versioning.
-pub fn encode_default<T: Serialize>(value: T, protocol_version: ProtocolVersion) -> Vec<u8> {
-    match protocol_version {
-        ProtocolVersion::V1 => {
-            flexbuffers::to_vec(value).expect("network message serde can't fail")
-        }
-        ProtocolVersion::Unknown => {
-            unreachable!("unknown protocol version should never be set")
-        }
-    }
+pub fn encode_v1_default<T: Serialize>(value: T, protocol_version: ProtocolVersion) -> Vec<u8> {
+    assert_eq!(protocol_version, ProtocolVersion::V1);
+    flexbuffers::to_vec(value).expect("network message serde can't fail")
 }
 
 /// Utility method to decode a [`DeserializeOwned`] type from flexbuffers using serde. the buffer
 /// must have the complete message and not internally chunked.
-pub fn decode_default<T: DeserializeOwned>(
+pub fn decode_v1_default<T: DeserializeOwned>(
     buf: impl Buf,
     protocol_version: ProtocolVersion,
 ) -> Result<T, anyhow::Error> {
-    match protocol_version {
-        ProtocolVersion::V1 => flexbuffers::from_slice(buf.chunk())
-            .context("failed decoding V1 (flexbuffers) network message"),
-        ProtocolVersion::Unknown => {
-            unreachable!("unknown protocol version should never be set")
-        }
-    }
+    assert_eq!(protocol_version, ProtocolVersion::V1);
+    flexbuffers::from_slice(buf.chunk()).context("failed decoding V1 (flexbuffers) network message")
+}
+
+pub fn encode_v2_bilrost<T: V2Convertible>(value: T, protocol_version: ProtocolVersion) -> Bytes {
+    //todo(azmy): experiment with ReverseBuffer.
+    use bilrost::Message;
+
+    let inner = value.into_v2();
+    assert!(protocol_version >= ProtocolVersion::Bilrost);
+    inner.encode_to_bytes()
+}
+
+pub fn decode_v2_bilrost<T: V2Convertible>(
+    buf: impl Buf,
+    protocol_version: ProtocolVersion,
+) -> Result<T, anyhow::Error> {
+    assert!(protocol_version >= ProtocolVersion::Bilrost);
+    let inner = <T::Target as bilrost::OwnedMessage>::decode(buf)
+        .context("failed decoding V2 (bilrost) network message")?;
+
+    T::from_v2(inner).context("failed to convert V2 (bilrost) value to inner type")
 }
