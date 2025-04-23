@@ -17,25 +17,28 @@ use super::TargetName;
 use crate::{cluster::cluster_state::PartitionProcessorStatus, identifiers::PartitionId};
 
 super::define_rpc! {
+    @proto=ProtocolVersion::Bilrost,
     @request=GetNodeState,
     @response=NodeStateResponse,
     @request_target=TargetName::NodeGetNodeStateRequest,
     @response_target=TargetName::NodeGetNodeStateResponse,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, bilrost::Message)]
 pub struct GetNodeState {}
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bilrost::Message)]
 pub struct NodeStateResponse {
     /// Partition processor status per partition. Is set to None if this node is not a `Worker` node
     #[serde_as(as = "Option<serde_with::Seq<(_, _)>>")]
+    #[bilrost(1)]
     pub partition_processor_state: Option<BTreeMap<PartitionId, PartitionProcessorStatus>>,
 
     /// node uptime.
     // serde(default) is required for backward compatibility when updating the cluster,
     // ensuring that older nodes can still interact with newer nodes that recognize this attribute.
     #[serde(default)]
+    #[bilrost(2)]
     pub uptime: Duration,
 }
