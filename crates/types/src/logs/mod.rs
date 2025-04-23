@@ -11,6 +11,7 @@
 use std::ops::{Add, RangeInclusive};
 
 use bytes::{Buf, BufMut, BytesMut};
+use restate_types_derive::BilrostNewType;
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::PartitionId;
@@ -92,6 +93,7 @@ impl From<u16> for LogId {
     derive_more::Display,
     Serialize,
     Deserialize,
+    BilrostNewType,
 )]
 pub struct Lsn(u64);
 

@@ -238,7 +238,7 @@ dependencies = [
  "arrow-data 53.4.0",
  "arrow-schema 53.4.0",
  "chrono",
- "half",
+ "half 2.4.1",
  "num",
 ]
 
@@ -268,7 +268,7 @@ dependencies = [
  "arrow-schema 53.4.0",
  "chrono",
  "chrono-tz",
- "half",
+ "half 2.4.1",
  "hashbrown 0.15.2",
  "num",
 ]
@@ -284,7 +284,7 @@ dependencies = [
  "arrow-data 54.2.1",
  "arrow-schema 54.2.1",
  "chrono",
- "half",
+ "half 2.4.1",
  "hashbrown 0.15.2",
  "num",
 ]
@@ -296,7 +296,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b02656a35cc103f28084bc80a0159668e0a680d919cef127bd7e0aaccb06ec1"
 dependencies = [
  "bytes",
- "half",
+ "half 2.4.1",
  "num",
 ]
 
@@ -307,7 +307,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e899dade2c3b7f5642eb8366cfd898958bcca099cde6dfea543c7e8d3ad88d4"
 dependencies = [
  "bytes",
- "half",
+ "half 2.4.1",
  "num",
 ]
 
@@ -326,7 +326,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "comfy-table",
- "half",
+ "half 2.4.1",
  "lexical-core",
  "num",
  "ryu",
@@ -346,7 +346,7 @@ dependencies = [
  "atoi",
  "base64 0.22.1",
  "chrono",
- "half",
+ "half 2.4.1",
  "lexical-core",
  "num",
  "ryu",
@@ -379,7 +379,7 @@ checksum = "b7f2861ffa86f107b8ab577d86cff7c7a490243eabe961ba1e1af4f27542bb79"
 dependencies = [
  "arrow-buffer 53.4.0",
  "arrow-schema 53.4.0",
- "half",
+ "half 2.4.1",
  "num",
 ]
 
@@ -391,7 +391,7 @@ checksum = "0a329fb064477c9ec5f0870d2f5130966f91055c7c5bce2b3a084f116bc28c3b"
 dependencies = [
  "arrow-buffer 54.2.1",
  "arrow-schema 54.2.1",
- "half",
+ "half 2.4.1",
  "num",
 ]
 
@@ -435,7 +435,7 @@ dependencies = [
  "arrow-data 53.4.0",
  "arrow-schema 53.4.0",
  "chrono",
- "half",
+ "half 2.4.1",
  "indexmap 2.7.1",
  "lexical-core",
  "num",
@@ -454,7 +454,7 @@ dependencies = [
  "arrow-data 53.4.0",
  "arrow-schema 53.4.0",
  "arrow-select 53.4.0",
- "half",
+ "half 2.4.1",
  "num",
 ]
 
@@ -482,7 +482,7 @@ dependencies = [
  "arrow-buffer 53.4.0",
  "arrow-data 53.4.0",
  "arrow-schema 53.4.0",
- "half",
+ "half 2.4.1",
 ]
 
 [[package]]
@@ -495,7 +495,7 @@ dependencies = [
  "arrow-buffer 54.2.1",
  "arrow-data 54.2.1",
  "arrow-schema 54.2.1",
- "half",
+ "half 2.4.1",
 ]
 
 [[package]]
@@ -582,7 +582,7 @@ dependencies = [
  "arrow_convert_derive",
  "chrono",
  "err-derive",
- "half",
+ "half 2.4.1",
 ]
 
 [[package]]
@@ -699,6 +699,17 @@ name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
+name = "atty"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9b39be18770d11421cdb1b9947a45dd3f37e93092cbf377614828a319d5fee8"
+dependencies = [
+ "hermit-abi 0.1.19",
+ "libc",
+ "winapi",
+]
 
 [[package]]
 name = "autocfg"
@@ -1221,7 +1232,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "bytestring",
- "clap",
+ "clap 4.5.27",
  "codederror",
  "figment",
  "futures",
@@ -1692,7 +1703,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
- "half",
+ "half 2.4.1",
 ]
 
 [[package]]
@@ -1714,6 +1725,17 @@ dependencies = [
  "glob",
  "libc",
  "libloading",
+]
+
+[[package]]
+name = "clap"
+version = "2.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0610544180c38b88101fecf2dd634b174a62eef6946f84dfc6a7127512b381c"
+dependencies = [
+ "bitflags 1.3.2",
+ "textwrap",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -1741,7 +1763,7 @@ version = "3.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2678fade3b77aa3a8ff3aae87e9c008d3fb00473a41c71fbf74e91c8c7b37e84"
 dependencies = [
- "clap",
+ "clap 4.5.27",
  "log",
 ]
 
@@ -1784,7 +1806,7 @@ checksum = "a775bc5314a42f82ed199a6972fc9a452c205ca78ff843f338d20cae9c01025e"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
+ "clap 4.5.27",
  "cling-derive",
  "indoc",
  "itertools 0.12.1",
@@ -2046,6 +2068,32 @@ dependencies = [
 
 [[package]]
 name = "criterion"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b01d6de93b2b6c65e17c634a26653a29d107b3c98c607c765bf38d041531cd8f"
+dependencies = [
+ "atty",
+ "cast",
+ "clap 2.34.0",
+ "criterion-plot 0.4.5",
+ "csv",
+ "itertools 0.10.5",
+ "lazy_static",
+ "num-traits",
+ "oorandom",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_cbor",
+ "serde_derive",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
+name = "criterion"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2b12d017a929603d80db1831cd3a24082f8137ce19c69e6447f54f5fc8d692f"
@@ -2053,8 +2101,8 @@ dependencies = [
  "anes",
  "cast",
  "ciborium",
- "clap",
- "criterion-plot",
+ "clap 4.5.27",
+ "criterion-plot 0.5.0",
  "futures",
  "is-terminal",
  "itertools 0.10.5",
@@ -2070,6 +2118,16 @@ dependencies = [
  "tinytemplate",
  "tokio",
  "walkdir",
+]
+
+[[package]]
+name = "criterion-plot"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2673cc8207403546f45f5fd319a974b1e6983ad1a3ee7e6041650013be041876"
+dependencies = [
+ "cast",
+ "itertools 0.10.5",
 ]
 
 [[package]]
@@ -2323,7 +2381,7 @@ dependencies = [
  "arrow-array 53.4.0",
  "arrow-buffer 53.4.0",
  "arrow-schema 53.4.0",
- "half",
+ "half 2.4.1",
  "hashbrown 0.14.5",
  "indexmap 2.7.1",
  "libc",
@@ -2448,7 +2506,7 @@ dependencies = [
  "datafusion-macros",
  "datafusion-physical-expr",
  "datafusion-physical-expr-common",
- "half",
+ "half 2.4.1",
  "log",
  "paste",
 ]
@@ -2565,7 +2623,7 @@ dependencies = [
  "datafusion-expr-common",
  "datafusion-functions-aggregate-common",
  "datafusion-physical-expr-common",
- "half",
+ "half 2.4.1",
  "hashbrown 0.14.5",
  "indexmap 2.7.1",
  "itertools 0.13.0",
@@ -2626,7 +2684,7 @@ dependencies = [
  "datafusion-physical-expr",
  "datafusion-physical-expr-common",
  "futures",
- "half",
+ "half 2.4.1",
  "hashbrown 0.14.5",
  "indexmap 2.7.1",
  "itertools 0.13.0",
@@ -3455,6 +3513,12 @@ dependencies = [
 
 [[package]]
 name = "half"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b43ede17f21864e81be2fa654110bf1e793774238d86ef8555c37e6519c0403"
+
+[[package]]
+name = "half"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dd08c532ae367adf81c312a4580bc67f1d0fe8bc9c460520283f4c0ff277888"
@@ -3513,6 +3577,15 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hermit-abi"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "hermit-abi"
@@ -5739,7 +5812,7 @@ dependencies = [
  "aligned-vec",
  "backtrace",
  "cfg-if",
- "criterion",
+ "criterion 0.5.1",
  "findshlibs",
  "inferno",
  "libc",
@@ -6675,7 +6748,7 @@ name = "restate-benchmarks"
 version = "1.3.2-dev"
 dependencies = [
  "anyhow",
- "criterion",
+ "criterion 0.5.1",
  "futures",
  "futures-util",
  "http 1.2.0",
@@ -6706,7 +6779,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "bytestring",
- "criterion",
+ "criterion 0.5.1",
  "crossbeam-utils",
  "dashmap",
  "derive_more",
@@ -6767,7 +6840,7 @@ dependencies = [
  "bytes",
  "chrono",
  "chrono-humanize",
- "clap",
+ "clap 4.5.27",
  "clap-verbosity-flag",
  "cling",
  "comfy-table",
@@ -6827,7 +6900,7 @@ dependencies = [
  "arc-swap",
  "chrono",
  "chrono-humanize",
- "clap",
+ "clap 4.5.27",
  "clap-verbosity-flag",
  "cling",
  "comfy-table",
@@ -7105,7 +7178,7 @@ version = "1.3.2-dev"
 dependencies = [
  "anyhow",
  "arc-swap",
- "clap",
+ "clap 4.5.27",
  "clap-verbosity-flag",
  "derive_more",
  "enumset",
@@ -7304,7 +7377,7 @@ dependencies = [
  "bytes",
  "bytestring",
  "codederror",
- "criterion",
+ "criterion 0.5.1",
  "derive_builder",
  "derive_more",
  "enum-map",
@@ -7346,7 +7419,7 @@ name = "restate-queue"
 version = "1.3.2-dev"
 dependencies = [
  "bincode",
- "criterion",
+ "criterion 0.5.1",
  "restate-fs-util",
  "restate-types",
  "serde",
@@ -7413,7 +7486,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "bytestring",
- "clap",
+ "clap 4.5.27",
  "codederror",
  "derive_builder",
  "enumset",
@@ -7740,8 +7813,9 @@ dependencies = [
  "bytes",
  "bytestring",
  "chrono",
- "clap",
+ "clap 4.5.27",
  "codederror",
+ "criterion 0.3.6",
  "derive_builder",
  "derive_more",
  "downcast-rs",
@@ -7952,7 +8026,7 @@ dependencies = [
  "bytesize",
  "bytestring",
  "chrono",
- "clap",
+ "clap 4.5.27",
  "clap-stdin",
  "cling",
  "crossterm 0.27.0",
@@ -8358,6 +8432,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02fc4265df13d6fa1d00ecff087228cc0a2b5f3c0e87e258d8b94a156e984c70"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde_cbor"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bef2ebfde456fb76bbcf9f59315333decc4fda0b2b44b420243c11e0f5ec1f5"
+dependencies = [
+ "half 1.8.3",
+ "serde",
 ]
 
 [[package]]
@@ -8984,6 +9068,15 @@ name = "test_bin"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e7a7de15468c6e65dd7db81cf3822c1ec94c71b2a3c1a976ea8e4696c91115c"
+
+[[package]]
+name = "textwrap"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d326610f408c7a4eb6f51c37c330e496b08506c9457c9d34287ecc38809fb060"
+dependencies = [
+ "unicode-width 0.1.14",
+]
 
 [[package]]
 name = "thin-vec"
@@ -10368,10 +10461,10 @@ dependencies = [
  "bzip2-sys",
  "cc",
  "chrono",
- "clap",
+ "clap 4.5.27",
  "clap_builder",
  "comfy-table",
- "criterion",
+ "criterion 0.5.1",
  "crossbeam-epoch",
  "crossterm 0.28.1",
  "digest",
@@ -10389,7 +10482,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.15",
  "getrandom 0.3.1",
- "half",
+ "half 2.4.1",
  "hashbrown 0.14.5",
  "hashbrown 0.15.2",
  "hdrhistogram",
