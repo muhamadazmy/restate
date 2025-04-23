@@ -3,6 +3,7 @@ members = [
     "cli",
     "crates/*",
     "crates/core/derive",
+    "crates/types/derive",
     "crates/codederror/derive",
     "server",
     "benchmarks",
@@ -44,6 +45,7 @@ restate-bifrost = { path = "crates/bifrost" }
 restate-cli-util = { path = "crates/cli-util" }
 restate-core = { path = "crates/core" }
 restate-core-derive = { path = "crates/core/derive" }
+restate-types-derive = { path = "crates/types/derive" }
 restate-errors = { path = "crates/errors" }
 restate-fs-util = { path = "crates/fs-util" }
 restate-futures-util = { path = "crates/futures-util" }
