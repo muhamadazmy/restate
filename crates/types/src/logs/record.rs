@@ -37,6 +37,11 @@ impl Record {
         }
     }
 
+    #[inline]
+    pub fn into_parts(self) -> (NanosSinceEpoch, Keys, PolyBytes) {
+        (self.created_at, self.keys, self.body)
+    }
+
     pub fn created_at(&self) -> NanosSinceEpoch {
         self.created_at
     }
