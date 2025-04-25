@@ -7784,6 +7784,7 @@ dependencies = [
  "restate-errors",
  "restate-serde-util",
  "restate-test-util",
+ "restate-types-derive",
  "restate-utoipa",
  "schemars",
  "serde",
@@ -7810,6 +7811,16 @@ dependencies = [
  "ulid",
  "workspace-hack",
  "xxhash-rust",
+]
+
+[[package]]
+name = "restate-types-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
+ "workspace-hack",
 ]
 
 [[package]]
