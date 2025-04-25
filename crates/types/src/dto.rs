@@ -10,6 +10,8 @@
 
 use std::convert::Infallible;
 
+use restate_types_derive::BilrostNewType;
+
 /// A trait for converting between internal types and their DTO (Data Transfer Object)
 /// representations used for storage or wire transmission.
 ///
@@ -40,5 +42,21 @@ where
 
     fn into_dto(self) -> Self::Target {
         self
+    }
+}
+
+/// A common u128 dto type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BilrostNewType)]
+struct U128((u64, u64));
+
+impl From<u128> for U128 {
+    fn from(value: u128) -> Self {
+        Self(((value >> 64) as u64, value as u64))
+    }
+}
+
+impl From<U128> for u128 {
+    fn from(value: U128) -> Self {
+        (value.0.0 as u128) << 64 | value.0.1 as u128
     }
 }
