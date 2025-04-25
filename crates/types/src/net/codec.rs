@@ -16,6 +16,8 @@ use bytes::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::dto::FromDto;
+use crate::dto::IntoDto;
 use crate::protobuf::common::ProtocolVersion;
 
 pub trait WireEncode {
@@ -76,28 +78,37 @@ where
 /// Utility method to raw-encode a [`Serialize`] type as flexbuffers using serde without adding
 /// version tag. This must be decoded with `decode_from_untagged_flexbuffers`. This is used as the default
 /// encoding for network messages since networking has its own protocol versioning.
-pub fn encode_default<T: Serialize>(value: T, protocol_version: ProtocolVersion) -> Vec<u8> {
-    match protocol_version {
-        ProtocolVersion::V2 | ProtocolVersion::V1 => {
-            flexbuffers::to_vec(value).expect("network message serde can't fail")
-        }
-        ProtocolVersion::Unknown => {
-            unreachable!("unknown protocol version should never be set")
-        }
-    }
+pub fn encode_as_flexbuffers<T: Serialize>(value: T, protocol_version: ProtocolVersion) -> Vec<u8> {
+    assert_eq!(protocol_version, ProtocolVersion::V1);
+    flexbuffers::to_vec(value).expect("network message serde can't fail")
 }
 
 /// Utility method to decode a [`DeserializeOwned`] type from flexbuffers using serde. the buffer
 /// must have the complete message and not internally chunked.
-pub fn decode_default<T: DeserializeOwned>(
+pub fn decode_as_flexbuffers<T: DeserializeOwned>(
     buf: impl Buf,
     protocol_version: ProtocolVersion,
 ) -> Result<T, anyhow::Error> {
-    match protocol_version {
-        ProtocolVersion::V2 | ProtocolVersion::V1 => flexbuffers::from_slice(buf.chunk())
-            .context("failed decoding (flexbuffers) network message"),
-        ProtocolVersion::Unknown => {
-            unreachable!("unknown protocol version should never be set")
-        }
-    }
+    assert_eq!(protocol_version, ProtocolVersion::V1);
+    flexbuffers::from_slice(buf.chunk()).context("failed decoding V1 (flexbuffers) network message")
+}
+
+pub fn encode_as_bilrost<T: IntoDto>(value: T, protocol_version: ProtocolVersion) -> Bytes {
+    //todo(azmy): experiment with ReverseBuffer.
+    use bilrost::Message;
+
+    let inner = value.into_dto();
+    assert!(protocol_version >= ProtocolVersion::V2);
+    inner.encode_to_bytes()
+}
+
+pub fn decode_as_bilrost<T: FromDto>(
+    buf: impl Buf,
+    protocol_version: ProtocolVersion,
+) -> Result<T, anyhow::Error> {
+    assert!(protocol_version >= ProtocolVersion::V2);
+    let inner = <T::Target as bilrost::OwnedMessage>::decode(buf)
+        .context("failed decoding V2 (bilrost) network message")?;
+
+    T::from_dto(inner).context("failed to convert V2 (bilrost) value to inner type")
 }
