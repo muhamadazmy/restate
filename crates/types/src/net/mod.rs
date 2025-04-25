@@ -30,7 +30,7 @@ pub use crate::protobuf::common::ProtocolVersion;
 pub use crate::protobuf::common::TargetName;
 
 pub static MIN_SUPPORTED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V1;
-pub static CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V1;
+pub static CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::Bilrost;
 
 #[derive(
     Debug,
@@ -194,6 +194,14 @@ pub trait RpcRequest: Targeted {
 //       @target = TargetName::Ingress,
 //   }
 // ```
+// Example (with Bilrost)
+// ```
+//  define_message! {
+//       @proto = ProtocolVersion::Bilrost,
+//       @message = IngressMessage (as BilrosMessageType)?,
+//       @target = TargetName::Ingress,
+//  }
+// ```
 macro_rules! define_message {
     (
         @message = $message:ty,
@@ -209,9 +217,58 @@ macro_rules! define_message {
         impl $crate::net::codec::WireEncode for $message {
             fn encode_to_bytes(
                 self,
+                _protocol_version: $crate::net::ProtocolVersion,
+            ) -> ::bytes::Bytes {
+                ::bytes::Bytes::from($crate::net::codec::encode_v1_default(
+                    self,
+                    $crate::net::ProtocolVersion::V1,
+                ))
+            }
+        }
+
+        impl $crate::net::codec::WireDecode for $message {
+            type Error = anyhow::Error;
+
+            fn try_decode(
+                buf: impl bytes::Buf,
+                _protocol_version: $crate::net::ProtocolVersion,
+            ) -> Result<Self, anyhow::Error>
+            where
+                Self: Sized,
+            {
+                $crate::net::codec::decode_v1_default(buf, $crate::net::ProtocolVersion::V1)
+            }
+        }
+    };
+
+    (
+        @proto = ProtocolVersion::Bilrost,
+        @message = $message:ty $(as $message_type:ty)?,
+        @target = $target:expr,
+    ) => {
+        impl $crate::net::Targeted for $message {
+            const TARGET: $crate::net::TargetName = $target;
+            fn kind(&self) -> &'static str {
+                stringify!($message)
+            }
+        }
+
+        impl $crate::net::codec::WireEncode for $message {
+            fn encode_to_bytes(
+                self,
                 protocol_version: $crate::net::ProtocolVersion,
             ) -> ::bytes::Bytes {
-                ::bytes::Bytes::from($crate::net::codec::encode_default(self, protocol_version))
+                match protocol_version {
+                    $crate::net::ProtocolVersion::Unknown => {
+                        unreachable!("unknown protocol version should never be set")
+                    }
+                    $crate::net::ProtocolVersion::V1 => ::bytes::Bytes::from(
+                        crate::net::codec::encode_v1_default(self, protocol_version),
+                    ),
+                    $crate::net::ProtocolVersion::Bilrost => {
+                        crate::net::codec::encode_v2_bilrost(self, protocol_version)
+                    }
+                }
             }
         }
 
@@ -225,9 +282,34 @@ macro_rules! define_message {
             where
                 Self: Sized,
             {
-                $crate::net::codec::decode_default(buf, protocol_version)
+                match protocol_version {
+                    $crate::net::ProtocolVersion::Unknown => {
+                        unreachable!("unknown protocol version should never be set")
+                    }
+                    $crate::net::ProtocolVersion::V1 => {
+                        crate::net::codec::decode_v1_default(buf, protocol_version)
+                    }
+                    $crate::net::ProtocolVersion::Bilrost => {
+                        crate::net::codec::decode_v2_bilrost(buf, protocol_version)
+                    }
+                }
             }
         }
+
+        $(
+            impl $crate::dto::DataTransferObject for $message {
+                type Target = $message_type;
+                type Error = <$message as TryFrom<$message_type>>::Error;
+
+                fn into_dto(self) -> Self::Target {
+                    self.into()
+                }
+
+                fn from_dto(value: Self::Target) -> Result<Self, Self::Error> {
+                    value.try_into()
+                }
+            }
+        )?
     };
 }
 
@@ -245,6 +327,20 @@ macro_rules! define_message {
 //       @request_target = TargetName::ClusterController,
 //       @response_target = TargetName::AttachResponse,
 //   }
+// ```
+// Example (With Bilrost V2 protocol):
+// ```
+//   define_rpc! {
+//       @proto = ProtocolVersion::Bilrost,
+//       @request = AttachRequest (as AttachRequestBilrostType),
+//       @response = AttachResponse,
+//       @request_target = TargetName::ClusterController,
+//       @response_target = TargetName::AttachResponse,
+//   }
+//
+// The optional (as Type) is possible to automatically implement V2Convertible
+// trait for the message type if your type already implements Into/TryFrom the target
+// type.
 // ```
 macro_rules! define_rpc {
     (
@@ -264,6 +360,29 @@ macro_rules! define_rpc {
 
         $crate::net::define_message! {
             @message = $response,
+            @target = $response_target,
+        }
+    };
+    (
+        @proto = ProtocolVersion::Bilrost,
+        @request = $request:ty $(as $request_type:ty)?,
+        @response = $response:ty $(as $response_type:ty)?,
+        @request_target = $request_target:expr,
+        @response_target = $response_target:expr,
+    ) => {
+        impl $crate::net::RpcRequest for $request {
+            type ResponseMessage = $response;
+        }
+
+        $crate::net::define_message! {
+            @proto = ProtocolVersion::Bilrost,
+            @message = $request $(as $request_type)?,
+            @target = $request_target,
+        }
+
+        $crate::net::define_message! {
+            @proto = ProtocolVersion::Bilrost,
+            @message = $response $(as $response_type)?,
             @target = $response_target,
         }
     };
