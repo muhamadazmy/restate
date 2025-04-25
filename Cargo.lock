@@ -7747,6 +7747,7 @@ dependencies = [
  "chrono",
  "clap",
  "codederror",
+ "criterion",
  "derive_builder",
  "derive_more",
  "downcast-rs",
