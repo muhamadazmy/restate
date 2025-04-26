@@ -23,6 +23,7 @@
     derive_more::AddAssign,
     serde::Serialize,
     serde::Deserialize,
+    restate_types_derive::BilrostNewType,
 )]
 #[display("v{}", _0)]
 #[debug("v{}", _0)]
@@ -82,5 +83,36 @@ impl<T: Versioned> Versioned for &mut T {
 impl<T: Versioned> Versioned for Box<T> {
     fn version(&self) -> Version {
         (**self).version()
+    }
+}
+
+#[cfg(test)]
+mod test {
+
+    use bilrost::{Message, OwnedMessage};
+
+    use super::Version;
+
+    #[derive(bilrost::Message)]
+    struct Nested {
+        version: Version,
+    }
+
+    #[derive(bilrost::Message)]
+    struct Flattened {
+        version: u32,
+    }
+
+    #[test]
+    fn test_bilrost_new_type() {
+        let x = Nested {
+            version: Version(10),
+        };
+
+        let bytes = x.encode_to_bytes();
+
+        let y = Flattened::decode(bytes).expect("decodes");
+
+        assert_eq!(x.version.0, y.version);
     }
 }
