@@ -318,6 +318,7 @@ where
     Serialize,
     Deserialize,
     Hash,
+    BilrostNewType,
 )]
 #[repr(transparent)]
 #[serde(transparent)]
