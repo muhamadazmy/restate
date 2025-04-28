@@ -2889,6 +2889,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
+name = "encoding-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.98",
+ "workspace-hack",
+]
+
+[[package]]
 name = "endian-type"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6924,6 +6934,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "restate-encoding"
+version = "1.3.3-dev"
+dependencies = [
+ "bilrost",
+ "bytes",
+ "encoding-derive",
+ "rand 0.9.0",
+ "workspace-hack",
+]
+
+[[package]]
 name = "restate-errors"
 version = "1.3.3-dev"
 dependencies = [
@@ -7781,6 +7802,7 @@ dependencies = [
  "regex",
  "regress 0.10.3",
  "restate-base64-util",
+ "restate-encoding",
  "restate-errors",
  "restate-serde-util",
  "restate-test-util",
@@ -10357,6 +10379,7 @@ dependencies = [
  "axum",
  "axum-core",
  "bitflags 2.8.0",
+ "byteorder",
  "bytes",
  "bzip2-sys",
  "cc",
