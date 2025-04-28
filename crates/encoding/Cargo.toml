@@ -1,0 +1,18 @@
+[package]
+name = "restate-encoding"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+
+[dependencies]
+bilrost = { workspace = true }
+bytes = { workspace = true }
+encoding-derive = { version = "0.1.0", path = "derive" }
+
+[dev-dependencies]
+rand = { workspace = true }
