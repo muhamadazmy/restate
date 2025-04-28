@@ -10379,6 +10379,7 @@ dependencies = [
  "axum",
  "axum-core",
  "bitflags 2.8.0",
+ "byteorder",
  "bytes",
  "bzip2-sys",
  "cc",
