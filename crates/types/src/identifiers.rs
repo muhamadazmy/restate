@@ -14,6 +14,7 @@ use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
 use rand::RngCore;
+use restate_encoding::BilrostNewType;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -47,6 +48,7 @@ use crate::time::MillisSinceEpoch;
     derive_more::Debug,
     serde::Serialize,
     serde::Deserialize,
+    BilrostNewType,
 )]
 #[display("e{}", _0)]
 #[debug("e{}", _0)]
@@ -96,6 +98,7 @@ impl From<LeaderEpoch> for crate::protobuf::common::LeaderEpoch {
     derive_more::FromStr,
     serde::Serialize,
     serde::Deserialize,
+    BilrostNewType,
 )]
 #[repr(transparent)]
 #[serde(transparent)]
