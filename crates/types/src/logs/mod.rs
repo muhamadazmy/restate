@@ -320,6 +320,8 @@ where
     Serialize,
     Deserialize,
     Hash,
+    BilrostNewType,
+    NetSerde,
 )]
 #[repr(transparent)]
 #[serde(transparent)]
