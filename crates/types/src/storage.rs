@@ -17,6 +17,7 @@ use std::sync::Arc;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use chrono::Utc;
 use downcast_rs::{DowncastSync, impl_downcast};
+use restate_encoding::{BilrostAs, NetSerde};
 use serde::Deserialize;
 use tracing::error;
 
@@ -178,7 +179,8 @@ macro_rules! flexbuffers_storage_encode_decode {
 }
 
 /// A polymorphic container of a buffer or a cached storage-encodeable object
-#[derive(Clone, derive_more::Debug)]
+#[derive(Clone, derive_more::Debug, BilrostAs)]
+#[bilrost_as(dto::PolyBytes)]
 pub enum PolyBytes {
     /// Raw bytes backed by (Bytes), so it's cheap to clone
     #[debug("Bytes({} bytes)", _0.len())]
@@ -187,6 +189,14 @@ pub enum PolyBytes {
     #[debug("Typed")]
     Typed(Arc<dyn StorageEncode>),
 }
+
+impl Default for PolyBytes {
+    fn default() -> Self {
+        Self::Bytes(bytes::Bytes::default())
+    }
+}
+// implement NetSerde for PolyBytes manually
+impl NetSerde for PolyBytes {}
 
 impl PolyBytes {
     /// Returns true if we are holding raw encoded bytes
@@ -376,6 +386,39 @@ where
 
     pub fn created_at(&self) -> chrono::DateTime<Utc> {
         self.created_at
+    }
+}
+
+mod dto {
+    use bytes::{Bytes, BytesMut};
+
+    use super::StorageCodec;
+
+    #[derive(bilrost::Message)]
+    pub struct PolyBytes {
+        #[bilrost(1)]
+        inner: Bytes,
+    }
+
+    impl From<super::PolyBytes> for PolyBytes {
+        fn from(value: super::PolyBytes) -> Self {
+            let inner = match value {
+                super::PolyBytes::Bytes(bytes) => bytes,
+                super::PolyBytes::Typed(typed) => {
+                    let mut buf = BytesMut::new();
+                    StorageCodec::encode(&*typed, &mut buf).expect("PolyBytes to serialize");
+                    buf.freeze()
+                }
+            };
+
+            Self { inner }
+        }
+    }
+
+    impl From<PolyBytes> for super::PolyBytes {
+        fn from(value: PolyBytes) -> Self {
+            Self::Bytes(value.inner)
+        }
     }
 }
 

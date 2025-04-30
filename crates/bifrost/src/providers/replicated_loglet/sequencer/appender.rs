@@ -375,6 +375,10 @@ impl<T: TransportConnect> SequencerAppender<T> {
 
             // We had a response from this node and there is still a lot we can do
             match stored.status {
+                Status::Unknown => {
+                    warn!(peer = %node_id, "Store failed on peer. Unknown error!");
+                    self.graylist.insert(node_id);
+                }
                 Status::Ok => {
                     // only if status is okay that we remove this node
                     // from the gray list, and move to replicated list
