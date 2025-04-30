@@ -12,12 +12,14 @@ use anyhow::bail;
 use bytes::Bytes;
 use enum_map::Enum;
 use prost_dto::{FromProst, IntoProst};
+use restate_encoding::NetSerde;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use strum::EnumIter;
 
 use crate::Version;
 use crate::Versioned;
+use crate::errors::ConversionError;
 use crate::logs::metadata::Logs;
 use crate::metadata::GlobalMetadata;
 use crate::net::ServiceTag;
@@ -26,6 +28,8 @@ use crate::nodes_config::NodesConfiguration;
 use crate::partition_table::PartitionTable;
 use crate::schema::Schema;
 
+use super::FromBilrostDto;
+use super::IntoBilrostDto;
 use super::ProtocolVersion;
 use super::codec;
 use super::codec::WireDecode;
@@ -46,6 +50,7 @@ pub enum MetadataMessage {
     GetMetadataRequest(GetMetadataRequest),
     MetadataUpdate(MetadataUpdate),
 }
+
 default_wire_codec!(MetadataMessage);
 
 pub struct MetadataManagerService;
@@ -72,9 +77,10 @@ impl WireEncode for GetMetadataRequest {
             ));
         }
 
-        Bytes::from(codec::encode_as_flexbuffers(self, protocol_version))
+        codec::encode_as_bilrost(self, protocol_version)
     }
 }
+
 impl WireDecode for GetMetadataRequest {
     type Error = anyhow::Error;
     fn try_decode(
@@ -93,7 +99,8 @@ impl WireDecode for GetMetadataRequest {
             }
             bail!("Invalid message type");
         }
-        codec::decode_as_flexbuffers(buf, protocol_version)
+
+        codec::decode_as_bilrost(buf, protocol_version)
     }
 }
 
@@ -109,6 +116,7 @@ impl WireEncode for MetadataUpdate {
         Bytes::from(codec::encode_as_flexbuffers(self, protocol_version))
     }
 }
+
 impl WireDecode for MetadataUpdate {
     type Error = anyhow::Error;
     fn try_decode(
@@ -147,13 +155,16 @@ impl WireDecode for MetadataUpdate {
     strum::EnumCount,
     IntoProst,
     FromProst,
+    bilrost::Enumeration,
+    NetSerde,
 )]
 #[prost(target = "crate::protobuf::common::MetadataKind")]
 pub enum MetadataKind {
-    NodesConfiguration,
-    Schema,
-    PartitionTable,
-    Logs,
+    Unknown = 0,
+    NodesConfiguration = 1,
+    Schema = 2,
+    PartitionTable = 3,
+    Logs = 4,
 }
 
 // todo remove once prost_dto supports TryFromProst
@@ -187,6 +198,22 @@ pub enum MetadataContainer {
 pub struct GetMetadataRequest {
     pub metadata_kind: MetadataKind,
     pub min_version: Option<crate::Version>,
+}
+
+impl IntoBilrostDto for GetMetadataRequest {
+    type Target = dto::GetMetadataRequest;
+    fn into_dto(self) -> Self::Target {
+        self.into()
+    }
+}
+
+impl FromBilrostDto for GetMetadataRequest {
+    type Target = dto::GetMetadataRequest;
+    type Error = ConversionError;
+
+    fn from_dto(value: Self::Target) -> Result<Self, Self::Error> {
+        value.try_into()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,5 +299,59 @@ impl Extraction for Logs {
         } else {
             None
         }
+    }
+}
+
+pub mod dto {
+
+    use restate_encoding::NetSerde;
+
+    use crate::{errors::ConversionError, logs};
+
+    use super::MetadataKind;
+
+    #[derive(Debug, Clone, bilrost::Message, NetSerde)]
+    pub struct GetMetadataRequest {
+        pub metadata_kind: Option<MetadataKind>,
+        pub min_version: Option<crate::Version>,
+    }
+
+    impl From<super::GetMetadataRequest> for GetMetadataRequest {
+        fn from(value: super::GetMetadataRequest) -> Self {
+            let super::GetMetadataRequest {
+                metadata_kind,
+                min_version,
+            } = value;
+
+            Self {
+                metadata_kind: Some(metadata_kind),
+                min_version,
+            }
+        }
+    }
+
+    impl TryFrom<GetMetadataRequest> for super::GetMetadataRequest {
+        type Error = ConversionError;
+        fn try_from(value: GetMetadataRequest) -> Result<Self, Self::Error> {
+            let GetMetadataRequest {
+                metadata_kind,
+                min_version,
+            } = value;
+
+            Ok(Self {
+                metadata_kind: metadata_kind
+                    .ok_or_else(|| ConversionError::missing_field("metadata_kind"))?,
+                min_version,
+            })
+        }
+    }
+
+    #[derive(Debug, Clone, bilrost::Oneof)]
+    pub enum MetadataContainer {
+        // NodesConfiguration(Arc<NodesConfiguration>),
+        // PartitionTable(Arc<PartitionTable>),
+        #[bilrost(3)]
+        Logs(logs::metadata::dto::Logs),
+        // Schema(Arc<Schema>),
     }
 }

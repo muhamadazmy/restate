@@ -16,6 +16,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use bytestring::ByteString;
 use enum_map::Enum;
+use restate_encoding::BilrostNewType;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 use smallvec::SmallVec;
@@ -46,6 +47,7 @@ use crate::{Version, Versioned, flexbuffers_storage_encode_decode};
     derive_more::Into,
     derive_more::Display,
     derive_more::Debug,
+    BilrostNewType,
 )]
 #[repr(transparent)]
 #[serde(transparent)]
@@ -274,6 +276,7 @@ pub struct ReplicatedLogletConfig {
     Eq,
     PartialEq,
     derive_more::Display,
+    BilrostNewType,
 )]
 #[serde(try_from = "u16", into = "u16")]
 #[display("{_0}")]
@@ -436,12 +439,23 @@ struct LogsSerde {
     config: Option<LogsConfiguration>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Eq, PartialEq, derive_more::IsVariant)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    Serialize,
+    Deserialize,
+    Eq,
+    PartialEq,
+    derive_more::IsVariant,
+    bilrost::Oneof,
+)]
 pub enum ChainState {
     /// Chain is allowed to grow
     #[default]
     Open,
     /// Chain is sealed. No new segments can be added.
+    #[bilrost(1)]
     Sealed {
         /// The LSN of the virtually impossible next segment, akin to the first lsn of the next
         /// segment in an open chain.
@@ -451,12 +465,14 @@ pub enum ChainState {
 
 /// the chain is a list of segments in (from Lsn) order.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bilrost::Message)]
 pub struct Chain {
     #[serde(default)]
+    #[bilrost(oneof(1))]
     pub(super) state: ChainState,
     // flexbuffers only supports string-keyed maps :-( --> so we store it as vector of kv pairs
     #[serde_as(as = "serde_with::Seq<(_, _)>")]
+    #[bilrost(2)]
     pub(super) chain: BTreeMap<Lsn, LogletConfig>,
 }
 
@@ -479,9 +495,11 @@ impl<'a> Segment<'a> {
 }
 
 /// A segment in the chain of loglet instances.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bilrost::Message)]
 pub struct LogletConfig {
+    #[bilrost(1)]
     pub kind: ProviderKind,
+    #[bilrost(2)]
     pub params: LogletParams,
     /// This is a cheap and collision-free way to identify loglets within the same log without
     /// using random numbers. Globally, the tuple (log_id, index) is unique.
@@ -491,6 +509,7 @@ pub struct LogletConfig {
     // only expect logs with 1 segment. Therefore, a default of 0 matches what we create on new
     // loglet chains already.
     #[serde(default)]
+    #[bilrost(3)]
     index: SegmentIndex,
 }
 
@@ -510,7 +529,16 @@ impl LogletConfig {
 /// and start-lsn. It's provided by bifrost on loglet creation. This allows the
 /// parameters to be shared between segments and logs if needed.
 #[derive(
-    Debug, Clone, Hash, Eq, PartialEq, derive_more::From, derive_more::Deref, Serialize, Deserialize,
+    Debug,
+    Clone,
+    Hash,
+    Eq,
+    PartialEq,
+    derive_more::From,
+    derive_more::Deref,
+    Serialize,
+    Deserialize,
+    BilrostNewType,
 )]
 pub struct LogletParams(ByteString);
 
@@ -539,6 +567,7 @@ impl From<&'static str> for LogletParams {
     Enum,
     strum::EnumIter,
     strum::Display,
+    bilrost::Enumeration,
 )]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
@@ -546,14 +575,14 @@ impl From<&'static str> for LogletParams {
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum ProviderKind {
     /// A local rocksdb-backed loglet.
-    Local,
+    Local = 0,
     /// An in-memory loglet, primarily for testing.
     #[cfg(any(test, feature = "memory-loglet"))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
-    InMemory,
+    InMemory = 1,
     /// Replicated loglets are restate's native log replication system. This requires
     /// `log-server` role to run on enough nodes in the cluster.
-    Replicated,
+    Replicated = 2,
 }
 
 impl FromStr for ProviderKind {
@@ -821,6 +850,202 @@ pub fn bootstrap_logs_metadata(
     });
 
     builder.build()
+}
+
+pub mod dto {
+    use std::collections::HashMap;
+
+    use crate::{
+        Version, errors::ConversionError, logs::LogId, replicated_loglet::ReplicatedLogletParams,
+        replication,
+    };
+
+    use super::{Chain, LookupIndex, NodeSetSize, ProviderKind};
+
+    #[derive(Debug, Clone, bilrost::Message)]
+    pub struct Logs {
+        #[bilrost(1)]
+        version: Version,
+        #[bilrost(2)]
+        logs: HashMap<LogId, Chain>,
+        #[bilrost(3)]
+        config: LogsConfiguration,
+    }
+
+    impl From<super::Logs> for Logs {
+        fn from(value: super::Logs) -> Self {
+            let super::Logs {
+                version,
+                logs,
+                config,
+                lookup_index: _lookup_index,
+            } = value;
+
+            Self {
+                version,
+                logs,
+                config: config.into(),
+            }
+        }
+    }
+
+    impl TryFrom<Logs> for super::Logs {
+        type Error = anyhow::Error;
+
+        fn try_from(value: Logs) -> Result<Self, Self::Error> {
+            let Logs {
+                version,
+                logs,
+                config,
+            } = value;
+
+            // rebuild index
+            let mut lookup_index = LookupIndex::default();
+
+            for (log_id, chain) in logs.iter() {
+                for loglet_config in chain.chain.values() {
+                    if ProviderKind::Replicated == loglet_config.kind {
+                        let params = ReplicatedLogletParams::deserialize_from(
+                            loglet_config.params.as_bytes(),
+                        )?;
+                        lookup_index.add_replicated_loglet(*log_id, loglet_config.index, params);
+                    }
+                }
+            }
+
+            Ok(Self {
+                version,
+                logs,
+                lookup_index,
+                config: config.try_into()?,
+            })
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, bilrost::Enumeration)]
+    pub enum ProviderConfigurationKind {
+        InMemory = 0,
+        Local = 1,
+        Replicated = 2,
+    }
+
+    #[derive(Debug, Clone, bilrost::Message)]
+    pub struct ReplicatedLogletConfig {
+        #[bilrost(1)]
+        replication_property: replication::dto::ReplicationProperty,
+        #[bilrost(2)]
+        target_nodeset_size: NodeSetSize,
+    }
+
+    impl From<super::ReplicatedLogletConfig> for ReplicatedLogletConfig {
+        fn from(value: super::ReplicatedLogletConfig) -> Self {
+            let super::ReplicatedLogletConfig {
+                replication_property,
+                target_nodeset_size,
+            } = value;
+
+            Self {
+                replication_property: replication_property.into(),
+                target_nodeset_size,
+            }
+        }
+    }
+
+    impl TryFrom<ReplicatedLogletConfig> for super::ReplicatedLogletConfig {
+        type Error = ConversionError;
+        fn try_from(value: ReplicatedLogletConfig) -> Result<Self, Self::Error> {
+            let ReplicatedLogletConfig {
+                replication_property,
+                target_nodeset_size,
+            } = value;
+            Ok(Self {
+                replication_property: replication_property.try_into()?,
+                target_nodeset_size,
+            })
+        }
+    }
+
+    #[derive(Debug, Clone, bilrost::Message)]
+    pub struct ProviderConfiguration {
+        #[bilrost(1)]
+        kind: ProviderConfigurationKind,
+        #[bilrost(2)]
+        config: Option<ReplicatedLogletConfig>,
+    }
+
+    impl From<super::ProviderConfiguration> for ProviderConfiguration {
+        fn from(value: super::ProviderConfiguration) -> Self {
+            use super::ProviderConfiguration::*;
+
+            match value {
+                #[cfg(any(test, feature = "memory-loglet"))]
+                InMemory => Self {
+                    kind: ProviderConfigurationKind::InMemory,
+                    config: None,
+                },
+                Local => Self {
+                    kind: ProviderConfigurationKind::Local,
+                    config: None,
+                },
+                Replicated(config) => Self {
+                    kind: ProviderConfigurationKind::Replicated,
+                    config: Some(config.into()),
+                },
+            }
+        }
+    }
+
+    impl TryFrom<ProviderConfiguration> for super::ProviderConfiguration {
+        type Error = ConversionError;
+        fn try_from(value: ProviderConfiguration) -> Result<Self, Self::Error> {
+            let ProviderConfiguration { kind, config } = value;
+
+            let result = match kind {
+                ProviderConfigurationKind::InMemory => {
+                    #[cfg(any(test, feature = "memory-loglet"))]
+                    {
+                        return Ok(Self::InMemory);
+                    }
+                    #[cfg(not(any(test, feature = "memory-loglet")))]
+                    return Err(ConversionError::invalid_data("kind"));
+                }
+                ProviderConfigurationKind::Local => Self::Local,
+                ProviderConfigurationKind::Replicated => {
+                    let config = config.ok_or_else(|| ConversionError::missing_field("config"))?;
+                    Self::Replicated(config.try_into()?)
+                }
+            };
+
+            Ok(result)
+        }
+    }
+
+    #[derive(Debug, Clone, bilrost::Message)]
+    pub struct LogsConfiguration {
+        #[bilrost(1)]
+        pub default_provider: ProviderConfiguration,
+    }
+
+    impl From<super::LogsConfiguration> for LogsConfiguration {
+        fn from(value: super::LogsConfiguration) -> Self {
+            let super::LogsConfiguration { default_provider } = value;
+
+            Self {
+                default_provider: default_provider.into(),
+            }
+        }
+    }
+
+    impl TryFrom<LogsConfiguration> for super::LogsConfiguration {
+        type Error = ConversionError;
+        fn try_from(value: LogsConfiguration) -> Result<Self, Self::Error> {
+            let LogsConfiguration { default_provider } = value;
+
+            Ok(Self {
+                default_provider: default_provider.try_into()?,
+            })
+        }
+    }
 }
 
 #[cfg(test)]

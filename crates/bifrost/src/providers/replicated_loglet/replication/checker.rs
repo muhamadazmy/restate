@@ -267,7 +267,7 @@ impl<Attr: Eq + Hash + Clone + std::fmt::Debug> NodeSetChecker<Attr> {
             .get(&node_id)
             .copied()
             .unwrap_or(StorageState::Disabled);
-        if storage_state.empty() {
+        if storage_state.is_empty() {
             return;
         }
         let old_attribute = self.node_to_attr.insert(node_id, attribute.clone());
@@ -294,7 +294,7 @@ impl<Attr: Eq + Hash + Clone + std::fmt::Debug> NodeSetChecker<Attr> {
             .get(&node_id)
             .copied()
             .unwrap_or(StorageState::Disabled);
-        if storage_state.empty() {
+        if storage_state.is_empty() {
             return;
         }
         let existing = self.node_to_attr.get(&node_id);
@@ -421,7 +421,7 @@ impl<Attr: Eq + Hash + Clone + std::fmt::Debug> NodeSetChecker<Attr> {
         location: &NodeLocation,
     ) {
         // we only consider nodes that might have data, everything else is ignored.
-        if storage_state.empty() {
+        if storage_state.is_empty() {
             return;
         }
         self.node_to_storage_state.insert(node_id, storage_state);

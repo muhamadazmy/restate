@@ -12,6 +12,7 @@ use std::num::NonZero;
 use std::sync::Arc;
 
 use enumset::{EnumSet, EnumSetType};
+use restate_encoding::NetSerde;
 use serde_with::serde_as;
 
 use crate::locality::NodeLocation;
@@ -33,28 +34,38 @@ pub enum NodesConfigError {
 }
 
 // PartialEq+Eq+Clone+Copy are implemented by EnumSetType
-#[derive(Debug, Hash, EnumSetType, strum::Display, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Hash,
+    EnumSetType,
+    strum::Display,
+    serde::Serialize,
+    serde::Deserialize,
+    bilrost::Enumeration,
+    NetSerde,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[enumset(serialize_repr = "list")]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[cfg_attr(feature = "clap", clap(rename_all = "kebab-case"))]
+#[repr(u8)]
 pub enum Role {
     /// A worker runs partition processor (journal, state, and drives invocations)
-    Worker,
+    Worker = 1,
     /// Admin runs cluster controller and user-facing admin APIs
-    Admin,
+    Admin = 2,
     /// Serves the metadata store
     // For backwards-compatibility also accept the old name
     #[serde(alias = "metadata-store")]
     #[serde(rename(serialize = "metadata-server"))]
-    MetadataServer,
+    MetadataServer = 3,
     /// Serves a log-server for replicated loglets
-    LogServer,
+    LogServer = 4,
     /// [EXPERIMENTAL FEATURE] Serves HTTP ingress requests (requires
     /// `experimental-feature-enable-separate-ingress-role` to be enabled)
-    HttpIngress,
+    HttpIngress = 5,
 }
 
 #[serde_as]
@@ -353,6 +364,8 @@ impl Versioned for NodesConfiguration {
     serde::Serialize,
     serde::Deserialize,
     strum::Display,
+    bilrost::Enumeration,
+    NetSerde,
 )]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
@@ -376,7 +389,7 @@ pub enum StorageState {
     /// - can write to: **yes** but excluded from new node sets; if you see it in a nodeset, try writing to it
     /// - new node sets: **excluded**
     #[default]
-    Provisioning,
+    Provisioning = 0,
 
     // [authoritative empty]
     /// Node's storage is not expected to be accessed for reads or writes. The node is not
@@ -386,7 +399,7 @@ pub enum StorageState {
     ///
     /// - should read from: **no**
     /// - can write to: **no**
-    Disabled,
+    Disabled = 1,
 
     // [authoritative]
     /// Node is not picked for new write sets, but it may still accept writes on existing nodesets,
@@ -396,7 +409,7 @@ pub enum StorageState {
     /// - can write to: **yes**
     /// - should write to: **no**
     /// - new node sets: **excluded**
-    ReadOnly,
+    ReadOnly = 2,
 
     // [authoritative]
     /// Gone is logically equivalent to ReadOnly but it signifies that the node has been
@@ -404,7 +417,7 @@ pub enum StorageState {
     /// Future versions of restate can decide to not even attempt to read from Gone nodes.
     ///
     /// - new node sets: **excluded**
-    Gone,
+    Gone = 3,
 
     // [authoritative]
     /// Can be picked up in new write sets and accepts writes in existing write sets.
@@ -412,7 +425,7 @@ pub enum StorageState {
     /// - should read from: **yes**
     /// - can write to: **yes**
     /// - new node sets: **included**
-    ReadWrite,
+    ReadWrite = 4,
 
     // **[non-authoritative]**
     /// Node detected that some/all of its local storage has been lost. It cannot be used as an
@@ -424,7 +437,7 @@ pub enum StorageState {
     ///
     /// - should read from: **may (non-quorum reads only)**
     /// - can write to: **no**
-    DataLoss,
+    DataLoss = 5,
 }
 
 impl StorageState {
@@ -454,7 +467,7 @@ impl StorageState {
     }
 
     /// Empty nodes are considered not part of the nodeset and they'll never join back.
-    pub fn empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         matches!(self, StorageState::Disabled)
     }
 }
@@ -472,30 +485,248 @@ impl StorageState {
     serde::Serialize,
     serde::Deserialize,
     strum::Display,
+    bilrost::Enumeration,
+    NetSerde,
 )]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum MetadataServerState {
     /// The server is not considered as part of the metadata store cluster. Node can be safely
     /// decommissioned.
-    Standby,
+    Standby = 0,
     /// The server is an active member of the metadata store cluster.
     #[default]
-    Member,
+    Member = 1,
 }
 
-#[derive(Clone, Default, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Default,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    bilrost::Message,
+    NetSerde,
+)]
 pub struct LogServerConfig {
+    #[bilrost(1)]
     pub storage_state: StorageState,
 }
 
-#[derive(Clone, Default, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Default,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    bilrost::Message,
+    NetSerde,
+)]
 pub struct MetadataServerConfig {
+    #[bilrost(1)]
     pub metadata_server_state: MetadataServerState,
 }
 
 flexbuffers_storage_encode_decode!(NodesConfiguration);
 
+pub mod dto {
+    use std::collections::HashMap;
+
+    use enumset::EnumSet;
+    use restate_encoding::NetSerde;
+
+    use crate::{GenerationalNodeId, PlainNodeId, Version, errors::ConversionError};
+
+    use super::{LogServerConfig, MetadataServerConfig, Role};
+
+    #[derive(Debug, Clone, bilrost::Message, NetSerde)]
+    pub struct NodeConfig {
+        #[bilrost(1)]
+        name: String,
+        #[bilrost(2)]
+        current_generation: GenerationalNodeId,
+        #[bilrost(3)]
+        address: String,
+        #[bilrost(4)]
+        roles: Vec<Role>,
+        #[bilrost(5)]
+        log_server_config: LogServerConfig,
+        #[bilrost(6)]
+        location: String,
+        #[bilrost(7)]
+        metadata_server_config: MetadataServerConfig,
+    }
+
+    impl From<super::NodeConfig> for NodeConfig {
+        fn from(value: super::NodeConfig) -> Self {
+            let super::NodeConfig {
+                name,
+                current_generation,
+                address,
+                roles,
+                log_server_config,
+                location,
+                metadata_server_config,
+            } = value;
+
+            Self {
+                name,
+                current_generation,
+                address: address.to_string(),
+                roles: Vec::from_iter(roles),
+                log_server_config,
+                location: location.to_string(),
+                metadata_server_config,
+            }
+        }
+    }
+
+    impl TryFrom<NodeConfig> for super::NodeConfig {
+        type Error = ConversionError;
+
+        fn try_from(value: NodeConfig) -> Result<Self, Self::Error> {
+            let NodeConfig {
+                name,
+                current_generation,
+                address,
+                roles,
+                log_server_config,
+                location,
+                metadata_server_config,
+            } = value;
+
+            Ok(Self {
+                name,
+                current_generation,
+                address: address
+                    .parse()
+                    .map_err(|_| ConversionError::invalid_data("address"))?,
+                roles: EnumSet::from_iter(roles),
+                log_server_config,
+                location: location
+                    .parse()
+                    .map_err(|_| ConversionError::invalid_data("location"))?,
+                metadata_server_config,
+            })
+        }
+    }
+
+    #[derive(Debug, Clone, bilrost::Message, NetSerde)]
+    pub struct MaybeNode {
+        #[bilrost(1)]
+        tombstone: bool,
+        #[bilrost(2)]
+        node: Option<NodeConfig>,
+    }
+
+    impl From<super::MaybeNode> for MaybeNode {
+        fn from(value: super::MaybeNode) -> Self {
+            use super::MaybeNode::*;
+
+            match value {
+                Tombstone => Self {
+                    tombstone: true,
+                    node: None,
+                },
+                Node(node) => Self {
+                    tombstone: false,
+                    node: Some(node.into()),
+                },
+            }
+        }
+    }
+
+    impl TryFrom<MaybeNode> for super::MaybeNode {
+        type Error = ConversionError;
+        fn try_from(value: MaybeNode) -> Result<Self, Self::Error> {
+            let MaybeNode { tombstone, node } = value;
+
+            if tombstone {
+                Ok(Self::Tombstone)
+            } else {
+                Ok(Self::Node(
+                    node.ok_or_else(|| ConversionError::missing_field("node"))?
+                        .try_into()?,
+                ))
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, bilrost::Message, NetSerde)]
+    pub struct NodesConfiguration {
+        #[bilrost(1)]
+        version: Version,
+        #[bilrost(2)]
+        cluster_name: String,
+        #[bilrost(3)]
+        cluster_fingerprint: Option<u64>,
+        #[bilrost(4)]
+        nodes: HashMap<PlainNodeId, MaybeNode>,
+    }
+
+    impl From<super::NodesConfiguration> for NodesConfiguration {
+        fn from(value: super::NodesConfiguration) -> Self {
+            let super::NodesConfiguration {
+                version,
+                cluster_name,
+                cluster_fingerprint,
+                nodes,
+                name_lookup: _,
+            } = value;
+
+            Self {
+                version,
+                cluster_name,
+                cluster_fingerprint: cluster_fingerprint.map(Into::into),
+                nodes: nodes
+                    .into_iter()
+                    .map(|(key, value)| (key, value.into()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl TryFrom<NodesConfiguration> for super::NodesConfiguration {
+        type Error = ConversionError;
+
+        fn try_from(value: NodesConfiguration) -> Result<Self, Self::Error> {
+            let NodesConfiguration {
+                version,
+                cluster_name,
+                cluster_fingerprint,
+                nodes,
+            } = value;
+
+            let mut nodes_map =
+                ahash::HashMap::with_capacity_and_hasher(nodes.len(), ahash::RandomState::new());
+
+            let mut name_lookup =
+                ahash::HashMap::with_capacity_and_hasher(nodes.len(), ahash::RandomState::new());
+            for (key, value) in nodes {
+                if let Some(ref node) = value.node {
+                    name_lookup.insert(node.name.clone(), key);
+                }
+
+                nodes_map.insert(key, value.try_into()?);
+            }
+
+            Ok(Self {
+                version,
+                cluster_name,
+                cluster_fingerprint: cluster_fingerprint
+                    .map(TryInto::try_into)
+                    .transpose()
+                    .map_err(|_| ConversionError::invalid_data("cluster_fingerprint"))?,
+                nodes: nodes_map,
+                name_lookup,
+            })
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
