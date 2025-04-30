@@ -9,9 +9,12 @@
 // by the Apache License, Version 2.0.
 
 mod cluster_marker;
+mod failure_detector;
 mod init;
 mod network_server;
 mod roles;
+
+use std::time::Duration;
 
 use anyhow::Context;
 use prost_dto::IntoProst;
@@ -26,14 +29,16 @@ use restate_core::network::{
     Swimlane,
 };
 use restate_core::partitions::{PartitionRoutingRefresher, spawn_partition_routing_refresher};
-use restate_core::{Metadata, MetadataWriter, TaskKind};
+use restate_core::{Metadata, MetadataKind, MetadataWriter, TaskKind};
 use restate_core::{MetadataBuilder, MetadataManager, TaskCenter, spawn_metadata_manager};
+use restate_futures_util::overdue::OverdueLoggingExt;
 use restate_log_server::LogServerService;
 use restate_metadata_server::{
     BoxedMetadataServer, MetadataServer, MetadataStoreClient, ReadModifyWriteError,
 };
 use restate_tracing_instrumentation::prometheus_metrics::Prometheus;
 use restate_types::config::{CommonOptions, Configuration};
+use restate_types::health::NodeStatus;
 use restate_types::live::Live;
 use restate_types::live::LiveLoadExt;
 use restate_types::logs::RecordCache;
@@ -48,10 +53,11 @@ use restate_types::protobuf::common::{
 };
 use restate_types::{GenerationalNodeId, Version, Versioned};
 
+use self::failure_detector::FailureDetector;
 use crate::cluster_marker::ClusterValidationError;
 use crate::init::NodeInit;
 use crate::network_server::NetworkServer;
-use crate::roles::{AdminRole, BaseRole, IngressRole, WorkerRole};
+use crate::roles::{AdminRole, IngressRole, WorkerRole};
 
 #[derive(Debug, thiserror::Error, CodedError)]
 pub enum Error {
@@ -121,7 +127,7 @@ pub struct Node {
     partition_routing_refresher: PartitionRoutingRefresher,
     bifrost: BifrostService,
     metadata_server_role: Option<BoxedMetadataServer>,
-    base_role: BaseRole,
+    failure_detector: FailureDetector,
     admin_role: Option<AdminRole<GrpcConnector>>,
     worker_role: Option<WorkerRole>,
     ingress_role: Option<IngressRole<GrpcConnector>>,
@@ -316,7 +322,7 @@ impl Node {
             None
         };
 
-        let base_role = BaseRole::new(
+        let failure_detector = FailureDetector::new(
             &mut router_builder,
             worker_role
                 .as_ref()
@@ -336,7 +342,7 @@ impl Node {
             partition_routing_refresher,
             bifrost: bifrost_svc,
             metadata_server_role: metadata_store_role,
-            base_role,
+            failure_detector,
             admin_role,
             ingress_role,
             worker_role,
@@ -352,6 +358,7 @@ impl Node {
         let config = self.updateable_config.pinned();
 
         let metadata_writer = self.metadata_manager.writer();
+        let metadata = Metadata::current();
 
         // Start metadata manager
         spawn_metadata_manager(self.metadata_manager)?;
@@ -432,7 +439,7 @@ impl Node {
 
         let initialization_timeout = config.common.initialization_timeout.into();
 
-        tokio::time::timeout(
+        let my_node_config = tokio::time::timeout(
             initialization_timeout,
             NodeInit::new(
                 &metadata_writer,
@@ -444,16 +451,54 @@ impl Node {
             .context("Giving up trying to initialize the node. Make sure that it can reach the metadata store and don't forget to provision the cluster on a fresh start")?
             .context("Failed initializing the node")?;
 
-        let nodes_config = Metadata::with_current(|m| m.nodes_config_ref());
-        let my_node_id = Metadata::with_current(|m| m.my_node_id());
-        let my_node_config = nodes_config
-            .find_node_by_id(my_node_id)
-            .expect("should be present");
+        self.failure_detector.start()?;
+
+        // wait for initial metadata sync.
+        //
+        // Note that the sync can happen via adhoc peer-to-peer connection since failure
+        // detector/gossip service has been started as well.
+        let initial_fetch_dur = Duration::from_secs(15);
+        let (logs_version, partition_table_version) = match futures::future::join(
+            metadata.wait_for_version(MetadataKind::Logs, Version::MIN),
+            metadata.wait_for_version(MetadataKind::PartitionTable, Version::MIN),
+        )
+        .log_slow_after(
+            initial_fetch_dur,
+            tracing::Level::INFO,
+            "Initial fetch of global metadata",
+        )
+        .with_overdue(initial_fetch_dur * 2, tracing::Level::WARN)
+        .await
+        {
+            (Ok(logs_version), Ok(partition_table_version)) => {
+                (logs_version, partition_table_version)
+            }
+            _ => {
+                anyhow::bail!(
+                    "Failed to fetch the latest metadata when initializing the node, maybe server is shutting down"
+                );
+            }
+        };
+
+        info!(
+            name = %my_node_config.name,
+            roles = %my_node_config.roles,
+            address = %my_node_config.address,
+            location = %my_node_config.location,
+            nodes_config_version = %metadata.nodes_config_version(),
+            %partition_table_version,
+            %logs_version,
+            "My Node ID is {}", my_node_config.current_generation,
+        );
+
+        let nodes_config = metadata.nodes_config_ref();
+        let my_node_id = metadata.my_node_id();
+        debug_assert!(nodes_config.find_node_by_id(my_node_id).is_ok());
 
         // Start partition routing information refresher
         spawn_partition_routing_refresher(self.partition_routing_refresher)?;
 
-        // todo this is a temporary solution to announce the updated NodesConfiguration to the
+        //  todo this is a temporary solution to announce the updated NodesConfiguration to the
         //  configured admin nodes. It should be removed once we have a gossip-based node status
         //  protocol. Notifying the admin nodes is done on a best effort basis in case one admin
         //  node is currently not available. This is ok, because the admin nodes will periodically
@@ -497,8 +542,6 @@ impl Node {
             TaskCenter::spawn(TaskKind::IngressServer, "ingress-http", ingress_role.run())?;
         }
 
-        self.base_role.start()?;
-
         if let Some(admin_role) = self.admin_role {
             TaskCenter::spawn(TaskKind::SystemBoot, "admin-init", admin_role.start())?;
         }
@@ -507,10 +550,6 @@ impl Node {
         // Report that the node is running when all roles are ready
         let _ = TaskCenter::spawn(TaskKind::Disposable, "status-report", async move {
             let health = TaskCenter::with_current(|tc| tc.health().clone());
-            health
-                .node_rpc_status()
-                .wait_for_value(NodeRpcStatus::Ready)
-                .await;
             trace!("Node-to-node networking is ready");
             for role in my_roles {
                 match role {
@@ -552,6 +591,7 @@ impl Node {
                     }
                 }
             }
+            health.node_status().update(NodeStatus::Alive);
             info!("Restate node roles [{}] were started", my_roles);
             Ok(())
         });

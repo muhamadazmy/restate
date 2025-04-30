@@ -422,6 +422,9 @@ impl<S: LogStore> LogletWorker<S> {
             // If shutdown happened, this task will be disposed of and we won't send
             // the response.
             match msg.query {
+                TailUpdateQuery::Unknown => {
+                    unreachable!()
+                }
                 TailUpdateQuery::LocalTail(target_offset) => {
                     local_tail_watch
                         .wait_for_offset_or_seal(target_offset)

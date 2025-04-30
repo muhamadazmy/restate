@@ -283,6 +283,11 @@ impl ConnectionManager {
         )
         .await?;
 
+        // temporary until we allow connections to be established before we acquire a node id.
+        let Some(my_node_id) = metadata.my_node_id_opt() else {
+            return Err(AcceptError::NotReady);
+        };
+
         let should_register = matches!(
             hello.direction(),
             ConnectionDirection::Unknown
@@ -294,7 +299,6 @@ impl ConnectionManager {
         let mut guard = self.inner.lock();
 
         let nodes_config = metadata.nodes_config_ref();
-        let my_node_id = metadata.my_node_id();
         // NodeId **must** be generational at this layer, we may support accepting connections from
         // anonymous nodes in the future. When this happens, this restate-server release will not
         // be compatible with it.
@@ -713,10 +717,7 @@ mod tests {
             direction: ConnectionDirection::Bidirectional.into(),
             swimlane: Swimlane::default().into(),
         };
-        let hello = Message::new(
-            Header::new(metadata.nodes_config_version(), None, None, None, None),
-            hello,
-        );
+        let hello = Message::new(Header::default(), hello);
         tx.send(hello).await.expect("Channel accept hello message");
 
         let connections = ConnectionManager::default();
@@ -741,10 +742,7 @@ mod tests {
             direction: ConnectionDirection::Bidirectional.into(),
             swimlane: Swimlane::default().into(),
         };
-        let hello = Message::new(
-            Header::new(metadata.nodes_config_version(), None, None, None, None),
-            hello,
-        );
+        let hello = Message::new(Header::default(), hello);
         tx.send(hello).await?;
 
         let connections = ConnectionManager::default();
@@ -779,10 +777,7 @@ mod tests {
             ConnectionDirection::Bidirectional,
             Swimlane::default(),
         );
-        let hello = Message::new(
-            Header::new(metadata.nodes_config_version(), None, None, None, None),
-            hello,
-        );
+        let hello = Message::new(Header::default(), hello);
         tx.send(hello).await.expect("Channel accept hello message");
 
         let connections = ConnectionManager::default();
@@ -847,13 +842,11 @@ mod tests {
 
         let request = GetNodeState::default();
         let partition_table_version = metadata.partition_table_version().next();
-        let header = Header::new(
-            metadata.nodes_config_version(),
-            None,
-            None,
-            Some(partition_table_version),
-            None,
-        );
+        let header = Header {
+            my_nodes_config_version: metadata.nodes_config_version().into(),
+            my_partition_table_version: partition_table_version.into(),
+            ..Default::default()
+        };
 
         let permit = connection.conn.reserve().await.unwrap();
 
