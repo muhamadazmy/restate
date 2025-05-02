@@ -9,7 +9,6 @@
 // by the Apache License, Version 2.0.
 
 pub mod codec;
-pub mod dto;
 pub mod log_server;
 pub mod metadata;
 pub mod node;
@@ -28,7 +27,6 @@ use http::Uri;
 use crate::config::InvalidConfigurationError;
 pub use crate::protobuf::common::ProtocolVersion;
 pub use crate::protobuf::common::ServiceTag;
-pub use dto::{FromBilrostDto, IntoBilrostDto};
 
 pub static MIN_SUPPORTED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V1;
 pub static CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V2;
