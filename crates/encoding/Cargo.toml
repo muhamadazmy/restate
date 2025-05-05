@@ -10,9 +10,11 @@ publish = false
 [dependencies]
 bilrost = { workspace = true }
 bytes = { workspace = true }
+enumset = { workspace = true }
 restate-encoding-derive = { version = "0.1.0", path = "derive" }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 bytestring = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
