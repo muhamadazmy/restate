@@ -6936,8 +6936,10 @@ dependencies = [
  "bilrost",
  "bytes",
  "bytestring",
+ "enumset",
  "rand 0.9.0",
  "restate-encoding-derive",
+ "serde",
  "static_assertions",
  "workspace-hack",
 ]
