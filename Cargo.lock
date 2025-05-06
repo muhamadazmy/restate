@@ -10403,6 +10403,8 @@ dependencies = [
  "criterion",
  "crossbeam-epoch",
  "crossterm 0.28.1",
+ "darling",
+ "darling_core",
  "digest",
  "either",
  "enum-map",
