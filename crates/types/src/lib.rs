@@ -55,10 +55,11 @@ use std::ops::RangeInclusive;
 
 use bilrost::encoding::{EmptyState, General, ValueDecoder, ValueEncoder};
 
-use restate_encoding::{BilrostAs, NetSerde};
+use restate_encoding::{BilrostAs, BilrostDisplayFromStr, NetSerde};
 
 pub use id_util::{IdDecoder, IdEncoder, IdResourceType, IdStrCursor};
 pub use node_id::*;
+use serde_with::serde_as;
 pub use version::*;
 
 // Re-export metrics' SharedString (Space-efficient Cow + RefCounted variant)
@@ -81,8 +82,8 @@ impl Merge for bool {
     }
 }
 
-/// A wrapper around [`enumset::EnumSet`] type that can serialize
-/// as a bilrost message
+/// A newtype wrapper around [`enumset::EnumSet`] enabling
+/// serialization and deserialization as a Bilrost message.
 #[derive(
     Debug,
     Copy,
@@ -143,6 +144,8 @@ where
     }
 }
 
+/// A newtype wrapper around [`RangeInclusive<Idx>`] enabling
+/// serialization and deserialization as a Bilrost message.
 #[derive(
     Debug,
     Clone,
@@ -155,6 +158,7 @@ where
     derive_more::From,
     derive_more::Into,
 )]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[bilrost_as(RangeInclusiveMessage<Idx>)]
 pub struct NetRangeInclusive<Idx>(RangeInclusive<Idx>)
 where
@@ -189,5 +193,102 @@ where
 {
     fn from(value: RangeInclusiveMessage<Idx>) -> Self {
         Self(RangeInclusive::new(value.0.0, value.0.1))
+    }
+}
+
+/// A newtype wrapper around [`serde_json::Value`] enabling
+/// serialization and deserialization as a Bilrost message.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    derive_more::From,
+    derive_more::Into,
+    derive_more::Deref,
+    derive_more::Display,
+    derive_more::FromStr,
+    serde::Serialize,
+    serde::Deserialize,
+    BilrostAs,
+)]
+#[bilrost_as(BilrostDisplayFromStr)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct NetJsonValue(serde_json::Value);
+
+impl Default for NetJsonValue {
+    fn default() -> Self {
+        Self(serde_json::Value::Null)
+    }
+}
+
+#[serde_as]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    derive_more::From,
+    derive_more::Into,
+    derive_more::Deref,
+    derive_more::Display,
+    derive_more::FromStr,
+    serde::Serialize,
+    serde::Deserialize,
+    BilrostAs,
+)]
+#[bilrost_as(BilrostDisplayFromStr)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct NetHumanDuration(
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    #[serde(with = "serde_with::As::<serde_with::DisplayFromStr>")]
+    humantime::Duration,
+);
+
+impl Default for NetHumanDuration {
+    fn default() -> Self {
+        Self(humantime::Duration::from(std::time::Duration::from_secs(0)))
+    }
+}
+
+impl From<std::time::Duration> for NetHumanDuration {
+    fn from(value: std::time::Duration) -> Self {
+        Self(humantime::Duration::from(value))
+    }
+}
+
+impl From<NetHumanDuration> for std::time::Duration {
+    fn from(value: NetHumanDuration) -> Self {
+        value.0.into()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use bilrost::{Message, OwnedMessage};
+    use bytes::BytesMut;
+
+    use crate::NetJsonValue;
+
+    #[test]
+    fn json_value() {
+        #[derive(bilrost::Message)]
+        struct Message {
+            payload: NetJsonValue,
+        }
+
+        let m = Message {
+            payload: serde_json::json!({
+                "hello": "World",
+            })
+            .into(),
+        };
+
+        let mut buf = BytesMut::new();
+        m.encode(&mut buf).unwrap();
+
+        let loaded = Message::decode(buf).unwrap();
+
+        assert_eq!(m.payload.0, loaded.payload.0);
     }
 }
