@@ -696,12 +696,24 @@ impl WithInvocationId for JournalEntryId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde_with::SerializeDisplay, serde_with::DeserializeFromStr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde_with::SerializeDisplay,
+    serde_with::DeserializeFromStr,
+    bilrost::Message,
+)]
 pub struct LambdaARN {
+    #[bilrost(1)]
     partition: ByteString,
+    #[bilrost(2)]
     region: ByteString,
+    #[bilrost(3)]
     account_id: ByteString,
+    #[bilrost(4)]
     name: ByteString,
+    #[bilrost(5)]
     version: ByteString,
 }
 
