@@ -23,6 +23,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Error};
 use http::Uri;
+use restate_encoding::{BilrostAs, BilrostDisplayFromStr, NetSerde};
 
 use crate::config::InvalidConfigurationError;
 pub use crate::protobuf::common::ProtocolVersion;
@@ -40,7 +41,9 @@ pub static CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V2;
     derive_more::Display,
     serde_with::SerializeDisplay,
     serde_with::DeserializeFromStr,
+    BilrostAs,
 )]
+#[bilrost_as(BilrostDisplayFromStr)]
 pub enum AdvertisedAddress {
     /// Unix domain socket
     #[display("unix:{}", _0.display())]
@@ -48,6 +51,16 @@ pub enum AdvertisedAddress {
     /// Hostname or host:port pair
     #[display("{}", _0)]
     Http(Uri),
+}
+
+impl NetSerde for AdvertisedAddress {}
+
+// This default implementation is needed by bilrost
+// to have a default "empty state"
+impl Default for AdvertisedAddress {
+    fn default() -> Self {
+        Self::Uds("".into())
+    }
 }
 
 impl FromStr for AdvertisedAddress {
