@@ -51,6 +51,12 @@ pub mod storage;
 pub mod time;
 pub mod timer;
 
+use std::ops::RangeInclusive;
+
+use bilrost::encoding::{EmptyState, General, ValueDecoder, ValueEncoder};
+
+use restate_encoding::{BilrostAs, NetSerde};
+
 pub use id_util::{IdDecoder, IdEncoder, IdResourceType, IdStrCursor};
 pub use node_id::*;
 pub use version::*;
@@ -72,5 +78,116 @@ impl Merge for bool {
         } else {
             false
         }
+    }
+}
+
+/// A wrapper around [`enumset::EnumSet`] type that can serialize
+/// as a bilrost message
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    BilrostAs,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::Deref,
+    derive_more::From,
+    derive_more::Into,
+    derive_more::Display,
+)]
+#[bilrost_as(EnumSetMessage)]
+pub struct NetEnumSet<T>(enumset::EnumSet<T>)
+where
+    T: enumset::EnumSetType + 'static;
+
+impl<T> NetSerde for NetEnumSet<T> where T: NetSerde + enumset::EnumSetType {}
+
+impl<T> Default for NetEnumSet<T>
+where
+    T: enumset::EnumSetType,
+{
+    fn default() -> Self {
+        Self(enumset::EnumSet::empty())
+    }
+}
+
+#[derive(bilrost::Message)]
+struct EnumSetMessage(u64);
+
+impl<T> From<&NetEnumSet<T>> for EnumSetMessage
+where
+    T: enumset::EnumSetType,
+{
+    fn from(value: &NetEnumSet<T>) -> Self {
+        Self(value.0.as_u64())
+    }
+}
+
+impl<T> From<EnumSetMessage> for NetEnumSet<T>
+where
+    T: enumset::EnumSetType + 'static,
+{
+    fn from(value: EnumSetMessage) -> Self {
+        Self(enumset::EnumSet::<T>::from_u64_truncated(value.0))
+    }
+}
+
+impl<T> From<T> for NetEnumSet<T>
+where
+    T: enumset::EnumSetType,
+{
+    fn from(value: T) -> Self {
+        enumset::EnumSet::from(value).into()
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    BilrostAs,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::Deref,
+    derive_more::From,
+    derive_more::Into,
+)]
+#[bilrost_as(RangeInclusiveMessage<Idx>)]
+pub struct NetRangeInclusive<Idx>(RangeInclusive<Idx>)
+where
+    Idx: Copy + EmptyState + ValueEncoder<General> + ValueDecoder<General> + 'static;
+
+impl<Idx> Default for NetRangeInclusive<Idx>
+where
+    Idx: Copy + EmptyState + ValueEncoder<General> + ValueDecoder<General>,
+{
+    fn default() -> Self {
+        Self(RangeInclusive::new(Idx::empty(), Idx::empty()))
+    }
+}
+
+#[derive(bilrost::Message)]
+struct RangeInclusiveMessage<Idx>((Idx, Idx))
+where
+    Idx: EmptyState + ValueEncoder<General> + ValueDecoder<General>;
+
+impl<Idx> From<&NetRangeInclusive<Idx>> for RangeInclusiveMessage<Idx>
+where
+    Idx: Copy + EmptyState + ValueEncoder<General> + ValueDecoder<General>,
+{
+    fn from(value: &NetRangeInclusive<Idx>) -> Self {
+        Self((*value.0.start(), *value.0.end()))
+    }
+}
+
+impl<Idx> From<RangeInclusiveMessage<Idx>> for NetRangeInclusive<Idx>
+where
+    Idx: Copy + EmptyState + ValueEncoder<General> + ValueDecoder<General>,
+{
+    fn from(value: RangeInclusiveMessage<Idx>) -> Self {
+        Self(RangeInclusive::new(value.0.0, value.0.1))
     }
 }

@@ -6938,6 +6938,7 @@ dependencies = [
  "bytestring",
  "rand 0.9.0",
  "restate-encoding-derive",
+ "serde",
  "static_assertions",
  "workspace-hack",
 ]
