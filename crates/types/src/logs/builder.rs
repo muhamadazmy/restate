@@ -12,8 +12,8 @@ use std::num::NonZeroU32;
 use std::ops::Deref;
 
 use super::metadata::{
-    Chain, LogletConfig, LogletParams, Logs, LogsConfiguration, LookupIndex, MaybeSegment,
-    ProviderKind, SegmentIndex,
+    Chain, LogletConfig, LogletParams, Logs, LogsConfiguration, LogsInner, LookupIndex,
+    MaybeSegment, ProviderKind, SegmentIndex,
 };
 use super::{LogId, Lsn};
 use crate::Version;
@@ -67,23 +67,25 @@ impl LogsBuilder {
     }
 
     pub fn chain(&mut self, log_id: LogId) -> Option<ChainBuilder<'_>> {
-        let chain = self.inner.logs.get_mut(&log_id)?;
+        let chain = self.inner.0.logs.get_mut(&log_id)?;
         Some(ChainBuilder {
             log_id,
             inner: chain,
-            lookup_index: &mut self.inner.lookup_index,
+            lookup_index: &mut self.inner.0.lookup_index,
             modified: &mut self.modified,
         })
     }
 
     /// Bumps the version and returns the constructed log metadata.
     pub fn build(self) -> Logs {
-        Logs {
-            version: self.inner.version.next(),
-            logs: self.inner.logs,
-            lookup_index: self.inner.lookup_index,
-            config: self.inner.config,
+        let inner: LogsInner = self.inner.into();
+        LogsInner {
+            version: inner.version.next(),
+            logs: inner.logs,
+            lookup_index: inner.lookup_index,
+            config: inner.config,
         }
+        .into()
     }
 
     pub fn set_version(&mut self, version: NonZeroU32) {
@@ -105,13 +107,17 @@ impl LogsBuilder {
     }
 
     pub fn build_if_modified(self) -> Option<Logs> {
+        let inner: LogsInner = self.inner.into();
         if self.modified {
-            Some(Logs {
-                version: self.inner.version.next(),
-                logs: self.inner.logs,
-                lookup_index: self.inner.lookup_index,
-                config: self.inner.config,
-            })
+            Some(
+                LogsInner {
+                    version: inner.version.next(),
+                    logs: inner.logs,
+                    lookup_index: inner.lookup_index,
+                    config: inner.config,
+                }
+                .into(),
+            )
         } else {
             None
         }
