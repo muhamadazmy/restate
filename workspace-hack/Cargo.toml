@@ -46,7 +46,7 @@ digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1" }
 enum-map = { version = "2", default-features = false, features = ["serde"] }
 enumset = { version = "1", default-features = false, features = ["serde"] }
-flate2 = { version = "1" }
+flate2 = { version = "1", features = ["zlib-rs"] }
 futures = { version = "0.3" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
@@ -167,7 +167,7 @@ either = { version = "1" }
 enum-map = { version = "2", default-features = false, features = ["serde"] }
 enumset = { version = "1", default-features = false, features = ["serde"] }
 enumset_derive = { version = "0.10", default-features = false, features = ["serde"] }
-flate2 = { version = "1" }
+flate2 = { version = "1", features = ["zlib-rs"] }
 futures = { version = "0.3" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
