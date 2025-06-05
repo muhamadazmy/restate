@@ -17,7 +17,7 @@ use anyhow::Context;
 use assert2::let_assert;
 use enumset::EnumSet;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt as _};
-use metrics::{SharedString, counter, gauge, histogram};
+use metrics::{SharedString, counter, histogram};
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 use tracing::{Span, debug, error, info, instrument, trace, warn};
@@ -25,7 +25,7 @@ use tracing::{Span, debug, error, info, instrument, trace, warn};
 use restate_bifrost::Bifrost;
 use restate_bifrost::loglet::FindTailOptions;
 use restate_core::network::{Oneshot, Reciprocal, ServiceMessage, Verdict};
-use restate_core::{ShutdownError, cancellation_watcher};
+use restate_core::{Metadata, ShutdownError, cancellation_watcher};
 use restate_partition_store::{PartitionStore, PartitionStoreTransaction};
 use restate_storage_api::deduplication_table::{
     DedupInformation, DedupSequenceNumber, DeduplicationTable, ProducerId,
@@ -46,7 +46,6 @@ use restate_types::config::WorkerOptions;
 use restate_types::identifiers::{
     LeaderEpoch, PartitionId, PartitionKey, PartitionProcessorRpcRequestId, WithPartitionKey,
 };
-use restate_types::invocation;
 use restate_types::invocation::client::{InvocationOutput, InvocationOutputResponse};
 use restate_types::invocation::{
     AttachInvocationRequest, InvocationQuery, InvocationTarget, InvocationTargetType,
@@ -54,15 +53,18 @@ use restate_types::invocation::{
     SubmitNotificationSink, WorkflowHandlerType,
 };
 use restate_types::logs::MatchKeyQuery;
-use restate_types::logs::{KeyFilter, LogId, Lsn, SequenceNumber};
+use restate_types::logs::{KeyFilter, Lsn, SequenceNumber};
 use restate_types::net::RpcRequest;
 use restate_types::net::partition_processor::{
     AppendInvocationReplyOn, GetInvocationOutputResponseMode, PartitionLeaderService,
     PartitionProcessorRpcError, PartitionProcessorRpcRequest, PartitionProcessorRpcRequestInner,
     PartitionProcessorRpcResponse,
 };
+use restate_types::partitions::state::PartitionReplicaSetStates;
+use restate_types::retries::{RetryPolicy, with_jitter};
 use restate_types::storage::StorageDecodeError;
 use restate_types::time::MillisSinceEpoch;
+use restate_types::{GenerationalNodeId, invocation};
 use restate_wal_protocol::control::AnnounceLeader;
 use restate_wal_protocol::{Command, Destination, Envelope, Header, Source};
 
@@ -70,7 +72,6 @@ use crate::metric_definitions::{
     PARTITION_APPLY_COMMAND_BATCH_SIZE, PARTITION_APPLY_COMMAND_DURATION, PARTITION_LABEL,
     PARTITION_LEADER_HANDLE_ACTION_BATCH_DURATION,
     PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, PARTITION_RECORD_READ_COUNT,
-    PARTITION_RPC_QUEUE_OUTSTANDING_REQUESTS, PARTITION_RPC_QUEUE_UTILIZATION_PERCENT,
 };
 use crate::partition::invoker_storage_reader::InvokerStorageReader;
 use crate::partition::leadership::{LeadershipState, PartitionProcessorMetadata};
@@ -84,10 +85,12 @@ pub mod snapshots;
 mod state_machine;
 pub mod types;
 
-/// Control messages from Manager to individual partition processor instances.
-pub enum PartitionProcessorControlCommand {
-    RunForLeader(LeaderEpoch),
-    StepDown,
+/// Target leader state of the partition processor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum TargetLeaderState {
+    Leader(LeaderEpoch),
+    #[default]
+    Follower,
 }
 
 #[derive(Debug)]
@@ -102,7 +105,7 @@ pub(super) struct PartitionProcessorBuilder<InvokerInputSender> {
 
     status: PartitionProcessorStatus,
     invoker_tx: InvokerInputSender,
-    control_rx: mpsc::Receiver<PartitionProcessorControlCommand>,
+    target_leader_state_rx: watch::Receiver<TargetLeaderState>,
     network_svc_rx: mpsc::Receiver<ServiceMessage<PartitionLeaderService>>,
     status_watch_tx: watch::Sender<PartitionProcessorStatus>,
 }
@@ -118,7 +121,7 @@ where
         partition_key_range: RangeInclusive<PartitionKey>,
         status: PartitionProcessorStatus,
         options: &WorkerOptions,
-        control_rx: mpsc::Receiver<PartitionProcessorControlCommand>,
+        target_leader_state_rx: watch::Receiver<TargetLeaderState>,
         network_svc_rx: mpsc::Receiver<ServiceMessage<PartitionLeaderService>>,
         status_watch_tx: watch::Sender<PartitionProcessorStatus>,
         invoker_tx: InvokerInputSender,
@@ -132,7 +135,7 @@ where
             channel_size: options.internal_queue_length(),
             max_command_batch_size: options.max_command_batch_size(),
             invoker_tx,
-            control_rx,
+            target_leader_state_rx,
             network_svc_rx,
             status_watch_tx,
         }
@@ -142,6 +145,7 @@ where
         self,
         bifrost: Bifrost,
         mut partition_store: PartitionStore,
+        replica_set_states: PartitionReplicaSetStates,
     ) -> Result<PartitionProcessor<InvokerInputSender>, StorageError> {
         let PartitionProcessorBuilder {
             partition_id,
@@ -151,7 +155,7 @@ where
             channel_size,
             max_command_batch_size,
             invoker_tx,
-            control_rx,
+            target_leader_state_rx,
             network_svc_rx: rpc_rx,
             status_watch_tx,
             status,
@@ -190,10 +194,11 @@ where
             max_command_batch_size,
             partition_store,
             bifrost,
-            control_rx,
+            target_leader_state_rx,
             network_leader_svc_rx: rpc_rx,
             status_watch_tx,
             status,
+            replica_set_states,
         })
     }
 
@@ -223,10 +228,11 @@ pub struct PartitionProcessor<InvokerSender> {
     leadership_state: LeadershipState<InvokerSender>,
     state_machine: StateMachine,
     bifrost: Bifrost,
-    control_rx: mpsc::Receiver<PartitionProcessorControlCommand>,
+    target_leader_state_rx: watch::Receiver<TargetLeaderState>,
     network_leader_svc_rx: mpsc::Receiver<ServiceMessage<PartitionLeaderService>>,
     status_watch_tx: watch::Sender<PartitionProcessorStatus>,
     status: PartitionProcessorStatus,
+    replica_set_states: PartitionReplicaSetStates,
 
     max_command_batch_size: usize,
     partition_store: PartitionStore,
@@ -291,10 +297,6 @@ where
         // clean up pending rpcs and stop child tasks
         self.leadership_state.step_down().await;
 
-        // Drain control_rx
-        self.control_rx.close();
-        while self.control_rx.recv().await.is_some() {}
-
         // Drain leader network service
         self.network_leader_svc_rx.close();
         while let Some(msg) = self.network_leader_svc_rx.recv().await {
@@ -311,14 +313,49 @@ where
         let last_applied_lsn = last_applied_lsn.unwrap_or(Lsn::INVALID);
 
         self.status.last_applied_log_lsn = Some(last_applied_lsn);
+        let log_id = Metadata::with_current(|m| {
+            m.partition_table_ref()
+                .get(&self.partition_id)
+                .map(|p| p.log_id())
+        });
 
+        let Some(log_id) = log_id else {
+            return Err(ProcessorError::Other(anyhow::anyhow!(
+                "Partition {} was not found in partition table!",
+                self.partition_id
+            )));
+        };
+
+        // If the underlying log is not provisioned, now is the time to provision it.
+        // We'll retry a few times before giving back control to PPM
+        //
+        // The primary reason for retries is the initial cluster provision case where nodes might
+        // still be starting up and we don't have enough nodes to form legal nodesets.
+        let mut retries = RetryPolicy::exponential(
+            Duration::from_secs(1),
+            1.5,
+            Some(3),
+            Some(Duration::from_secs(5)),
+        )
+        .into_iter();
+        while let Err(e) = self.bifrost.admin().ensure_log_exists(log_id).await {
+            // We cannot provision the log for this partition
+            if let Some(dur) = retries.next() {
+                debug!(
+                    "Cannot create a bifrost log for partition {}, will retry in {:?}; reason={}",
+                    self.partition_id, dur, e
+                );
+                tokio::time::sleep(dur).await;
+            } else {
+                return Err(e.into());
+            }
+        }
+
+        debug!("Finding tail for partition",);
         // propagate errors and let the PPM handle error retries
         let current_tail = self
             .bifrost
-            .find_tail(
-                LogId::from(self.partition_id),
-                FindTailOptions::ConsistentRead,
-            )
+            .find_tail(log_id, FindTailOptions::ConsistentRead)
             .await?;
 
         debug!(
@@ -362,31 +399,23 @@ where
         let partition_id_str = SharedString::from(self.partition_id.to_string());
         let apply_command_latency = histogram!(PARTITION_APPLY_COMMAND_DURATION, PARTITION_LABEL => partition_id_str.clone());
         let record_actions_latency = histogram!(PARTITION_LEADER_HANDLE_ACTION_BATCH_DURATION);
-        let record_write_to_read_latencty = histogram!(PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, PARTITION_LABEL => partition_id_str.clone());
+        let record_write_to_read_latency = histogram!(PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, PARTITION_LABEL => partition_id_str.clone());
         let command_batch_size = histogram!(PARTITION_APPLY_COMMAND_BATCH_SIZE, PARTITION_LABEL => partition_id_str.clone());
         let command_read_count =
             counter!(PARTITION_RECORD_READ_COUNT, PARTITION_LABEL => partition_id_str.clone());
-        let rpc_queue_utilization = gauge!(PARTITION_RPC_QUEUE_UTILIZATION_PERCENT, PARTITION_LABEL => partition_id_str.clone());
-        let rpc_queue_len =
-            gauge!(PARTITION_RPC_QUEUE_OUTSTANDING_REQUESTS, PARTITION_LABEL => partition_id_str);
         // Start reading after the last applied lsn
         let key_query = KeyFilter::Within(self.partition_key_range.clone());
 
         let mut record_stream = self
             .bifrost
-            .create_reader(
-                LogId::from(self.partition_id),
-                key_query.clone(),
-                last_applied_lsn.next(),
-                Lsn::MAX,
-            )?
+            .create_reader(log_id, key_query.clone(), last_applied_lsn.next(), Lsn::MAX)?
             .map(|entry| match entry {
                 Ok(entry) => {
                     trace!(?entry, "Read entry");
                     let lsn = entry.sequence_number();
                     if entry.is_data_record() {
                         entry.as_record().inspect(|record| {
-                            record_write_to_read_latencty.record(record.created_at().elapsed());
+                            record_write_to_read_latency.record(record.created_at().elapsed());
                         });
                         entry
                             .try_decode_arc::<Envelope>()
@@ -412,29 +441,38 @@ where
                 std::future::ready(Ok(envelope.matches_key_query(&key_query)))
             });
 
-        // avoid synchronized timers. We pick a randomised timer between 500 and 1023 millis.
+        // avoid synchronized timers.
         let mut status_update_timer =
-            tokio::time::interval(Duration::from_millis(500 + rand::random::<u64>() % 524));
+            tokio::time::interval(with_jitter(Duration::from_millis(500), 0.5));
         status_update_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         let mut action_collector = ActionCollector::default();
         let mut command_buffer = Vec::with_capacity(self.max_command_batch_size);
 
+        let mut watch_leader_changes = self
+            .replica_set_states
+            .watch_leadership_state(self.partition_id);
+        watch_leader_changes.mark_changed();
+
         info!("Partition {} started", self.partition_id);
 
         loop {
-            let rpc_rx_len = self.network_leader_svc_rx.len();
-            let utilization =
-                (rpc_rx_len as f64 * 100.0) / self.network_leader_svc_rx.max_capacity() as f64;
-
-            rpc_queue_utilization.set(utilization);
-            rpc_queue_len.set(rpc_rx_len as f64);
-
             tokio::select! {
-                Some(command) = self.control_rx.recv() => {
-                    if let Err(err) = self.on_command(command).await {
-                        warn!("Failed executing command: {err}");
+                _ = self.target_leader_state_rx.changed() => {
+                    let target_leader_state = *self.target_leader_state_rx.borrow_and_update();
+                    self.on_target_leader_state(target_leader_state).await.context("failed handling target leader state change")?;
+                }
+                Ok(()) = watch_leader_changes.changed() => {
+                    // cloning to avoid holding the underlying RwLock.
+                    let new_state = *watch_leader_changes.borrow_and_update();
+                    if self.status.last_observed_leader_epoch.is_none_or(|last| last < new_state.current_leader_epoch) {
+                        self.status.last_observed_leader_epoch = Some(new_state.current_leader_epoch);
+                        if new_state.current_leader.is_valid() {
+                            self.status.last_observed_leader_node = Some(new_state.current_leader);
+                        }
                     }
+                    self.leadership_state.maybe_step_down(new_state.current_leader_epoch, new_state.current_leader).await;
+                    self.status.effective_mode = self.leadership_state.effective_mode();
                 }
                 Some(msg) = self.network_leader_svc_rx.recv() => {
                     match msg {
@@ -498,6 +536,13 @@ where
                                 // older AnnounceLeader messages have the announce_leader.node_id set
                                 self.status.last_observed_leader_node = announce_leader.node_id;
                             }
+                            self.replica_set_states.note_observed_leader(
+                                self.partition_id,
+                                restate_types::partitions::state::LeadershipState {
+                                    current_leader_epoch: announce_leader.leader_epoch,
+                                    current_leader:
+                                    self.status.last_observed_leader_node.unwrap_or(GenerationalNodeId::INVALID),
+                                });
 
                             let is_leader = self.leadership_state.on_announce_leader(announce_leader, &mut partition_store).await?;
 
@@ -535,19 +580,19 @@ where
         }
     }
 
-    async fn on_command(
+    async fn on_target_leader_state(
         &mut self,
-        command: PartitionProcessorControlCommand,
+        target_leader_state: TargetLeaderState,
     ) -> anyhow::Result<()> {
-        match command {
-            PartitionProcessorControlCommand::RunForLeader(leader_epoch) => {
+        match target_leader_state {
+            TargetLeaderState::Leader(leader_epoch) => {
                 self.status.planned_mode = RunMode::Leader;
                 self.leadership_state
                     .run_for_leader(leader_epoch)
                     .await
                     .context("failed handling RunForLeader command")?;
             }
-            PartitionProcessorControlCommand::StepDown => {
+            TargetLeaderState::Follower => {
                 self.status.planned_mode = RunMode::Follower;
                 self.leadership_state.step_down().await;
                 self.status.effective_mode = RunMode::Follower;

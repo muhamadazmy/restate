@@ -9,16 +9,21 @@
 // by the Apache License, Version 2.0.
 
 use std::fmt::Display;
+use std::time::Duration;
 
 use tokio::time::Instant;
 use tracing::debug;
 
-use restate_core::network::{LazyConnection, NetworkSender};
+use restate_core::network::{LazyConnection, NetworkSender, ReplyRx};
 use restate_core::network::{SendToken, Swimlane, TrySendError};
 use restate_types::config::GossipOptions;
-use restate_types::net::node::Gossip;
+use restate_types::net::node::{ClusterStateReply, GetClusterState, Gossip};
 use restate_types::time::MillisSinceEpoch;
 use restate_types::{GenerationalNodeId, Version};
+
+/// The extra time on top of `gossip_suspect_interval` that we'll use for our own self->alive
+/// transition.
+const SELF_SUSPECT_OFFSET: Duration = Duration::from_millis(600);
 
 /// Node state transitions
 ///
@@ -159,6 +164,7 @@ impl Node {
     pub fn maybe_update_state(
         &mut self,
         opts: &GossipOptions,
+        my_node_id: GenerationalNodeId,
         force_alive: bool,
     ) -> Option<NodeState> {
         // A node is considered dead if any of the following is true:
@@ -178,6 +184,16 @@ impl Node {
 
         let now = Instant::now();
         let current_state = self.state;
+
+        let gossip_suspect_interval = if self.gen_node_id == my_node_id {
+            // for our own node, we delay the transition by 1s to alive to let others observe us
+            // as alive before we consider ourselves to be alive. This aids in synchronized
+            // startup of nodes to let admin nodes not select themselves prematurely before
+            // determining that there are other alive nodes in the cluster.
+            *opts.gossip_suspect_interval + SELF_SUSPECT_OFFSET
+        } else {
+            *opts.gossip_suspect_interval
+        };
 
         let next_state = match (current_state, target_state) {
             (_, NodeState::Suspect { .. }) => unreachable!(),
@@ -199,7 +215,7 @@ impl Node {
             ) => {
                 if force_alive {
                     NodeState::Alive
-                } else if suspected_at.elapsed() >= *opts.gossip_suspect_interval {
+                } else if suspected_at.elapsed() >= gossip_suspect_interval {
                     target_state
                 } else {
                     current
@@ -262,8 +278,9 @@ impl Node {
                 self.gen_node_id,
                 Swimlane::Gossip,
                 // this buffer is intentionally small to provide fast feedback to failure detector
-                // if we cannot connect.
-                1,
+                // if we cannot connect. It's big enough to carry the bring-up gossip message and a
+                // potential GetClusterState request.
+                2,
                 true,
             )
         })
@@ -279,5 +296,13 @@ impl Node {
         msg: Gossip,
     ) -> Result<SendToken, TrySendError<Gossip>> {
         self.connection(networking).try_send_unary(msg, None)
+    }
+
+    pub fn send_get_cluster_state(
+        &mut self,
+        networking: &impl NetworkSender,
+    ) -> Result<ReplyRx<ClusterStateReply>, TrySendError<GetClusterState>> {
+        self.connection(networking)
+            .try_send_rpc(GetClusterState, None)
     }
 }

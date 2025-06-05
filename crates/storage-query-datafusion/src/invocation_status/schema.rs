@@ -8,8 +8,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-#![allow(dead_code)]
-
 use crate::table_macro::*;
 
 use datafusion::arrow::datatypes::DataType;
@@ -102,6 +100,9 @@ define_table!(sys_invocation_status(
 
     /// Timestamp indicating when the invocation was scheduled, if ever.
     scheduled_at: TimestampMillisecond,
+
+    /// If the invocation was scheduled, indicates the timestamp when the invocation should start.
+    scheduled_start_at: TimestampMillisecond,
 
     /// Timestamp indicating when the invocation first transitioned to running, if ever.
     running_at: TimestampMillisecond,

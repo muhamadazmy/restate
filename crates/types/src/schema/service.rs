@@ -33,7 +33,9 @@ pub struct ServiceMetadata {
     /// Fully qualified name of the service
     pub name: String,
 
-    pub handlers: Vec<HandlerMetadata>,
+    #[serde_as(as = "restate_serde_util::MapAsVec")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<HandlerMetadata>"))]
+    pub handlers: HashMap<String, HandlerMetadata>,
 
     pub ty: ServiceType,
 
@@ -68,20 +70,38 @@ pub struct ServiceMetadata {
     /// # Idempotency retention
     ///
     /// The retention duration of idempotent requests for this service.
-    #[serde(with = "serde_with::As::<serde_with::DisplayFromStr>")]
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub idempotency_retention: humantime::Duration,
+    #[serde(
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub idempotency_retention: Option<Duration>,
 
     /// # Workflow completion retention
     ///
     /// The retention duration of workflows. Only available on workflow services.
     #[serde(
-        with = "serde_with::As::<Option<serde_with::DisplayFromStr>>",
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
         skip_serializing_if = "Option::is_none",
         default
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
-    pub workflow_completion_retention: Option<humantime::Duration>,
+    pub workflow_completion_retention: Option<Duration>,
+
+    /// # Journal retention
+    ///
+    /// The journal retention. When set, this applies to all requests to all handlers of this service.
+    ///
+    /// In case the request has an idempotency key, the `idempotency_retention` caps the maximum `journal_retention` time.
+    /// In case the request targets a workflow handler, the `workflow_completion_retention` caps the maximum `journal_retention` time.
+    #[serde(
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub journal_retention: Option<Duration>,
 
     /// # Inactivity timeout
     ///
@@ -96,12 +116,12 @@ pub struct ServiceMetadata {
     ///
     /// This overrides the default inactivity timeout set in invoker options.
     #[serde(
-        with = "serde_with::As::<Option<serde_with::DisplayFromStr>>",
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
         skip_serializing_if = "Option::is_none",
         default
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
-    pub inactivity_timeout: Option<humantime::Duration>,
+    pub inactivity_timeout: Option<Duration>,
 
     /// # Abort timeout
     ///
@@ -117,12 +137,27 @@ pub struct ServiceMetadata {
     ///
     /// This overrides the default abort timeout set in invoker options.
     #[serde(
-        with = "serde_with::As::<Option<serde_with::DisplayFromStr>>",
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
         skip_serializing_if = "Option::is_none",
         default
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
-    pub abort_timeout: Option<humantime::Duration>,
+    pub abort_timeout: Option<Duration>,
+
+    /// # Enable lazy state
+    ///
+    /// If true, lazy state will be enabled for all invocations to this service.
+    /// This is relevant only for Workflows and Virtual Objects.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub enable_lazy_state: Option<bool>,
+}
+
+impl restate_serde_util::MapAsVecItem for ServiceMetadata {
+    type Key = String;
+
+    fn key(&self) -> Self::Key {
+        self.name.clone()
+    }
 }
 
 // This type is used only for exposing the handler metadata, and not internally. See [ServiceAndHandlerType].
@@ -170,6 +205,90 @@ pub struct HandlerMetadata {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
 
+    /// # Idempotency retention
+    ///
+    /// The retention duration of idempotent requests for this service.
+    #[serde(
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub idempotency_retention: Option<Duration>,
+
+    /// # Workflow completion retention
+    ///
+    /// The retention duration of workflows. Only available on workflow services.
+    #[serde(
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub workflow_completion_retention: Option<Duration>,
+
+    /// # Journal retention
+    ///
+    /// The journal retention. When set, this applies to all requests to this handler.
+    ///
+    /// In case the request has an idempotency key, the `idempotency_retention` caps the maximum `journal_retention` time.
+    /// In case this handler is a workflow handler, the `workflow_completion_retention` caps the maximum `journal_retention` time.
+    #[serde(
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub journal_retention: Option<Duration>,
+
+    /// # Inactivity timeout
+    ///
+    /// This timer guards against stalled service/handler invocations. Once it expires,
+    /// Restate triggers a graceful termination by asking the service invocation to
+    /// suspend (which preserves intermediate progress).
+    ///
+    /// The 'abort timeout' is used to abort the invocation, in case it doesn't react to
+    /// the request to suspend.
+    ///
+    /// Can be configured using the [`humantime`](https://docs.rs/humantime/latest/humantime/fn.parse_duration.html) format.
+    ///
+    /// This overrides the default inactivity timeout set in invoker options.
+    #[serde(
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub inactivity_timeout: Option<Duration>,
+
+    /// # Abort timeout
+    ///
+    /// This timer guards against stalled service/handler invocations that are supposed to
+    /// terminate. The abort timeout is started after the 'inactivity timeout' has expired
+    /// and the service/handler invocation has been asked to gracefully terminate. Once the
+    /// timer expires, it will abort the service/handler invocation.
+    ///
+    /// This timer potentially **interrupts** user code. If the user code needs longer to
+    /// gracefully terminate, then this value needs to be set accordingly.
+    ///
+    /// Can be configured using the [`humantime`](https://docs.rs/humantime/latest/humantime/fn.parse_duration.html) format.
+    ///
+    /// This overrides the default abort timeout set in invoker options.
+    #[serde(
+        with = "serde_with::As::<Option<restate_serde_util::DurationString>>",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub abort_timeout: Option<Duration>,
+
+    /// # Enable lazy state
+    ///
+    /// If true, lazy state will be enabled for all invocations to this service.
+    /// This is relevant only for Workflows and Virtual Objects.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub enable_lazy_state: Option<bool>,
+
     /// # Human readable input description
     ///
     /// If empty, no schema was provided by the user at discovery time.
@@ -193,9 +312,31 @@ pub struct HandlerMetadata {
     pub output_json_schema: Option<serde_json::Value>,
 }
 
+impl restate_serde_util::MapAsVecItem for HandlerMetadata {
+    type Key = String;
+
+    fn key(&self) -> Self::Key {
+        self.name.clone()
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Default)]
+pub struct InvocationAttemptOptions {
+    pub abort_timeout: Option<Duration>,
+    pub inactivity_timeout: Option<Duration>,
+    pub enable_lazy_state: Option<bool>,
+}
+
 /// This API will return services registered by the user.
 pub trait ServiceMetadataResolver {
     fn resolve_latest_service(&self, service_name: impl AsRef<str>) -> Option<ServiceMetadata>;
+
+    fn resolve_invocation_attempt_options(
+        &self,
+        deployment_id: &DeploymentId,
+        service_name: impl AsRef<str>,
+        handler_name: impl AsRef<str>,
+    ) -> Option<InvocationAttemptOptions>;
 
     fn resolve_latest_service_openapi(
         &self,
@@ -210,6 +351,18 @@ pub trait ServiceMetadataResolver {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandlerSchemas {
     pub target_meta: InvocationTargetMetadata,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub idempotency_retention: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub workflow_completion_retention: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub journal_retention: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub inactivity_timeout: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub abort_timeout: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub enable_lazy_state: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -223,6 +376,12 @@ impl HandlerSchemas {
             ty: self.target_meta.target_ty.into(),
             documentation: self.documentation.clone(),
             metadata: self.metadata.clone(),
+            idempotency_retention: self.idempotency_retention,
+            workflow_completion_retention: self.workflow_completion_retention,
+            journal_retention: self.journal_retention,
+            inactivity_timeout: self.inactivity_timeout,
+            abort_timeout: self.abort_timeout,
+            enable_lazy_state: self.enable_lazy_state,
             input_description: self.target_meta.input_rules.to_string(),
             output_description: self.target_meta.output_rules.to_string(),
             input_json_schema: self.target_meta.input_rules.json_schema(),
@@ -237,10 +396,18 @@ pub struct ServiceSchemas {
     pub handlers: HashMap<String, HandlerSchemas>,
     pub ty: ServiceType,
     pub location: ServiceLocation,
-    pub idempotency_retention: Duration,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub idempotency_retention: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub workflow_completion_retention: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub journal_retention: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub inactivity_timeout: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub abort_timeout: Option<Duration>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub enable_lazy_state: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub documentation: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -258,7 +425,12 @@ impl ServiceSchemas {
             handlers: self
                 .handlers
                 .iter()
-                .map(|(h_name, h_schemas)| h_schemas.as_handler_metadata(h_name.clone()))
+                .map(|(h_name, h_schemas)| {
+                    (
+                        h_name.clone(),
+                        h_schemas.as_handler_metadata(h_name.clone()),
+                    )
+                })
                 .collect(),
             ty: self.ty,
             documentation: self.documentation.clone(),
@@ -266,10 +438,12 @@ impl ServiceSchemas {
             deployment_id: self.location.latest_deployment,
             revision: self.revision,
             public: self.location.public,
-            idempotency_retention: self.idempotency_retention.into(),
-            workflow_completion_retention: self.workflow_completion_retention.map(Into::into),
-            inactivity_timeout: self.inactivity_timeout.map(Into::into),
-            abort_timeout: self.abort_timeout.map(Into::into),
+            idempotency_retention: self.idempotency_retention,
+            workflow_completion_retention: self.workflow_completion_retention,
+            journal_retention: self.journal_retention,
+            inactivity_timeout: self.inactivity_timeout,
+            abort_timeout: self.abort_timeout,
+            enable_lazy_state: self.enable_lazy_state,
         }
     }
 
@@ -319,6 +493,30 @@ impl ServiceMetadataResolver for Schema {
         })
     }
 
+    fn resolve_invocation_attempt_options(
+        &self,
+        deployment_id: &DeploymentId,
+        service_name: impl AsRef<str>,
+        handler_name: impl AsRef<str>,
+    ) -> Option<InvocationAttemptOptions> {
+        let service_name = service_name.as_ref();
+        let handler_name = handler_name.as_ref();
+        self.find_existing_deployment_by_id(deployment_id)
+            .and_then(|(_, dep)| {
+                dep.services.get(service_name).and_then(|svc| {
+                    svc.handlers
+                        .get(handler_name)
+                        .map(|handler| InvocationAttemptOptions {
+                            abort_timeout: handler.abort_timeout.or(svc.abort_timeout),
+                            inactivity_timeout: handler
+                                .inactivity_timeout
+                                .or(svc.inactivity_timeout),
+                            enable_lazy_state: handler.enable_lazy_state.or(svc.enable_lazy_state),
+                        })
+                })
+            })
+    }
+
     fn resolve_latest_service_openapi(
         &self,
         service_name: impl AsRef<str>,
@@ -364,6 +562,15 @@ pub mod test_util {
             self.0.get(service_name.as_ref()).cloned()
         }
 
+        fn resolve_invocation_attempt_options(
+            &self,
+            _deployment_id: &DeploymentId,
+            _service_name: impl AsRef<str>,
+            _handler_name: impl AsRef<str>,
+        ) -> Option<InvocationAttemptOptions> {
+            None
+        }
+
         fn resolve_latest_service_openapi(&self, _service_name: impl AsRef<str>) -> Option<Value> {
             Some(Value::Null)
         }
@@ -389,15 +596,26 @@ pub mod test_util {
                 name: name.as_ref().to_string(),
                 handlers: handlers
                     .into_iter()
-                    .map(|s| HandlerMetadata {
-                        name: s.as_ref().to_string(),
-                        ty: None,
-                        documentation: None,
-                        metadata: Default::default(),
-                        input_description: "any".to_string(),
-                        output_description: "any".to_string(),
-                        input_json_schema: None,
-                        output_json_schema: None,
+                    .map(|s| {
+                        (
+                            s.as_ref().to_string(),
+                            HandlerMetadata {
+                                name: s.as_ref().to_string(),
+                                ty: None,
+                                documentation: None,
+                                metadata: Default::default(),
+                                idempotency_retention: None,
+                                workflow_completion_retention: None,
+                                journal_retention: None,
+                                inactivity_timeout: None,
+                                abort_timeout: None,
+                                enable_lazy_state: None,
+                                input_description: "any".to_string(),
+                                output_description: "any".to_string(),
+                                input_json_schema: None,
+                                output_json_schema: None,
+                            },
+                        )
                     })
                     .collect(),
                 ty: ServiceType::Service,
@@ -406,10 +624,12 @@ pub mod test_util {
                 deployment_id: Default::default(),
                 revision: 0,
                 public: true,
-                idempotency_retention: Duration::from_secs(60).into(),
+                idempotency_retention: Some(Duration::from_secs(60)),
                 workflow_completion_retention: None,
+                journal_retention: None,
                 inactivity_timeout: None,
                 abort_timeout: None,
+                enable_lazy_state: None,
             }
         }
 
@@ -421,15 +641,26 @@ pub mod test_util {
                 name: name.as_ref().to_string(),
                 handlers: handlers
                     .into_iter()
-                    .map(|s| HandlerMetadata {
-                        name: s.as_ref().to_string(),
-                        ty: Some(HandlerMetadataType::Exclusive),
-                        documentation: None,
-                        metadata: Default::default(),
-                        input_description: "any".to_string(),
-                        output_description: "any".to_string(),
-                        input_json_schema: None,
-                        output_json_schema: None,
+                    .map(|s| {
+                        (
+                            s.as_ref().to_string(),
+                            HandlerMetadata {
+                                name: s.as_ref().to_string(),
+                                ty: Some(HandlerMetadataType::Exclusive),
+                                documentation: None,
+                                metadata: Default::default(),
+                                idempotency_retention: None,
+                                workflow_completion_retention: None,
+                                journal_retention: None,
+                                inactivity_timeout: None,
+                                abort_timeout: None,
+                                enable_lazy_state: None,
+                                input_description: "any".to_string(),
+                                output_description: "any".to_string(),
+                                input_json_schema: None,
+                                output_json_schema: None,
+                            },
+                        )
                     })
                     .collect(),
                 ty: ServiceType::VirtualObject,
@@ -438,10 +669,12 @@ pub mod test_util {
                 deployment_id: Default::default(),
                 revision: 0,
                 public: true,
-                idempotency_retention: Duration::from_secs(60).into(),
+                idempotency_retention: Some(Duration::from_secs(60)),
                 workflow_completion_retention: None,
+                journal_retention: None,
                 inactivity_timeout: None,
                 abort_timeout: None,
+                enable_lazy_state: None,
             }
         }
     }

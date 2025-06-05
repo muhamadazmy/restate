@@ -28,9 +28,10 @@ use restate_types::journal_v2::lite::{
     CompleteAwakeableCommandLite, CompleteAwakeableResultLite, CompletePromiseCommandLite,
     EntryLite, GetEagerStateCommandLite, GetEagerStateKeysCommandLite,
     GetInvocationOutputCommandLite, GetLazyStateCommandLite, GetLazyStateKeysCommandLite,
-    GetPromiseCommandLite, InputCommandLite, NotificationLite, NotificationResultLite,
-    OneWayCallCommandLite, OutputCommandLite, OutputResultLite, PeekPromiseCommandLite,
-    RunCommandLite, SendSignalCommandLite, SetStateCommandLite, SignalResultLite, SleepCommandLite,
+    GetPromiseCommandLite, GetStateResultLite, InputCommandLite, NotificationLite,
+    NotificationResultLite, OneWayCallCommandLite, OutputCommandLite, OutputResultLite,
+    PeekPromiseCommandLite, RunCommandLite, SendSignalCommandLite, SetStateCommandLite,
+    SignalResultLite, SleepCommandLite,
 };
 use restate_types::journal_v2::raw::{
     CallOrSendMetadata, RawCommand, RawCommandSpecificMetadata, RawEntry, RawEntryHeader,
@@ -121,6 +122,7 @@ impl Encoder for ServiceProtocolV4Codec {
                         invocation_id,
                         span_context,
                         completion_retention_duration,
+                        journal_retention_duration,
                     },
                 invocation_id_completion_id,
                 result_completion_id,
@@ -149,6 +151,7 @@ impl Encoder for ServiceProtocolV4Codec {
                     invocation_target: invocation_target.clone(),
                     span_context: span_context.clone(),
                     completion_retention_duration: *completion_retention_duration,
+                    journal_retention_duration: *journal_retention_duration,
                 },
             ))
             .into(),
@@ -163,6 +166,7 @@ impl Encoder for ServiceProtocolV4Codec {
                         invocation_id,
                         span_context,
                         completion_retention_duration,
+                        journal_retention_duration,
                     },
                 invoke_time,
                 invocation_id_completion_id,
@@ -191,6 +195,7 @@ impl Encoder for ServiceProtocolV4Codec {
                     invocation_target: invocation_target.clone(),
                     span_context: span_context.clone(),
                     completion_retention_duration: *completion_retention_duration,
+                    journal_retention_duration: *journal_retention_duration,
                 },
             ))
             .into(),
@@ -695,6 +700,7 @@ impl Decoder for ServiceProtocolV4Codec {
                             headers: headers.into_iter().map(Into::into).collect(),
                             idempotency_key: idempotency_key.map(|s| s.into()),
                             completion_retention_duration: metadata.completion_retention_duration,
+                            journal_retention_duration: metadata.journal_retention_duration,
                         },
                         invocation_id_completion_id: invocation_id_notification_idx,
                         result_completion_id,
@@ -725,6 +731,7 @@ impl Decoder for ServiceProtocolV4Codec {
                             headers: headers.into_iter().map(Into::into).collect(),
                             idempotency_key: idempotency_key.map(|s| s.into()),
                             completion_retention_duration: metadata.completion_retention_duration,
+                            journal_retention_duration: metadata.journal_retention_duration,
                         },
                         invoke_time: invoke_time.into(),
                         invocation_id_completion_id: invocation_id_notification_idx,
@@ -1195,10 +1202,11 @@ impl Decoder for ServiceProtocolV4Codec {
                     .into()
                 }
                 CommandType::GetEagerState => {
-                    let proto::GetEagerStateCommandMessage { key, .. } =
+                    let proto::GetEagerStateCommandMessage { key, result, .. } =
                         decode_or_bail!(cmd.serialized_content(), GetEagerStateCommandMessage);
                     GetEagerStateCommandLite {
                         key: to_string_or_bail!(key).into(),
+                        result: get_or_bail!(result).try_into()?,
                     }
                     .into()
                 }
@@ -1421,6 +1429,19 @@ impl TryFrom<proto::get_eager_state_command_message::Result> for GetStateResult 
             proto::get_eager_state_command_message::Result::Value(value) => {
                 Self::Success(value.content)
             }
+            proto::get_eager_state_command_message::Result::Void(_) => Self::Void,
+        })
+    }
+}
+
+impl TryFrom<proto::get_eager_state_command_message::Result> for GetStateResultLite {
+    type Error = DecodingError;
+
+    fn try_from(
+        value: proto::get_eager_state_command_message::Result,
+    ) -> Result<Self, Self::Error> {
+        Ok(match value {
+            proto::get_eager_state_command_message::Result::Value(_) => Self::Success,
             proto::get_eager_state_command_message::Result::Void(_) => Self::Void,
         })
     }

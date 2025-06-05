@@ -8,17 +8,24 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::{fmt::Display, num::ParseIntError, ops::RangeInclusive, str::FromStr};
+use std::{
+    fmt::Display,
+    num::{NonZero, NonZeroU64, ParseIntError},
+    ops::RangeInclusive,
+    str::FromStr,
+};
 
 use bilrost::{Message, OwnedMessage};
 use bytes::BytesMut;
-use restate_encoding::{BilrostAs, BilrostDisplayFromStr};
 
-#[derive(Default, BilrostAs)]
-#[bilrost_as(BilrostDisplayFromStr)]
+use restate_encoding::{BilrostAs, RestateEncoding};
+
+#[derive(Default, PartialEq)]
 struct Stringer {
     inner: u64,
 }
+
+restate_encoding::bilrost_as_display_from_str!(Stringer);
 
 impl Display for Stringer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -60,6 +67,38 @@ impl From<AMessage> for NotAMessage {
             range: value.inner.map(|v| v.0..=v.1),
         }
     }
+}
+
+#[derive(bilrost::Message)]
+struct RangeMessage {
+    #[bilrost(tag(1), encoding(RestateEncoding))]
+    range: RangeInclusive<u64>,
+}
+
+#[test]
+fn test_range_encoding() {
+    let message = RangeMessage { range: 1..=10 };
+    let encoded = <RangeMessage as bilrost::Message>::encode_to_bytes(&message);
+
+    let decoded = <RangeMessage as bilrost::OwnedMessage>::decode(encoded).unwrap();
+    assert_eq!(message.range, decoded.range);
+}
+
+#[derive(bilrost::Message)]
+struct NonZeroMessage {
+    #[bilrost(tag(1), encoding(RestateEncoding))]
+    inner: Option<NonZero<u64>>,
+}
+
+#[test]
+fn test_nonzero_encoding() {
+    let message = NonZeroMessage {
+        inner: Some(NonZeroU64::new(10).unwrap()),
+    };
+    let encoded = <NonZeroMessage as bilrost::Message>::encode_to_bytes(&message);
+
+    let decoded = <NonZeroMessage as bilrost::OwnedMessage>::decode(encoded).unwrap();
+    assert_eq!(message.inner, decoded.inner);
 }
 
 #[test]

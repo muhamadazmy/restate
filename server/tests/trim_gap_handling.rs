@@ -14,6 +14,9 @@ use std::time::Duration;
 use enumset::enum_set;
 use futures_util::StreamExt;
 use googletest::{IntoTestResult, fail};
+use restate_core::protobuf::cluster_ctrl_svc::{
+    GetClusterConfigurationRequest, SetClusterConfigurationRequest,
+};
 use restate_types::logs::metadata::{NodeSetSize, ProviderConfiguration, ReplicatedLogletConfig};
 use restate_types::replication::ReplicationProperty;
 use tempfile::TempDir;
@@ -49,6 +52,7 @@ async fn fast_forward_over_trim_gap() -> googletest::Result<()> {
     base_config.bifrost.default_provider = Replicated;
     base_config.common.log_filter = "restate=debug,warn".to_owned();
     base_config.common.log_format = LogFormat::Compact;
+    base_config.common.log_disable_ansi_codes = true;
 
     let no_snapshot_repository_config = base_config.clone();
 
@@ -84,8 +88,7 @@ async fn fast_forward_over_trim_gap() -> googletest::Result<()> {
     cluster.nodes[0]
         .provision_cluster(
             None,
-            // We want to run partition processor on node-1 and a future node-2
-            ReplicationProperty::new_unchecked(2),
+            ReplicationProperty::new_unchecked(1),
             Some(ProviderConfiguration::Replicated(replicated_loglet_config)),
         )
         .await
@@ -185,11 +188,39 @@ async fn fast_forward_over_trim_gap() -> googletest::Result<()> {
 
     let mut trim_gap_encountered =
         worker_2.lines("Partition processor stopped due to a log trim gap, and no snapshot repository is configured".parse()?);
+    let mut joined_cluster = worker_2.lines("My Node ID is".parse()?);
 
-    info!("Waiting for partition processor to encounter log trim gap");
     let mut worker_2 = worker_2
         .start_clustered(cluster.base_dir(), cluster.cluster_name())
         .await?;
+
+    info!("Waiting until node-2 has joined the cluster");
+    assert!(
+        joined_cluster.next().await.is_some(),
+        "node-2 should join the cluster"
+    );
+
+    let mut current_cluster_config = client
+        .get_cluster_configuration(GetClusterConfigurationRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+
+    // reconfigure partition replication to include node-2
+    current_cluster_config
+        .cluster_configuration
+        .as_mut()
+        .unwrap()
+        .partition_replication = Some(ReplicationProperty::new_unchecked(2).into());
+
+    client
+        .set_cluster_configuration(SetClusterConfigurationRequest {
+            cluster_configuration: Some(current_cluster_config.cluster_configuration.unwrap()),
+        })
+        .await
+        .unwrap();
+
+    info!("Waiting for partition processor to encounter log trim gap");
     assert!(
         trim_gap_encountered.next().await.is_some(),
         "Trim gap was never encountered"
@@ -221,6 +252,7 @@ async fn fast_forward_over_trim_gap() -> googletest::Result<()> {
     let mut worker_2 = worker_2
         .start_clustered(cluster.base_dir(), cluster.cluster_name())
         .await?;
+
     assert!(
         worker_2_imported_snapshot.next().await.is_some(),
         "Importing partition store snapshot never happened"

@@ -10,7 +10,7 @@
 
 use std::ops::RangeInclusive;
 
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::error::{SendError, TrySendError};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -23,24 +23,17 @@ use restate_types::identifiers::{LeaderEpoch, PartitionKey};
 use restate_types::net::partition_processor::PartitionLeaderService;
 use restate_types::time::MillisSinceEpoch;
 
-use crate::partition::PartitionProcessorControlCommand;
+use crate::partition::TargetLeaderState;
 
 pub type LeaderEpochToken = Ulid;
 
 #[derive(Debug, thiserror::Error)]
-pub enum ProcessorStateError {
-    #[error("partition processor is busy")]
-    Busy,
-    #[error("partition processor is shutting down")]
-    ShuttingDown,
-}
+#[error("partition processor is shutting down")]
+pub struct ProcessorShutdownError;
 
-impl<T> From<TrySendError<T>> for ProcessorStateError {
-    fn from(value: TrySendError<T>) -> Self {
-        match value {
-            TrySendError::Full(_) => ProcessorStateError::Busy,
-            TrySendError::Closed(_) => ProcessorStateError::ShuttingDown,
-        }
+impl From<SendError<TargetLeaderState>> for ProcessorShutdownError {
+    fn from(_value: SendError<TargetLeaderState>) -> Self {
+        ProcessorShutdownError
     }
 }
 
@@ -62,7 +55,6 @@ pub enum ProcessorState {
     },
     Stopping {
         processor: Option<StartedProcessor>,
-        restart_as: Option<RunMode>,
     },
 }
 
@@ -74,7 +66,6 @@ impl ProcessorState {
     pub fn stopping(processor: StartedProcessor) -> Self {
         Self::Stopping {
             processor: Some(processor),
-            restart_as: None,
         }
     }
 
@@ -89,26 +80,22 @@ impl ProcessorState {
         match self {
             ProcessorState::Starting { .. } => {
                 // let's see whether we can stop a starting PP eagerly
-                *self = ProcessorState::Stopping {
-                    restart_as: None,
-                    processor: None,
-                }
+                *self = ProcessorState::Stopping { processor: None }
             }
             ProcessorState::Started { processor, .. } => {
                 let processor = processor.take().expect("must be some");
                 processor.cancel();
                 *self = ProcessorState::Stopping {
-                    restart_as: None,
                     processor: Some(processor),
                 };
             }
-            ProcessorState::Stopping { restart_as, .. } => {
-                *restart_as = None;
+            ProcessorState::Stopping { .. } => {
+                // already stopping
             }
         };
     }
 
-    pub fn run_as_follower(&mut self) -> Result<(), ProcessorStateError> {
+    pub fn run_as_follower(&mut self) {
         match self {
             ProcessorState::Starting {
                 target_run_mode, ..
@@ -121,7 +108,7 @@ impl ProcessorState {
             } => {
                 match leader_state {
                     LeaderState::Leader(_) => {
-                        processor.as_ref().expect("must be some").step_down()?;
+                        processor.as_ref().expect("must be some").step_down();
                         *leader_state = LeaderState::Follower;
                     }
                     LeaderState::AwaitingLeaderEpoch(_) => {
@@ -132,12 +119,10 @@ impl ProcessorState {
                     }
                 }
             }
-            ProcessorState::Stopping { restart_as, .. } => {
-                *restart_as = Some(RunMode::Follower);
+            ProcessorState::Stopping { .. } => {
+                // we first need to stop before we check whether we should run again
             }
         }
-
-        Ok(())
     }
 
     /// Returns a new [`LeaderEpochToken`] if a new leader epoch should be obtained.
@@ -154,14 +139,14 @@ impl ProcessorState {
             } => {
                 match leader_state {
                     LeaderState::Leader(leader_epoch) => {
-                        // our processor that is supposed to be the leader has observed a newer leader epoch
                         if *leader_epoch
                             < processor
                                 .as_ref()
                                 .expect("must be some")
                                 .last_observed_leader_epoch()
-                                .unwrap_or(LeaderEpoch::INITIAL)
+                                .unwrap_or(LeaderEpoch::INVALID)
                         {
+                            // our processor, which is supposed to be the leader, has observed a newer leader epoch --> try to obtain a higher one
                             debug!(old_leader_epoch = %leader_epoch, "Need a higher leader epoch to retake leadership.");
                             let leader_epoch_token = LeaderEpochToken::new();
                             *leader_state = LeaderState::AwaitingLeaderEpoch(leader_epoch_token);
@@ -184,9 +169,8 @@ impl ProcessorState {
                     }
                 }
             }
-            ProcessorState::Stopping { restart_as, .. } => {
-                debug!("Restarting partition processor as leader.");
-                *restart_as = Some(RunMode::Leader);
+            ProcessorState::Stopping { .. } => {
+                // we first need to stop before we check whether we should run again
                 None
             }
         }
@@ -196,7 +180,7 @@ impl ProcessorState {
         &mut self,
         leader_epoch: LeaderEpoch,
         leader_epoch_token: LeaderEpochToken,
-    ) -> Result<(), ProcessorStateError> {
+    ) {
         match self {
             ProcessorState::Starting { .. } => {
                 debug!(
@@ -212,12 +196,23 @@ impl ProcessorState {
                 }
                 LeaderState::AwaitingLeaderEpoch(token) => {
                     if *token == leader_epoch_token {
-                        processor
-                            .as_ref()
-                            .expect("must be some")
-                            .run_for_leader(leader_epoch)?;
-                        debug!(%leader_epoch, "Instruct partition processor to run as leader.");
-                        *leader_state = LeaderState::Leader(leader_epoch);
+                        if leader_epoch
+                            > processor
+                                .as_ref()
+                                .expect("must be some")
+                                .last_observed_leader_epoch()
+                                .unwrap_or(LeaderEpoch::INVALID)
+                        {
+                            processor
+                                .as_ref()
+                                .expect("must be some")
+                                .run_for_leader(leader_epoch);
+                            debug!(%leader_epoch, "Instruct partition processor to run as leader.");
+                            *leader_state = LeaderState::Leader(leader_epoch);
+                        } else {
+                            debug!(%leader_epoch, "Ignoring leader epoch since there is already a newer known leader epoch.");
+                            *leader_state = LeaderState::Follower;
+                        }
                     } else {
                         debug!(
                             "Received leader epoch token does not match the expected token. Ignoring."
@@ -232,8 +227,6 @@ impl ProcessorState {
                 debug!("Received leader epoch while stopping partition processor. Ignoring.");
             }
         }
-
-        Ok(())
     }
 
     pub fn is_valid_leader_epoch_token(&self, leader_epoch_token: LeaderEpochToken) -> bool {
@@ -267,9 +260,26 @@ impl ProcessorState {
                     .borrow()
                     .clone();
 
-                // update the planned mode based on the current leader state
+                // The reason why we override the planned mode here is that we want to report it as
+                // soon as we start getting a leader epoch for a candidate. Once the leader epoch
+                // is obtained, we want to keep reporting the planned mode as leader until the pp
+                // tells us differently by reporting a higher observed leader epoch.
                 status.planned_mode = match leader_state {
-                    LeaderState::Leader(_) => RunMode::Leader,
+                    LeaderState::Leader(leader_epoch) => {
+                        if *leader_epoch
+                            >= status
+                                .last_observed_leader_epoch
+                                .unwrap_or(LeaderEpoch::INVALID)
+                        {
+                            // we still have a chance to become leader
+                            RunMode::Leader
+                        } else {
+                            // with our current leader epoch, we can't become leader anymore
+                            RunMode::Follower
+                        }
+                    }
+                    // we don't know yet which leader epoch we will get from the metadata store -->
+                    // assume it will be higher than the current one
                     LeaderState::AwaitingLeaderEpoch(_) => RunMode::Leader,
                     LeaderState::Follower => RunMode::Follower,
                 };
@@ -320,7 +330,7 @@ pub struct StartedProcessor {
     cancellation_token: CancellationToken,
     _created_at: MillisSinceEpoch,
     key_range: RangeInclusive<PartitionKey>,
-    control_tx: mpsc::Sender<PartitionProcessorControlCommand>,
+    control_tx: watch::Sender<TargetLeaderState>,
     status_reader: ChannelStatusReader,
     network_svc_tx: mpsc::Sender<ServiceMessage<PartitionLeaderService>>,
     watch_rx: watch::Receiver<PartitionProcessorStatus>,
@@ -330,7 +340,7 @@ impl StartedProcessor {
     pub fn new(
         cancellation_token: CancellationToken,
         key_range: RangeInclusive<PartitionKey>,
-        control_tx: mpsc::Sender<PartitionProcessorControlCommand>,
+        control_tx: watch::Sender<TargetLeaderState>,
         status_reader: ChannelStatusReader,
         network_svc_tx: mpsc::Sender<ServiceMessage<PartitionLeaderService>>,
         watch_rx: watch::Receiver<PartitionProcessorStatus>,
@@ -354,17 +364,26 @@ impl StartedProcessor {
         self.watch_rx.borrow().last_observed_leader_epoch
     }
 
-    pub fn step_down(&self) -> Result<(), TrySendError<PartitionProcessorControlCommand>> {
-        self.control_tx
-            .try_send(PartitionProcessorControlCommand::StepDown)
+    pub fn step_down(&self) {
+        self.control_tx.send_if_modified(|target_state| {
+            if *target_state != TargetLeaderState::Follower {
+                *target_state = TargetLeaderState::Follower;
+                true
+            } else {
+                false
+            }
+        });
     }
 
-    pub fn run_for_leader(
-        &self,
-        leader_epoch: LeaderEpoch,
-    ) -> Result<(), TrySendError<PartitionProcessorControlCommand>> {
-        self.control_tx
-            .try_send(PartitionProcessorControlCommand::RunForLeader(leader_epoch))
+    pub fn run_for_leader(&self, leader_epoch: LeaderEpoch) {
+        self.control_tx.send_if_modified(|target_state| {
+            if *target_state != TargetLeaderState::Leader(leader_epoch) {
+                *target_state = TargetLeaderState::Leader(leader_epoch);
+                true
+            } else {
+                false
+            }
+        });
     }
 
     #[inline]

@@ -67,11 +67,10 @@ pub struct AdminOptions {
     /// can be disabled by setting it to "0s".
     ///
     /// Note that this is only the interval at which logs are checked, and does not guarantee that
-    /// trim will be performed. To safely trim the log, the log records must be known to be
-    /// persisted by the corresponding partition processor(s). For single server deployments, use
-    /// the `persist-lsn-*` settings in `worker.storage`. In distributed deployments, this is
-    /// accomplished by configuring an external snapshot destination - see `worker.snapshots` for
-    /// more.
+    /// trim will be performed. The conditions for safely trim the log vary depending on the
+    /// deployment. For single nodes, the log records must be durably persisted to disk. In
+    /// distributed deployments, automatic trimming requires an external snapshot destination - see
+    /// `worker.snapshots` for more.
     #[serde_as(as = "serde_with::DisplayFromStr")]
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     log_trim_check_interval: humantime::Duration,
@@ -80,14 +79,6 @@ pub struct AdminOptions {
     ///
     /// This configuration option is deprecated and ignored in Restate >= 1.2.
     pub log_trim_threshold: Option<u64>,
-
-    /// # Log Tail Update interval
-    ///
-    /// Controls the interval at which cluster controller tries to refind the tails of logs. This
-    /// is a safety-net check in case of a concurrent cluster controller crash.
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub log_tail_update_interval: humantime::Duration,
 
     /// # Default partition replication factor
     ///
@@ -111,6 +102,10 @@ pub struct AdminOptions {
 
     #[cfg(any(test, feature = "test-util"))]
     pub disable_cluster_controller: bool,
+
+    #[serde_as(as = "Option<restate_serde_util::DurationString>")]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub experimental_feature_force_journal_retention: Option<Duration>,
 }
 
 impl AdminOptions {
@@ -181,7 +176,7 @@ impl Default for AdminOptions {
             #[cfg(any(test, feature = "test-util"))]
             disable_cluster_controller: false,
             disable_web_ui: false,
-            log_tail_update_interval: Duration::from_secs(5 * 60).into(),
+            experimental_feature_force_journal_retention: None,
         }
     }
 }
@@ -225,11 +220,12 @@ impl From<AdminOptionsShadow> for AdminOptions {
             heartbeat_interval: value.heartbeat_interval,
             log_trim_check_interval,
             log_trim_threshold: value.log_trim_threshold,
-            log_tail_update_interval: value.log_tail_update_interval,
             default_partition_replication: partition_replication,
             disable_web_ui: value.disable_web_ui,
             #[cfg(any(test, feature = "test-util"))]
             disable_cluster_controller: value.disable_cluster_controller,
+            experimental_feature_force_journal_retention: value
+                .experimental_feature_force_journal_retention,
         }
     }
 }
@@ -262,9 +258,6 @@ struct AdminOptionsShadow {
 
     log_trim_threshold: Option<u64>,
 
-    #[serde_as(as = "serde_with::DisplayFromStr")]
-    log_tail_update_interval: humantime::Duration,
-
     #[serde_as(
         as = "Option<serde_with::PickFirst<(_, PartitionReplicationFromReplicationProperty)>>"
     )]
@@ -274,6 +267,9 @@ struct AdminOptionsShadow {
 
     #[cfg(any(test, feature = "test-util"))]
     disable_cluster_controller: bool,
+
+    #[serde_as(as = "Option<restate_serde_util::DurationString>")]
+    pub experimental_feature_force_journal_retention: Option<Duration>,
 }
 
 struct PartitionReplicationFromReplicationProperty;

@@ -28,13 +28,14 @@ use restate_types::identifiers::{PartitionId, PartitionKey};
 use restate_types::live::Live;
 use restate_types::live::LiveLoadExt;
 use restate_types::logs::Lsn;
+use restate_types::partitions::state::PartitionReplicaSetStates;
 use restate_types::schema::Schema;
 
 use crate::PartitionProcessorBuilder;
 use crate::invoker_integration::EntryEnricher;
-use crate::partition::ProcessorError;
 use crate::partition::invoker_storage_reader::InvokerStorageReader;
 use crate::partition::snapshots::SnapshotRepository;
+use crate::partition::{ProcessorError, TargetLeaderState};
 use crate::partition_processor_manager::processor_state::StartedProcessor;
 
 pub struct SpawnPartitionProcessorTask {
@@ -43,6 +44,7 @@ pub struct SpawnPartitionProcessorTask {
     key_range: RangeInclusive<PartitionKey>,
     configuration: Live<Configuration>,
     bifrost: Bifrost,
+    replica_set_states: PartitionReplicaSetStates,
     partition_store_manager: PartitionStoreManager,
     snapshot_repository: Option<SnapshotRepository>,
     fast_forward_lsn: Option<Lsn>,
@@ -56,6 +58,7 @@ impl SpawnPartitionProcessorTask {
         key_range: RangeInclusive<PartitionKey>,
         configuration: Live<Configuration>,
         bifrost: Bifrost,
+        replica_set_states: PartitionReplicaSetStates,
         partition_store_manager: PartitionStoreManager,
         snapshot_repository: Option<SnapshotRepository>,
         fast_forward_lsn: Option<Lsn>,
@@ -66,12 +69,14 @@ impl SpawnPartitionProcessorTask {
             key_range,
             configuration,
             bifrost,
+            replica_set_states,
             partition_store_manager,
             snapshot_repository,
             fast_forward_lsn,
         }
     }
 
+    /// Start the spawn processor task. The task is delayed by the given `delay`.
     #[instrument(
         level = "error",
         skip_all,
@@ -81,6 +86,7 @@ impl SpawnPartitionProcessorTask {
     )]
     pub fn run(
         self,
+        delay: Option<Duration>,
     ) -> anyhow::Result<(
         StartedProcessor,
         RuntimeTaskHandle<Result<(), ProcessorError>>,
@@ -91,6 +97,7 @@ impl SpawnPartitionProcessorTask {
             key_range,
             configuration,
             bifrost,
+            replica_set_states,
             partition_store_manager,
             snapshot_repository,
             fast_forward_lsn,
@@ -111,7 +118,7 @@ impl SpawnPartitionProcessorTask {
 
         let status_reader = invoker.status_reader();
 
-        let (control_tx, control_rx) = mpsc::channel(2);
+        let (control_tx, control_rx) = watch::channel(TargetLeaderState::Follower);
         let (net_tx, net_rx) = mpsc::channel(128);
         let status = PartitionProcessorStatus::new();
         let (watch_tx, watch_rx) = watch::channel(status.clone());
@@ -141,6 +148,10 @@ impl SpawnPartitionProcessorTask {
                 let key_range = key_range.clone();
 
                 move || async move {
+                    if let Some(delay) = delay {
+                        tokio::time::sleep(delay).await;
+                    }
+
                     let partition_store = open_partition_store(
                         partition_id,
                         partition_store_manager,
@@ -161,7 +172,7 @@ impl SpawnPartitionProcessorTask {
                     .map_err(|e| ProcessorError::from(anyhow::anyhow!(e)))?;
 
                     pp_builder
-                        .build(bifrost, partition_store)
+                        .build(bifrost, partition_store, replica_set_states)
                         .await
                         .map_err(ProcessorError::from)?
                         .run()

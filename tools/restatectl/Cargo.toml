@@ -32,6 +32,7 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 restate-cli-util = { workspace = true }
 restate-core = { workspace = true }
+restate-futures-util = { workspace = true }
 restate-log-server-grpc = { workspace = true, features = ["grpc-client"] }
 restate-metadata-server-grpc = { workspace = true, features = ["grpc-client"] }
 restate-metadata-store = { workspace = true, features = ["grpc-client"] }
@@ -46,6 +47,7 @@ futures-util = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 anyhow = { workspace = true }
+assert2 = {workspace = true }
 arrow = { workspace = true, features = ["ipc"] }
 bytes = { workspace = true }
 bytesize = { workspace = true }
@@ -67,6 +69,7 @@ rand = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"]}
 serde = { workspace = true }
 serde_json = { workspace = true }
+test-log = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true, features = ["transport", "prost", "zstd", "gzip"] }

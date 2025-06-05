@@ -18,9 +18,10 @@ use tracing::{debug, error, warn};
 use restate_core::cluster_state::ClusterStateUpdater;
 use restate_core::network::{ConnectThrottle, NetworkSender};
 use restate_types::config::GossipOptions;
-use restate_types::net::node::{Gossip, GossipFlags};
+use restate_types::identifiers::PartitionId;
+use restate_types::net::node::{ClusterStateReply, Gossip, GossipFlags};
 use restate_types::nodes_config::NodesConfiguration;
-use restate_types::partitions::state::PartitionReplicaSetStates;
+use restate_types::partitions::state::{MembershipState, PartitionReplicaSetStates};
 use restate_types::time::MillisSinceEpoch;
 use restate_types::{GenerationalNodeId, PlainNodeId, Version, net};
 
@@ -53,9 +54,9 @@ pub enum Error {
 /// rules:
 /// 1. If the node's plain id is already recognized by the current configuration, we can only
 ///    accept the gossip message if the generation is the same or higher.
-/// 2. If the gossip message is coming from a node that's been tombstoned in the current
+/// 2. If the gossip message is coming from a node that's been tombstone-ed in the current
 ///    configuration, we ignore the gossip message.
-/// 3. For those unknown nodes, we record the the nodes configuration version that arrived with their message
+/// 3. For those unknown nodes, we record the nodes configuration version that arrived with their message
 ///    and we'll use that to determine if we should keep this node or not when we observe nodes
 ///    configuration updates. The scenario we want to avoid is that we have a node that we learned
 ///    about its liveness through gossip, and then we receive a nodes configuration update that
@@ -127,6 +128,16 @@ impl FdState {
         self.node_states
             .iter_mut()
             .filter_map(move |(node_id, node)| (my_node != *node_id).then_some((*node_id, node)))
+    }
+
+    pub fn all_node_states(&self) -> impl Iterator<Item = (GenerationalNodeId, NodeState)> {
+        self.node_states
+            .values()
+            .map(|node| (node.gen_node_id, node.state))
+    }
+
+    pub fn partitions(&self) -> impl Iterator<Item = (PartitionId, MembershipState)> {
+        self.replica_set_states.iter()
     }
 
     pub fn refresh_nodes_config(&mut self, nodes_config: &NodesConfiguration) -> Result<(), Error> {
@@ -238,9 +249,9 @@ impl FdState {
             .filter_map(|node| {
                 let maybe_updated_state =
                     if node.gen_node_id.as_plain() == self.my_node_id.as_plain() {
-                        node.maybe_update_state(opts, is_standalone)
+                        node.maybe_update_state(opts, self.my_node_id, is_standalone)
                     } else {
-                        node.maybe_update_state(opts, false)
+                        node.maybe_update_state(opts, self.my_node_id, false)
                     };
 
                 match maybe_updated_state {
@@ -268,6 +279,38 @@ impl FdState {
         }
     }
 
+    pub fn update_from_cluster_state_message(
+        &mut self,
+        opts: &GossipOptions,
+        cs_reply: ClusterStateReply,
+    ) {
+        for incoming_node in cs_reply.nodes {
+            if incoming_node.node_id == self.my_node_id {
+                // We already know our own state, no need to update it.
+                continue;
+            }
+
+            if incoming_node.state == net::node::NodeState::Alive {
+                let node = self.get_node_or_insert(incoming_node.node_id);
+                // reset the age of the node if it's alive
+                node.gossip_age = 0;
+                node.state = NodeState::Alive;
+                self.cs_updater
+                    .upsert_node_state(incoming_node.node_id, NodeState::Alive.into());
+            }
+        }
+
+        for partition in cs_reply.partitions {
+            self.replica_set_states.note_observed_membership(
+                partition.id,
+                partition.current_leader,
+                &partition.observed_current_membership,
+                &partition.observed_next_membership,
+            );
+        }
+        debug!("{}", self.dump_as_string(opts));
+    }
+
     pub fn update_from_gossip_message(
         &mut self,
         opts: &GossipOptions,
@@ -281,6 +324,7 @@ impl FdState {
         // Depending on which flags are set, this could carry info about other nodes
         // or a special message from the sender itself.
         if msg.flags.intersects(GossipFlags::Special) {
+            let my_node_id = self.my_node_id;
             let sender_node = self.get_node_or_insert(sender_id);
             let new_state = if msg.flags.intersects(GossipFlags::BringUp) {
                 // Note that we do not touch the age in this case, we are not ready to consider this as a
@@ -293,7 +337,7 @@ impl FdState {
                 // mark the sender alive
                 sender_node.maybe_reset(sender_id, sender_nc_version, msg.instance_ts);
                 sender_node.gossip_age = 0;
-                sender_node.maybe_update_state(opts, false)
+                sender_node.maybe_update_state(opts, my_node_id, false)
             } else if is_sender_in_failover {
                 // sender is failing over
                 sender_node.maybe_reset(sender_id, sender_nc_version, msg.instance_ts);
@@ -310,7 +354,7 @@ impl FdState {
                     sender_node.gossip_age
                 };
                 sender_node.in_failover = true;
-                sender_node.maybe_update_state(opts, false)
+                sender_node.maybe_update_state(opts, my_node_id, false)
             } else {
                 // for more flags in the future
                 None
@@ -382,6 +426,7 @@ impl FdState {
             for partition in msg.partitions.into_iter() {
                 self.replica_set_states.note_observed_membership(
                     partition.id,
+                    partition.current_leader,
                     &partition.observed_current_membership,
                     &partition.observed_next_membership,
                 );
@@ -416,8 +461,7 @@ impl FdState {
         gauge!(GOSSIP_NODES, "state" => STATE_FAILING_OVER).set(num_failing_over);
     }
 
-    // Used for debugging purposes only
-    #[allow(dead_code)]
+    // Used for debugging purposes
     pub fn dump_as_string(&self, opts: &GossipOptions) -> String {
         // display state in a nice table format
         let mut result = String::new();
@@ -438,6 +482,32 @@ impl FdState {
                 node.gossip_age,
                 node.state,
                 node.instance_ts.as_u64(),
+            ));
+        }
+
+        result.push_str("Partitions\n");
+
+        // sorted by key
+        for (partition_id, partition) in self
+            .partitions()
+            .sorted_by_cached_key(|(partition_id, _)| **partition_id)
+        {
+            let leadership = partition.current_leader();
+            result.push_str(&format!(
+                "{}\t({}{})\t\t{}\t{}\n",
+                partition_id,
+                leadership.current_leader_epoch,
+                if leadership.current_leader.is_valid() {
+                    format!(" @ {}", leadership.current_leader)
+                } else {
+                    String::new()
+                },
+                partition.observed_current_membership.version,
+                if let Some(next) = partition.observed_next_membership.as_ref() {
+                    format!("=> {}", next.version)
+                } else {
+                    String::new()
+                },
             ));
         }
         result
@@ -511,6 +581,7 @@ impl FdState {
             .iter()
             .map(|(id, state)| net::node::PartitionReplicaSet {
                 id,
+                current_leader: state.current_leader(),
                 observed_current_membership: state.observed_current_membership,
                 observed_next_membership: state.observed_next_membership,
             })
@@ -519,7 +590,11 @@ impl FdState {
 
     pub fn update_my_node_state(&mut self, opts: &GossipOptions) {
         let is_standalone = self.node_states.len() == 1;
-        if let Some(new_state) = self.my_node_mut().maybe_update_state(opts, is_standalone) {
+        let my_node_id = self.my_node_id;
+        if let Some(new_state) =
+            self.my_node_mut()
+                .maybe_update_state(opts, my_node_id, is_standalone)
+        {
             self.cs_updater
                 .upsert_node_state(self.my_node_id, new_state.into());
         }
@@ -601,6 +676,14 @@ impl FdState {
         self.node_states
             .entry(node_id.as_plain())
             .or_insert_with(|| Node::new(node_id))
+    }
+
+    pub fn am_i_alive(&self) -> bool {
+        self.node_states
+            .get(&self.my_node_id.as_plain())
+            .expect("my node must be in FD")
+            .state
+            == NodeState::Alive
     }
 
     pub fn node_mut(&mut self, node_id: &PlainNodeId) -> Option<&mut Node> {

@@ -8,11 +8,13 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::{Add, Deref};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::OptionFuture;
+use futures::never::Never;
 use itertools::Itertools;
 use tokio::sync::watch;
 use tokio::time;
@@ -21,21 +23,22 @@ use tracing::{debug, info, instrument, trace, warn};
 
 use restate_bifrost::Bifrost;
 use restate_core::network::TransportConnect;
-use restate_core::{Metadata, my_node_id};
+use restate_core::{Metadata, ShutdownError, TaskCenter, TaskKind, my_node_id};
+use restate_metadata_store::MetadataStoreClient;
 use restate_types::cluster::cluster_state::{AliveNode, ClusterState, PartitionProcessorStatus};
 use restate_types::config::{AdminOptions, Configuration};
+use restate_types::epoch::EpochMetadata;
 use restate_types::identifiers::PartitionId;
 use restate_types::logs::{LogId, Lsn, SequenceNumber};
+use restate_types::metadata_store::keys::partition_processor_epoch_key;
 use restate_types::net::metadata::MetadataKind;
+use restate_types::nodes_config::NodesConfiguration;
 use restate_types::retries::with_jitter;
 use restate_types::{GenerationalNodeId, Version};
 
 use crate::cluster_controller::cluster_state_refresher::ClusterStateWatcher;
-use crate::cluster_controller::logs_controller::{
-    LogsBasedPartitionProcessorPlacementHints, LogsController,
-};
 use crate::cluster_controller::observed_cluster_state::ObservedClusterState;
-use crate::cluster_controller::scheduler::{PartitionTableNodeSetSelectorHints, Scheduler};
+use crate::cluster_controller::scheduler::Scheduler;
 use crate::cluster_controller::service::Service;
 
 pub enum ClusterControllerState<T> {
@@ -47,9 +50,13 @@ impl<T> ClusterControllerState<T>
 where
     T: TransportConnect,
 {
-    pub fn update(&mut self, service: &Service<T>, cs: &restate_core::cluster_state::ClusterState) {
+    pub fn update(
+        &mut self,
+        service: &Service<T>,
+        nodes_config: &NodesConfiguration,
+        cs: &restate_core::cluster_state::ClusterState,
+    ) {
         let maybe_leader = {
-            let nodes_config = Metadata::with_current(|m| m.nodes_config_ref());
             let admin_nodes: Vec<_> = nodes_config
                 .get_admin_nodes()
                 .map(|c| c.current_generation)
@@ -116,12 +123,13 @@ where
     pub async fn on_observed_cluster_state(
         &mut self,
         observed_cluster_state: &ObservedClusterState,
+        nodes_config: &NodesConfiguration,
     ) -> anyhow::Result<()> {
         match self {
             Self::Follower => Ok(()),
             Self::Leader(leader) => {
                 leader
-                    .on_observed_cluster_state(observed_cluster_state)
+                    .on_observed_cluster_state(observed_cluster_state, nodes_config)
                     .await
             }
         }
@@ -140,20 +148,17 @@ where
 #[derive(Debug)]
 pub enum LeaderEvent {
     TrimLogs,
-    LogsUpdate,
     PartitionTableUpdate,
 }
 
 pub struct Leader<T> {
     bifrost: Bifrost,
-    logs_watcher: watch::Receiver<Version>,
     partition_table_watcher: watch::Receiver<Version>,
-    find_logs_tail_interval: Interval,
-    logs_controller: LogsController,
     scheduler: Scheduler<T>,
     cluster_state_watcher: ClusterStateWatcher,
     log_trim_check_interval: Option<Interval>,
     snapshots_repository_configured: bool,
+    epoch_metadata_rx: tokio::sync::mpsc::Receiver<HashMap<PartitionId, EpochMetadata>>,
 }
 
 impl<T> Leader<T>
@@ -163,31 +168,33 @@ where
     fn from_service(service: &Service<T>) -> Leader<T> {
         let configuration = service.configuration.pinned();
 
-        let scheduler = Scheduler::new(service.metadata_writer.clone(), service.networking.clone());
-
-        let logs_controller =
-            LogsController::new(service.bifrost.clone(), service.metadata_writer.clone());
+        let scheduler = Scheduler::new(
+            service.metadata_writer.clone(),
+            service.networking.clone(),
+            service.replica_set_states.clone(),
+        );
 
         let log_trim_check_interval = create_log_trim_check_interval(&configuration.admin);
 
-        let mut find_logs_tail_interval =
-            time::interval(configuration.admin.log_tail_update_interval.into());
-        find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let (epoch_metadata_tx, epoch_metadata_rx) = tokio::sync::mpsc::channel(1);
+
+        TaskCenter::spawn_unmanaged(TaskKind::Background, "epoch-metadata-fetch", {
+            let metadata_store_client = service.metadata_writer.raw_metadata_store_client().clone();
+
+            async move { Self::fetch_epoch_metadata(metadata_store_client, epoch_metadata_tx).await }
+        }).expect("failed to spawn epoch metadata fetch task");
 
         let metadata = Metadata::current();
         let mut leader = Self {
             bifrost: service.bifrost.clone(),
-            logs_watcher: metadata.watch(MetadataKind::Logs),
             partition_table_watcher: metadata.watch(MetadataKind::PartitionTable),
-            find_logs_tail_interval,
-            logs_controller,
             scheduler,
             cluster_state_watcher: service.cluster_state_refresher.cluster_state_watcher(),
             log_trim_check_interval,
             snapshots_repository_configured: configuration.worker.snapshots.destination.is_some(),
+            epoch_metadata_rx,
         };
 
-        leader.logs_watcher.mark_changed();
         leader.partition_table_watcher.mark_changed();
 
         leader
@@ -196,22 +203,10 @@ where
     async fn on_observed_cluster_state(
         &mut self,
         observed_cluster_state: &ObservedClusterState,
+        nodes_config: &NodesConfiguration,
     ) -> anyhow::Result<()> {
-        let nodes_config = Metadata::with_current(|m| m.nodes_config_ref());
-        self.logs_controller.on_observed_cluster_state_update(
-            &nodes_config,
-            observed_cluster_state,
-            Metadata::with_current(|m| {
-                PartitionTableNodeSetSelectorHints::from(m.partition_table_snapshot())
-            }),
-        )?;
-
         self.scheduler
-            .on_observed_cluster_state(
-                observed_cluster_state,
-                &nodes_config,
-                LogsBasedPartitionProcessorPlacementHints::from(&self.logs_controller),
-            )
+            .on_observed_cluster_state(observed_cluster_state, nodes_config)
             .await?;
 
         Ok(())
@@ -224,20 +219,17 @@ where
     async fn run(&mut self) -> LeaderEvent {
         loop {
             tokio::select! {
-                _ = self.find_logs_tail_interval.tick() => {
-                    self.logs_controller.find_log_tails();
-                }
                 Some(_) = OptionFuture::from(self.log_trim_check_interval.as_mut().map(|interval| interval.tick())) => {
                     return LeaderEvent::TrimLogs;
                 }
-                result = self.logs_controller.run_async_operations() => {
-                    result
-                }
-                Ok(_) = self.logs_watcher.changed() => {
-                    return LeaderEvent::LogsUpdate;
-                }
                 Ok(_) = self.partition_table_watcher.changed() => {
                     return LeaderEvent::PartitionTableUpdate;
+                }
+                Some(epoch_metadata) = self.epoch_metadata_rx.recv() => {
+                    for (partition_id, epoch_metadata) in epoch_metadata {
+                        let (_, _, current, next) = epoch_metadata.into_inner();
+                        self.scheduler.update_partition_configuration(partition_id, current, next);
+                    }
                 }
             }
         }
@@ -252,9 +244,6 @@ where
             LeaderEvent::TrimLogs => {
                 self.trim_logs().await;
             }
-            LeaderEvent::LogsUpdate => {
-                self.on_logs_update(observed_cluster_state).await?;
-            }
             LeaderEvent::PartitionTableUpdate => {
                 self.on_partition_table_update(observed_cluster_state)
                     .await?;
@@ -264,37 +253,14 @@ where
         Ok(())
     }
 
-    async fn on_logs_update(
-        &mut self,
-        observed_cluster_state: &ObservedClusterState,
-    ) -> anyhow::Result<()> {
-        self.logs_controller
-            .on_logs_update(Metadata::with_current(|m| m.logs_ref()));
-
-        self.scheduler
-            .on_observed_cluster_state(
-                observed_cluster_state,
-                &Metadata::with_current(|m| m.nodes_config_ref()),
-                LogsBasedPartitionProcessorPlacementHints::from(&self.logs_controller),
-            )
-            .await?;
-        Ok(())
-    }
-
     async fn on_partition_table_update(
         &mut self,
         observed_cluster_state: &ObservedClusterState,
     ) -> anyhow::Result<()> {
-        let partition_table = Metadata::with_current(|m| m.partition_table_ref());
-
-        self.logs_controller
-            .on_partition_table_update(&partition_table);
-
         self.scheduler
             .on_observed_cluster_state(
                 observed_cluster_state,
                 &Metadata::with_current(|m| m.nodes_config_ref()),
-                LogsBasedPartitionProcessorPlacementHints::from(&self.logs_controller),
             )
             .await?;
 
@@ -332,6 +298,53 @@ where
             }
         }
     }
+
+    async fn fetch_epoch_metadata(
+        metadata_client: MetadataStoreClient,
+        epoch_metadata_tx: tokio::sync::mpsc::Sender<HashMap<PartitionId, EpochMetadata>>,
+    ) -> Result<Never, ShutdownError> {
+        let mut partition_table = Metadata::with_current(|m| m.updateable_partition_table());
+
+        loop {
+            debug!("Refreshing epoch metadata from metadata store for all partitions");
+            let send_permit = epoch_metadata_tx
+                .reserve()
+                .await
+                .map_err(|_| ShutdownError)?;
+            let mut latest_epoch_metadata = HashMap::default();
+
+            let partition_table = partition_table.live_load();
+
+            for partition_id in partition_table.iter_ids() {
+                // Stop the loop if we are not leaders anymore
+                if epoch_metadata_tx.is_closed() {
+                    return Err(ShutdownError);
+                }
+                // todo replace with multi get
+                match metadata_client
+                    .get::<EpochMetadata>(partition_processor_epoch_key(*partition_id))
+                    .await
+                {
+                    Ok(Some(epoch_metadata)) => {
+                        latest_epoch_metadata.insert(*partition_id, epoch_metadata);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        debug!(%err, "Failed to fetch epoch metadata for partition {partition_id}");
+                    }
+                }
+            }
+
+            send_permit.send(latest_epoch_metadata);
+
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(30)) => {},
+                () = epoch_metadata_tx.closed() => {
+                    return Err(ShutdownError);
+                }
+            }
+        }
+    }
 }
 
 fn create_log_trim_check_interval(options: &AdminOptions) -> Option<Interval> {
@@ -352,13 +365,13 @@ fn create_log_trim_check_interval(options: &AdminOptions) -> Option<Interval> {
 }
 
 enum TrimMode {
-    /// Trim logs by the reported persisted LSN. This strategy is only appropriate for
-    /// single-node deployments.
-    PersistedLsn {
+    /// Trim logs based on partition processors' reported Durable LSN. This strategy is only
+    /// appropriate for single-node deployments.
+    DurableLsn {
         partition_status:
             BTreeMap<PartitionId, BTreeMap<GenerationalNodeId, PartitionProcessorStatus>>,
     },
-    /// Select safe trim points based on the maximum reported archived LSN per partition.
+    /// Trim logs based on the highest reported archived LSN per partition.
     ArchivedLsn {
         partition_status:
             BTreeMap<PartitionId, BTreeMap<GenerationalNodeId, PartitionProcessorStatus>>,
@@ -367,8 +380,8 @@ enum TrimMode {
 
 impl TrimMode {
     /// In clusters with more than one node, or on single nodes with a snapshot repository
-    /// configured, trimming is driven by archived LSN. The persisted LSN method is only
-    /// used on single-nodes with no snapshots configured.
+    /// configured, trimming is driven by archived LSN. The durable LSN method is only used on
+    /// single-nodes with no snapshots configured.
     fn from(snapshots_repository_configured: bool, cluster_state: &Arc<ClusterState>) -> TrimMode {
         let mut partition_status: BTreeMap<
             PartitionId,
@@ -399,7 +412,7 @@ impl TrimMode {
             }
             TrimMode::ArchivedLsn { partition_status }
         } else {
-            TrimMode::PersistedLsn { partition_status }
+            TrimMode::DurableLsn { partition_status }
         }
     }
 
@@ -447,16 +460,16 @@ impl TrimMode {
                     }
                 }
             }
-            TrimMode::PersistedLsn {
+            TrimMode::DurableLsn {
                 partition_status, ..
             } => {
                 // If no partitions are reporting archived LSN, we fall back to using the
-                // min(persisted LSN) across the board as the safe trim point. Note that at this
-                // point we know that there are no known dead nodes, so it's safe to take the min of
-                // persisted LSNs reported by all the partition processors as the safe trim point.
+                // min(durable_lsn) across the board as the safe trim point. Note that at this point
+                // we know that there are no known dead nodes, so it's safe to take the min of all
+                // durable LSNs reported by all the partition processors as the safe trim point.
                 for (partition_id, processor_status) in partition_status.iter() {
                     let log_id = LogId::from(*partition_id);
-                    let min_persisted_lsn = processor_status
+                    let min_durable_lsn = processor_status
                         .values()
                         .map(|s| s.last_persisted_log_lsn.unwrap_or(Lsn::INVALID))
                         .min()
@@ -464,9 +477,9 @@ impl TrimMode {
 
                     trace!(
                         ?partition_id,
-                        "Safe trim point for log {}: {:?}", log_id, min_persisted_lsn
+                        "Safe trim point for log {}: {:?}", log_id, min_durable_lsn
                     );
-                    safe_trim_points.insert(log_id, (min_persisted_lsn, *partition_id));
+                    safe_trim_points.insert(log_id, (min_durable_lsn, *partition_id));
                 }
             }
         }
@@ -501,9 +514,9 @@ mod tests {
             p1,
             ProcessorStatus {
                 mode: Leader,
-                applied: Some(Lsn::new(10)),
-                persisted: Some(Lsn::new(10)),
-                archived: None,
+                applied_lsn: Some(Lsn::new(10)),
+                durable_lsn: Some(Lsn::new(10)),
+                archived_lsn: None,
             }
             .into(),
         )]
@@ -515,9 +528,9 @@ mod tests {
             p2,
             ProcessorStatus {
                 mode: Follower,
-                applied: Some(Lsn::new(10)),
-                persisted: Some(Lsn::new(10)),
-                archived: None,
+                applied_lsn: Some(Lsn::new(10)),
+                durable_lsn: Some(Lsn::new(10)),
+                archived_lsn: None,
             }
             .into(),
         )]
@@ -561,9 +574,9 @@ mod tests {
                 p1,
                 ProcessorStatus {
                     mode: Leader,
-                    applied: Some(Lsn::new(10)),
-                    persisted: Some(Lsn::new(10)),
-                    archived: None,
+                    applied_lsn: Some(Lsn::new(10)),
+                    durable_lsn: Some(Lsn::new(10)),
+                    archived_lsn: None,
                 }
                 .into(),
             ),
@@ -571,9 +584,9 @@ mod tests {
                 p2,
                 ProcessorStatus {
                     mode: Follower,
-                    applied: Some(Lsn::new(10)),
-                    persisted: Some(Lsn::new(5)),
-                    archived: None,
+                    applied_lsn: Some(Lsn::new(10)),
+                    durable_lsn: Some(Lsn::new(5)),
+                    archived_lsn: None,
                 }
                 .into(),
             ),
@@ -609,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn single_node_may_trim_by_persisted_lsn() {
+    fn single_node_may_trim_by_durable_lsn() {
         let p1 = PartitionId::from(0);
         let p2 = PartitionId::from(1);
         let p3 = PartitionId::from(2);
@@ -620,9 +633,9 @@ mod tests {
                 p1,
                 ProcessorStatus {
                     mode: Leader,
-                    applied: Some(Lsn::new(10)),
-                    persisted: None,
-                    archived: None,
+                    applied_lsn: Some(Lsn::new(10)),
+                    durable_lsn: None,
+                    archived_lsn: None,
                 }
                 .into(),
             ),
@@ -630,9 +643,9 @@ mod tests {
                 p2,
                 ProcessorStatus {
                     mode: Follower,
-                    applied: Some(Lsn::new(10)),
-                    persisted: Some(Lsn::new(5)),
-                    archived: None,
+                    applied_lsn: Some(Lsn::new(10)),
+                    durable_lsn: Some(Lsn::new(5)),
+                    archived_lsn: None,
                 }
                 .into(),
             ),
@@ -640,9 +653,9 @@ mod tests {
                 p3,
                 ProcessorStatus {
                     mode: Leader,
-                    applied: Some(Lsn::new(10)),
-                    persisted: Some(Lsn::new(10)),
-                    archived: None,
+                    applied_lsn: Some(Lsn::new(10)),
+                    durable_lsn: Some(Lsn::new(10)),
+                    archived_lsn: None,
                 }
                 .into(),
             ),
@@ -661,7 +674,7 @@ mod tests {
         let trim_mode = TrimMode::from(false, &cluster_state);
         let trim_points = trim_mode.calculate_safe_trim_points();
 
-        assert!(matches!(trim_mode, TrimMode::PersistedLsn { .. }));
+        assert!(matches!(trim_mode, TrimMode::DurableLsn { .. }));
         assert_eq!(
             trim_points,
             BTreeMap::from([
@@ -669,7 +682,7 @@ mod tests {
                 (LogId::from(p2), (Lsn::new(5), p2)),
                 (LogId::from(p3), (Lsn::new(10), p3)),
             ]),
-            "Use min persisted LSN per partition as the safe point in single-node mode when not archiving"
+            "Use min durable LSN per partition as the safe point in single-node mode when not archiving"
         );
     }
 
@@ -685,9 +698,9 @@ mod tests {
                 p1,
                 ProcessorStatus {
                     mode: Leader,
-                    applied: Some(Lsn::new(10)),
-                    persisted: Some(Lsn::new(10)), // should not make any difference
-                    archived: None,
+                    applied_lsn: Some(Lsn::new(10)),
+                    durable_lsn: Some(Lsn::new(10)), // should not make any difference
+                    archived_lsn: None,
                 }
                 .into(),
             ),
@@ -695,9 +708,9 @@ mod tests {
                 p2,
                 ProcessorStatus {
                     mode: Follower,
-                    applied: Some(Lsn::new(18)),
-                    persisted: Some(Lsn::new(15)), // should not make any difference
-                    archived: None,
+                    applied_lsn: Some(Lsn::new(18)),
+                    durable_lsn: Some(Lsn::new(15)), // should not make any difference
+                    archived_lsn: None,
                 }
                 .into(),
             ),
@@ -711,9 +724,9 @@ mod tests {
                 p2,
                 ProcessorStatus {
                     mode: Leader,
-                    applied: Some(Lsn::new(20)),
-                    persisted: None,
-                    archived: Some(Lsn::new(10)),
+                    applied_lsn: Some(Lsn::new(20)),
+                    durable_lsn: None,
+                    archived_lsn: Some(Lsn::new(10)),
                 }
                 .into(),
             ),
@@ -721,9 +734,9 @@ mod tests {
                 p3,
                 ProcessorStatus {
                     mode: Follower,
-                    applied: Some(Lsn::new(10)),
-                    persisted: None,
-                    archived: Some(Lsn::new(5)),
+                    applied_lsn: Some(Lsn::new(10)),
+                    durable_lsn: None,
+                    archived_lsn: Some(Lsn::new(5)),
                 }
                 .into(),
             ),
@@ -767,9 +780,9 @@ mod tests {
             p1,
             ProcessorStatus {
                 mode: Leader,
-                applied: Some(Lsn::new(15)),
-                persisted: None,
-                archived: Some(Lsn::new(10)),
+                applied_lsn: Some(Lsn::new(15)),
+                durable_lsn: None,
+                archived_lsn: Some(Lsn::new(10)),
             }
             .into(),
         )]
@@ -781,9 +794,9 @@ mod tests {
             p1,
             ProcessorStatus {
                 mode: Leader,
-                applied: Some(Lsn::new(5)), // behind the archived LSN reported by n1
-                persisted: None,
-                archived: None,
+                applied_lsn: Some(Lsn::new(5)), // behind the archived LSN reported by n1
+                durable_lsn: None,
+                archived_lsn: None,
             }
             .into(),
         )]
@@ -826,9 +839,9 @@ mod tests {
                 p1,
                 ProcessorStatus {
                     mode: Leader,
-                    applied: Some(Lsn::new(10)),
-                    persisted: Some(Lsn::new(10)), // should not make any difference
-                    archived: None,
+                    applied_lsn: Some(Lsn::new(10)),
+                    durable_lsn: Some(Lsn::new(10)), // should not make any difference
+                    archived_lsn: None,
                 }
                 .into(),
             ),
@@ -836,9 +849,9 @@ mod tests {
                 p2,
                 ProcessorStatus {
                     mode: Follower,
-                    applied: Some(Lsn::new(18)),
-                    persisted: Some(Lsn::new(15)), // should not make any difference
-                    archived: None,
+                    applied_lsn: Some(Lsn::new(18)),
+                    durable_lsn: Some(Lsn::new(15)), // should not make any difference
+                    archived_lsn: None,
                 }
                 .into(),
             ),
@@ -852,9 +865,9 @@ mod tests {
                 p2,
                 ProcessorStatus {
                     mode: Leader,
-                    applied: Some(Lsn::new(20)),
-                    persisted: None,
-                    archived: Some(Lsn::new(10)),
+                    applied_lsn: Some(Lsn::new(20)),
+                    durable_lsn: None,
+                    archived_lsn: Some(Lsn::new(10)),
                 }
                 .into(),
             ),
@@ -862,9 +875,9 @@ mod tests {
                 p3,
                 ProcessorStatus {
                     mode: Follower,
-                    applied: Some(Lsn::new(10)),
-                    persisted: None,
-                    archived: Some(Lsn::new(5)),
+                    applied_lsn: Some(Lsn::new(10)),
+                    durable_lsn: None,
+                    archived_lsn: Some(Lsn::new(5)),
                 }
                 .into(),
             ),
@@ -902,19 +915,19 @@ mod tests {
 
     struct ProcessorStatus {
         mode: RunMode,
-        applied: Option<Lsn>,
-        persisted: Option<Lsn>,
-        archived: Option<Lsn>,
+        applied_lsn: Option<Lsn>,
+        durable_lsn: Option<Lsn>,
+        archived_lsn: Option<Lsn>,
     }
 
     impl From<ProcessorStatus> for PartitionProcessorStatus {
-        fn from(val: ProcessorStatus) -> Self {
+        fn from(status: ProcessorStatus) -> Self {
             PartitionProcessorStatus {
-                planned_mode: val.mode,
-                effective_mode: val.mode,
-                last_applied_log_lsn: val.applied,
-                last_persisted_log_lsn: val.persisted,
-                last_archived_log_lsn: val.archived,
+                planned_mode: status.mode,
+                effective_mode: status.mode,
+                last_applied_log_lsn: status.applied_lsn,
+                last_persisted_log_lsn: status.durable_lsn,
+                last_archived_log_lsn: status.archived_lsn,
                 ..PartitionProcessorStatus::default()
             }
         }

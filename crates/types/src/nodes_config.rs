@@ -295,6 +295,19 @@ impl NodesConfiguration {
         }
     }
 
+    /// Returns [`WorkerState::Disabled`] if a node is deleted or [`WorkerState::Provisioning`]
+    /// if the node is not a worker or has not started yet.
+    pub fn get_worker_state(&self, node_id: &PlainNodeId) -> WorkerState {
+        let maybe = self.nodes.get(node_id);
+        let Some(maybe) = maybe else {
+            return WorkerState::Provisioning;
+        };
+        match maybe {
+            MaybeNode::Tombstone => WorkerState::Disabled,
+            MaybeNode::Node(found) => found.worker_config.worker_state,
+        }
+    }
+
     /// Returns _an_ admin node.
     pub fn get_admin_node(&self) -> Option<&NodeConfig> {
         self.nodes.values().find_map(|maybe| match maybe {
@@ -514,12 +527,14 @@ pub enum MetadataServerState {
     PartialEq,
     Ord,
     PartialOrd,
+    derive_more::IsVariant,
     serde::Serialize,
     serde::Deserialize,
     strum::Display,
 )]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum WorkerState {
     /// Worker is about to start. No partitions are running on this worker yet.
     #[default]
