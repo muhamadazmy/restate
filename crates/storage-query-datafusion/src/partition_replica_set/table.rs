@@ -19,38 +19,42 @@ use tokio::sync::mpsc::Sender;
 
 use restate_core::Metadata;
 use restate_types::cluster_state::ClusterState;
-use restate_types::nodes_config::NodesConfiguration;
+use restate_types::partition_table::PartitionTable;
+use restate_types::partitions::state::PartitionReplicaSetStates;
 
 use crate::context::QueryContext;
 use crate::table_providers::{GenericTableProvider, Scan};
 use crate::table_util::Builder;
 
-use super::row::append_node_row;
-use super::schema::NodeBuilder;
+use super::row::append_replica_set_row;
+use super::schema::PartitionReplicaSetBuilder;
 
 pub fn register_self(
     ctx: &QueryContext,
     metadata: Metadata,
     cluster_state: ClusterState,
+    replica_set_states: PartitionReplicaSetStates,
 ) -> datafusion::common::Result<()> {
-    let nodes_table = GenericTableProvider::new(
-        NodeBuilder::schema(),
-        Arc::new(NodesScanner {
+    let replica_set_table = GenericTableProvider::new(
+        PartitionReplicaSetBuilder::schema(),
+        Arc::new(ReplicaSetScanner {
             metadata,
+            replica_set_states,
             cluster_state,
         }),
     );
-    ctx.register_non_partitioned_table("nodes", Arc::new(nodes_table))
+    ctx.register_non_partitioned_table("partition_replica_set", Arc::new(replica_set_table))
 }
 
 #[derive(Clone, derive_more::Debug)]
-#[debug("NodesScanner")]
-struct NodesScanner {
+#[debug("ReplicaSetScanner")]
+struct ReplicaSetScanner {
     metadata: Metadata,
+    replica_set_states: PartitionReplicaSetStates,
     cluster_state: ClusterState,
 }
 
-impl Scan for NodesScanner {
+impl Scan for ReplicaSetScanner {
     fn scan(
         &self,
         projection: SchemaRef,
@@ -58,36 +62,46 @@ impl Scan for NodesScanner {
         _limit: Option<usize>,
     ) -> SendableRecordBatchStream {
         let schema = projection.clone();
+        let partition_table = self.metadata.partition_table_snapshot();
+
         let mut stream_builder = RecordBatchReceiverStream::builder(projection, 2);
         let tx = stream_builder.tx();
 
-        let nodes_config = self.metadata.nodes_config_snapshot();
         let cluster_state = self.cluster_state.clone();
+        let replica_set_states = self.replica_set_states.clone();
         stream_builder.spawn(async move {
-            for_each_state(schema, tx, nodes_config, cluster_state).await;
+            for_each_partition(
+                schema,
+                tx,
+                partition_table,
+                cluster_state,
+                replica_set_states,
+            )
+            .await;
             Ok(())
         });
         stream_builder.build()
     }
 }
 
-async fn for_each_state(
+async fn for_each_partition(
     schema: SchemaRef,
     tx: Sender<datafusion::common::Result<RecordBatch>>,
-    nodes_config: Arc<NodesConfiguration>,
+    partition_table: Arc<PartitionTable>,
     cluster_state: ClusterState,
+    replica_set_states: PartitionReplicaSetStates,
 ) {
-    let mut builder = NodeBuilder::new(schema.clone());
+    let mut builder = PartitionReplicaSetBuilder::new(schema.clone());
+
     let mut output = String::new();
-    for (id, node_config) in nodes_config.iter() {
-        let node_state = cluster_state.get_node_state(node_config.current_generation.into());
-        append_node_row(
+    for (_, partition) in partition_table.iter() {
+        let membership = replica_set_states.membership_state(partition.partition_id);
+        append_replica_set_row(
             &mut builder,
             &mut output,
-            nodes_config.version(),
-            id,
-            node_config,
-            node_state,
+            membership,
+            &cluster_state,
+            partition,
         );
 
         if builder.full() {
@@ -98,9 +112,10 @@ async fn for_each_state(
                 // we probably don't want to panic, is it will cause the entire process to exit
                 return;
             }
-            builder = NodeBuilder::new(schema.clone());
+            builder = PartitionReplicaSetBuilder::new(schema.clone());
         }
     }
+
     if !builder.empty() {
         let result = builder.finish();
         let _ = tx.send(result).await;

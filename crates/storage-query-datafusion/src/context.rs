@@ -29,7 +29,7 @@ use codederror::CodedError;
 use restate_core::{Metadata, TaskCenter};
 use restate_invoker_api::StatusHandle;
 use restate_partition_store::PartitionStoreManager;
-use restate_types::cluster::cluster_state::ClusterState;
+use restate_types::cluster::cluster_state::LegacyClusterState;
 use restate_types::config::QueryEngineOptions;
 use restate_types::errors::GenericError;
 use restate_types::identifiers::PartitionId;
@@ -61,6 +61,7 @@ const SYS_INVOCATION_VIEW: &str = "CREATE VIEW sys_invocation as SELECT
             ss.journal_size,
             ss.journal_commands_size,
             ss.created_at,
+            ss.created_using_restate_version,
             ss.modified_at,
             ss.inboxed_at,
             ss.scheduled_at,
@@ -215,15 +216,15 @@ where
 }
 
 pub struct ClusterTables {
-    cluster_state: restate_core::cluster_state::ClusterState,
+    cluster_state: restate_types::cluster_state::ClusterState,
     replica_set_states: PartitionReplicaSetStates,
-    cluster_state_watch: watch::Receiver<Arc<ClusterState>>,
+    cluster_state_watch: watch::Receiver<Arc<LegacyClusterState>>,
 }
 
 impl ClusterTables {
     pub fn new(
         replica_set_states: PartitionReplicaSetStates,
-        cluster_state_watch: watch::Receiver<Arc<ClusterState>>,
+        cluster_state_watch: watch::Receiver<Arc<LegacyClusterState>>,
     ) -> Self {
         let cluster_state = TaskCenter::with_current(|tc| tc.cluster_state().clone());
         Self {
@@ -239,6 +240,12 @@ impl RegisterTable for ClusterTables {
         let metadata = Metadata::current();
         crate::node::register_self(ctx, metadata.clone(), self.cluster_state.clone())?;
         crate::partition::register_self(ctx, metadata.clone(), self.replica_set_states.clone())?;
+        crate::partition_replica_set::register_self(
+            ctx,
+            metadata.clone(),
+            self.cluster_state.clone(),
+            self.replica_set_states.clone(),
+        )?;
         crate::log::register_self(ctx, metadata)?;
         crate::partition_state::register_self(ctx, self.cluster_state_watch.clone())?;
 
