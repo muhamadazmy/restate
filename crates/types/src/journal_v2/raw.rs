@@ -8,6 +8,11 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::time::Duration;
+
+use bytes::Bytes;
+use enum_dispatch::enum_dispatch;
+
 use crate::identifiers::InvocationId;
 use crate::invocation::{InvocationTarget, ServiceInvocationSpanContext};
 use crate::journal_v2::encoding::DecodingError;
@@ -15,9 +20,6 @@ use crate::journal_v2::{
     CommandType, Decoder, Entry, EntryMetadata, EntryType, Event, NotificationId, NotificationType,
 };
 use crate::time::MillisSinceEpoch;
-use bytes::Bytes;
-use enum_dispatch::enum_dispatch;
-use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -112,8 +114,8 @@ pub enum RawEntryInner {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RawCommand {
     ty: CommandType,
-    command_specific_metadata: RawCommandSpecificMetadata,
-    serialized_content: Bytes,
+    pub command_specific_metadata: RawCommandSpecificMetadata,
+    pub serialized_content: Bytes,
 }
 
 impl RawCommand {
@@ -169,7 +171,7 @@ pub struct CallOrSendMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RawCommandSpecificMetadata {
-    CallOrSend(CallOrSendMetadata),
+    CallOrSend(Box<CallOrSendMetadata>),
     None,
 }
 
