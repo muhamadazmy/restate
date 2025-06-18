@@ -76,8 +76,9 @@ pub fn remote_scan_as_datafusion_stream(
     range: RangeInclusive<PartitionKey>,
     table_name: String,
     projection_schema: SchemaRef,
+    limit: Option<usize>,
 ) -> SendableRecordBatchStream {
-    let mut builder = RecordBatchReceiverStream::builder(projection_schema.clone(), 2);
+    let mut builder = RecordBatchReceiverStream::builder(projection_schema.clone(), 1);
 
     let tx = builder.tx();
 
@@ -90,6 +91,7 @@ pub fn remote_scan_as_datafusion_stream(
             range,
             table: table_name,
             projection_schema_bytes: encode_schema(&projection_schema),
+            limit: limit.map(|limit| u64::try_from(limit).expect("limit to fit in a u64")),
         };
 
         let RemoteQueryScannerOpened::Success { scanner_id } =
