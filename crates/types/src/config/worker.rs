@@ -8,7 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use std::num::{NonZero, NonZeroU16, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -225,7 +225,7 @@ impl Default for InvokerOptions {
             message_size_warning: NonZeroUsize::new(10 * 1024 * 1024).unwrap(), // 10MiB
             message_size_limit: None,
             tmp_dir: None,
-            concurrent_invocations_limit: None,
+            concurrent_invocations_limit: Some(NonZeroUsize::new(1000).expect("is non zero")),
             disable_eager_state: false,
             experimental_features_propose_events: false,
         }
