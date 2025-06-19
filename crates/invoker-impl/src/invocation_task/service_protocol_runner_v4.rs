@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::future::poll_fn;
 use std::ops::Deref;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use bytestring::ByteString;
@@ -63,6 +63,7 @@ use crate::invocation_task::{
     ResponseChunk, ResponseStreamState, TerminalLoopState, X_RESTATE_SERVER,
     invocation_id_to_header_value, service_protocol_version_to_header_value,
 };
+use crate::metric_definitions::INVOKER_SERVICE_RESPONSE_TIME;
 
 ///  Provides the value of the invocation id
 const INVOCATION_ID_HEADER_NAME: HeaderName = HeaderName::from_static("x-restate-invocation-id");
@@ -85,6 +86,7 @@ pub struct ServiceProtocolRunner<'a, IR, EE, Schemas> {
 
     // task state
     command_index: CommandIndex,
+    http_stream_start_time: Option<Instant>,
 }
 
 impl<'a, IR, EE, Schemas> ServiceProtocolRunner<'a, IR, EE, Schemas>
@@ -108,6 +110,7 @@ where
             encoder,
             decoder,
             command_index: 0,
+            http_stream_start_time: None,
         }
     }
 
@@ -177,6 +180,7 @@ where
         );
 
         // Initialize the response stream state
+        self.http_stream_start_time = Some(Instant::now());
         let mut http_stream_rx =
             ResponseStreamState::initialize(&self.invocation_task.client, request);
 
@@ -308,6 +312,7 @@ where
         let got_headers_future = poll_fn(|cx| http_stream_rx.poll_only_headers(cx)).fuse();
         tokio::pin!(got_headers_future);
 
+        // TODO: add metrics for delays for when headers are received (first response from service)
         loop {
             tokio::select! {
                 got_headers_res = got_headers_future.as_mut(), if !got_headers_future.is_terminated() => {
@@ -518,6 +523,10 @@ where
         &mut self,
         mut parts: http::response::Parts,
     ) -> Result<(), InvokerError> {
+        if let Some(start_time) = self.http_stream_start_time.take() {
+            metrics::histogram!(INVOKER_SERVICE_RESPONSE_TIME).record(start_time.elapsed());
+        }
+
         // if service is running behind a gateway, the service can be down
         // but we still get a response code from the gateway itself. In that
         // case we still need to return the proper error
