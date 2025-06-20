@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::future::poll_fn;
 use std::ops::Deref;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use bytestring::ByteString;
@@ -63,6 +63,7 @@ use crate::invocation_task::{
     ResponseChunk, ResponseStreamState, TerminalLoopState, X_RESTATE_SERVER,
     invocation_id_to_header_value, service_protocol_version_to_header_value,
 };
+use crate::metric_definitions::INVOKER_SERVICE_RESPONSE_TIME;
 
 ///  Provides the value of the invocation id
 const INVOCATION_ID_HEADER_NAME: HeaderName = HeaderName::from_static("x-restate-invocation-id");
@@ -176,14 +177,22 @@ where
             .await
         );
 
+        // update the start time for the service response time metric
+        let stream_start_time = Instant::now();
+
         // Initialize the response stream state
         let mut http_stream_rx =
             ResponseStreamState::initialize(&self.invocation_task.client, request);
 
         // Execute the replay
         crate::shortcircuit!(
-            self.replay_loop(&mut http_stream_tx, &mut http_stream_rx, journal_stream)
-                .await
+            self.replay_loop(
+                &stream_start_time,
+                &mut http_stream_tx,
+                &mut http_stream_rx,
+                journal_stream
+            )
+            .await
         );
 
         // If we have the invoker_rx and the protocol type is bidi stream,
@@ -192,6 +201,7 @@ where
             trace!("Protocol is in bidi stream mode, will now start the send/receive loop");
             crate::shortcircuit!(
                 self.bidi_stream_loop(
+                    &stream_start_time,
                     &service_invocation_span_context,
                     http_stream_tx,
                     &mut http_stream_rx,
@@ -208,7 +218,11 @@ where
         // We don't have the invoker_rx, so we simply consume the response
         trace!("Sender side of the request has been dropped, now processing the response");
         let result = self
-            .response_stream_loop(&service_invocation_span_context, &mut http_stream_rx)
+            .response_stream_loop(
+                &stream_start_time,
+                &service_invocation_span_context,
+                &mut http_stream_rx,
+            )
             .await;
 
         // Sanity check of the stream decoder
@@ -297,6 +311,7 @@ where
     /// This loop concurrently pushes journal entries and waits for the response headers and end of replay.
     async fn replay_loop<JournalStream>(
         &mut self,
+        stream_start_time: &Instant,
         http_stream_tx: &mut InvokerRequestStreamSender,
         http_stream_rx: &mut ResponseStreamState,
         journal_stream: JournalStream,
@@ -308,13 +323,15 @@ where
         let got_headers_future = poll_fn(|cx| http_stream_rx.poll_only_headers(cx)).fuse();
         tokio::pin!(got_headers_future);
 
+        // TODO: add metrics for delays for when headers are received (first response from service)
         loop {
             tokio::select! {
                 got_headers_res = got_headers_future.as_mut(), if !got_headers_future.is_terminated() => {
+
                     // The reason we want to poll headers in this function is
                     // to exit early in case an error is returned during replays.
                     let headers = crate::shortcircuit!(got_headers_res);
-                    crate::shortcircuit!(self.handle_response_headers(headers));
+                    crate::shortcircuit!(self.handle_response_headers(stream_start_time, headers));
                 },
                 opt_je = journal_stream.next() => {
                     match opt_je {
@@ -350,6 +367,7 @@ where
     /// This loop concurrently reads the http response stream and journal completions from the invoker.
     async fn bidi_stream_loop(
         &mut self,
+        stream_start_time: &Instant,
         parent_span_context: &ServiceInvocationSpanContext,
         mut http_stream_tx: InvokerRequestStreamSender,
         http_stream_rx: &mut ResponseStreamState,
@@ -379,7 +397,7 @@ where
                 },
                 chunk = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)) => {
                     match crate::shortcircuit!(chunk) {
-                        ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(parts)),
+                        ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(stream_start_time, parts)),
                         ResponseChunk::Data(buf) => crate::shortcircuit!(self.handle_read(parent_span_context, buf)),
                         ResponseChunk::End => {
                             // Response stream was closed without SuspensionMessage, EndMessage or ErrorMessage
@@ -399,6 +417,7 @@ where
 
     async fn response_stream_loop(
         &mut self,
+        stream_start_time: &Instant,
         parent_span_context: &ServiceInvocationSpanContext,
         http_stream_rx: &mut ResponseStreamState,
     ) -> TerminalLoopState<()> {
@@ -406,7 +425,7 @@ where
             tokio::select! {
                 chunk = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)) => {
                     match crate::shortcircuit!(chunk) {
-                        ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(parts)),
+                        ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(stream_start_time, parts)),
                         ResponseChunk::Data(buf) => crate::shortcircuit!(self.handle_read(parent_span_context, buf)),
                         ResponseChunk::End => {
                             // Response stream was closed without SuspensionMessage, EndMessage or ErrorMessage
@@ -516,8 +535,10 @@ where
 
     fn handle_response_headers(
         &mut self,
+        stream_start_time: &Instant,
         mut parts: http::response::Parts,
     ) -> Result<(), InvokerError> {
+        metrics::histogram!(INVOKER_SERVICE_RESPONSE_TIME).record(stream_start_time.elapsed());
         // if service is running behind a gateway, the service can be down
         // but we still get a response code from the gateway itself. In that
         // case we still need to return the proper error
