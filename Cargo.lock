@@ -7361,6 +7361,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "restate-metrics"
+version = "1.4.0-dev"
+dependencies = [
+ "metrics",
+]
+
+[[package]]
 name = "restate-node"
 version = "1.4.0-dev"
 dependencies = [
