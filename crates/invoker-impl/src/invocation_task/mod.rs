@@ -15,20 +15,21 @@ use super::Notification;
 
 use crate::error::InvokerError;
 use crate::invocation_task::service_protocol_runner::ServiceProtocolRunner;
-use crate::metric_definitions::INVOKER_TASK_DURATION;
+use crate::metric_definitions::{INVOKER_DEPLOYMENT_TIME_TO_FIRST_BYTE, INVOKER_TASK_DURATION};
 use bytes::Bytes;
 use futures::{FutureExt, future, stream};
 use http::response::Parts as ResponseParts;
-use http::{HeaderName, HeaderValue, Response};
+use http::{HeaderName, HeaderValue, Response, StatusCode};
 use http_body::{Body, Frame};
 use metrics::histogram;
+use parking_lot::Once;
 use restate_invoker_api::invocation_reader::{
     EagerState, InvocationReader, InvocationReaderTransaction,
 };
 use restate_invoker_api::{EntryEnricher, InvokeInputJournal};
 use restate_service_client::{Request, ResponseBody, ServiceClient, ServiceClientError};
 use restate_types::deployment::PinnedDeployment;
-use restate_types::identifiers::{InvocationId, PartitionLeaderEpoch};
+use restate_types::identifiers::{DeploymentId, InvocationId, PartitionLeaderEpoch};
 use restate_types::invocation::{InvocationEpoch, InvocationTarget};
 use restate_types::journal::EntryIndex;
 use restate_types::journal::enriched::EnrichedRawEntry;
@@ -559,5 +560,33 @@ impl<T> Future for AbortOnDrop<T> {
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort()
+    }
+}
+
+#[derive(Debug)]
+struct Stats {
+    instant: Instant,
+    deployment_id: DeploymentId,
+    ttfb_once: Once,
+}
+
+impl Stats {
+    fn new(deployment_id: DeploymentId) -> Self {
+        Self {
+            instant: Instant::now(),
+            deployment_id,
+            ttfb_once: Once::new(),
+        }
+    }
+
+    /// Record the time to first byte for the deployment.
+    /// This is done once per invocation, on the first time a response is received.
+    fn record_time_to_first_byte(&self, status: StatusCode) {
+        self.ttfb_once.call_once(|| {
+            metrics::histogram!(INVOKER_DEPLOYMENT_TIME_TO_FIRST_BYTE,
+                "deployment" => self.deployment_id.to_string(),
+                "status" => status.as_u16().to_string())
+            .record(self.instant.elapsed());
+        });
     }
 }
