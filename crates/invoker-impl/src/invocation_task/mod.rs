@@ -28,7 +28,7 @@ use restate_invoker_api::invocation_reader::{
 use restate_invoker_api::{EntryEnricher, InvokeInputJournal};
 use restate_service_client::{Request, ResponseBody, ServiceClient, ServiceClientError};
 use restate_types::deployment::PinnedDeployment;
-use restate_types::identifiers::{InvocationId, PartitionLeaderEpoch};
+use restate_types::identifiers::{DeploymentId, InvocationId, PartitionLeaderEpoch};
 use restate_types::invocation::{InvocationEpoch, InvocationTarget};
 use restate_types::journal::EntryIndex;
 use restate_types::journal::enriched::EnrichedRawEntry;
@@ -559,5 +559,28 @@ impl<T> Future for AbortOnDrop<T> {
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
         self.0.abort()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MetricDimensions {
+    deployment_id: DeploymentId,
+    instant: Instant,
+}
+
+impl MetricDimensions {
+    fn new(deployment_id: DeploymentId) -> Self {
+        Self {
+            deployment_id,
+            instant: Instant::now(),
+        }
+    }
+
+    pub fn duration(&self) -> Duration {
+        self.instant.elapsed()
+    }
+
+    pub fn deployment_id(&self) -> DeploymentId {
+        self.deployment_id
     }
 }

@@ -8,13 +8,10 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use crate::Notification;
-use crate::error::{InvocationErrorRelatedEntry, InvokerError, SdkInvocationError};
-use crate::invocation_task::{
-    InvocationTask, InvocationTaskOutputInner, InvokerBodyStream, InvokerRequestStreamSender,
-    ResponseChunk, ResponseStreamState, TerminalLoopState, X_RESTATE_SERVER,
-    invocation_id_to_header_value, service_protocol_version_to_header_value,
-};
+use std::collections::HashSet;
+use std::future::poll_fn;
+use std::time::Duration;
+
 use bytes::Bytes;
 use futures::future::FusedFuture;
 use futures::{FutureExt, Stream, StreamExt};
@@ -22,6 +19,10 @@ use http::uri::PathAndQuery;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use http_body::Frame;
 use opentelemetry::trace::TraceFlags;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::{debug, trace, warn};
+
 use restate_errors::warn_it;
 use restate_invoker_api::invocation_reader::{EagerState, JournalEntry};
 use restate_invoker_api::{EntryEnricher, JournalMetadata};
@@ -42,12 +43,15 @@ use restate_types::schema::deployment::{
     Deployment, DeploymentMetadata, DeploymentType, ProtocolType,
 };
 use restate_types::service_protocol::ServiceProtocolVersion;
-use std::collections::HashSet;
-use std::future::poll_fn;
-use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, trace, warn};
+
+use crate::Notification;
+use crate::error::{InvocationErrorRelatedEntry, InvokerError, SdkInvocationError};
+use crate::invocation_task::{
+    InvocationTask, InvocationTaskOutputInner, InvokerBodyStream, InvokerRequestStreamSender,
+    MetricDimensions, ResponseChunk, ResponseStreamState, TerminalLoopState, X_RESTATE_SERVER,
+    invocation_id_to_header_value, service_protocol_version_to_header_value,
+};
+use crate::metric_definitions::INVOKER_DEPLOYMENT_TIME_TO_FIRST_BYTE;
 
 ///  Provides the value of the invocation id
 const INVOCATION_ID_HEADER_NAME: HeaderName = HeaderName::from_static("x-restate-invocation-id");
@@ -161,14 +165,20 @@ where
             .await
         );
 
+        let metric_dimensions = MetricDimensions::new(deployment.id);
         // Initialize the response stream state
         let mut http_stream_rx =
             ResponseStreamState::initialize(&self.invocation_task.client, request);
 
         // Execute the replay
         crate::shortcircuit!(
-            self.replay_loop(&mut http_stream_tx, &mut http_stream_rx, journal_stream)
-                .await
+            self.replay_loop(
+                &metric_dimensions,
+                &mut http_stream_tx,
+                &mut http_stream_rx,
+                journal_stream
+            )
+            .await
         );
 
         // Check all the entries have been replayed
@@ -180,6 +190,7 @@ where
             trace!("Protocol is in bidi stream mode, will now start the send/receive loop");
             crate::shortcircuit!(
                 self.bidi_stream_loop(
+                    &metric_dimensions,
                     &service_invocation_span_context,
                     http_stream_tx,
                     &mut http_stream_rx,
@@ -196,7 +207,11 @@ where
         // We don't have the invoker_rx, so we simply consume the response
         trace!("Sender side of the request has been dropped, now processing the response");
         let result = self
-            .response_stream_loop(&service_invocation_span_context, &mut http_stream_rx)
+            .response_stream_loop(
+                &metric_dimensions,
+                &service_invocation_span_context,
+                &mut http_stream_rx,
+            )
             .await;
 
         // Sanity check of the stream decoder
@@ -285,6 +300,7 @@ where
     /// This loop concurrently pushes journal entries and waits for the response headers and end of replay.
     async fn replay_loop<JournalStream>(
         &mut self,
+        metric_dimensions: &MetricDimensions,
         http_stream_tx: &mut InvokerRequestStreamSender,
         http_stream_rx: &mut ResponseStreamState,
         journal_stream: JournalStream,
@@ -302,7 +318,7 @@ where
                     // The reason we want to poll headers in this function is
                     // to exit early in case an error is returned during replays.
                     let headers = crate::shortcircuit!(got_headers_res);
-                    crate::shortcircuit!(self.handle_response_headers(headers));
+                    crate::shortcircuit!(self.handle_response_headers(metric_dimensions, headers));
                 },
                 opt_je = journal_stream.next() => {
                     match opt_je {
@@ -338,6 +354,7 @@ where
     /// This loop concurrently reads the http response stream and journal completions from the invoker.
     async fn bidi_stream_loop(
         &mut self,
+        metric_dimensions: &MetricDimensions,
         parent_span_context: &ServiceInvocationSpanContext,
         mut http_stream_tx: InvokerRequestStreamSender,
         http_stream_rx: &mut ResponseStreamState,
@@ -367,7 +384,7 @@ where
                 },
                 chunk = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)) => {
                     match crate::shortcircuit!(chunk) {
-                        ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(parts)),
+                        ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(metric_dimensions, parts)),
                         ResponseChunk::Data(buf) => crate::shortcircuit!(self.handle_read(parent_span_context, buf)),
                         ResponseChunk::End => {
                             // Response stream was closed without SuspensionMessage, EndMessage or ErrorMessage
@@ -387,6 +404,7 @@ where
 
     async fn response_stream_loop(
         &mut self,
+        metric_dimensions: &MetricDimensions,
         parent_span_context: &ServiceInvocationSpanContext,
         http_stream_rx: &mut ResponseStreamState,
     ) -> TerminalLoopState<()> {
@@ -394,7 +412,7 @@ where
             tokio::select! {
                 chunk = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)) => {
                     match crate::shortcircuit!(chunk) {
-                        ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(parts)),
+                        ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(metric_dimensions, parts)),
                         ResponseChunk::Data(buf) => crate::shortcircuit!(self.handle_read(parent_span_context, buf)),
                         ResponseChunk::End => {
                             // Response stream was closed without SuspensionMessage, EndMessage or ErrorMessage
@@ -458,8 +476,14 @@ where
 
     fn handle_response_headers(
         &mut self,
+        metric_dimensions: &MetricDimensions,
         mut parts: http::response::Parts,
     ) -> Result<(), InvokerError> {
+        metrics::histogram!(INVOKER_DEPLOYMENT_TIME_TO_FIRST_BYTE,
+            "service" => self.invocation_task.invocation_target.service_name().to_string(),
+            "deployment" => metric_dimensions.deployment_id().to_string())
+        .record(metric_dimensions.duration());
+
         // if service is running behind a gateway, the service can be down
         // but we still get a response code from the gateway itself. In that
         // case we still need to return the proper error
