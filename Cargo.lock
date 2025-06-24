@@ -10690,6 +10690,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "object_store",
+ "once_cell",
  "opentelemetry_sdk",
  "phf_shared",
  "pprof",
