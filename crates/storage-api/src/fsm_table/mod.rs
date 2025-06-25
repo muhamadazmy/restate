@@ -15,6 +15,7 @@ use restate_types::logs::Lsn;
 use restate_types::message::MessageIndex;
 
 use crate::Result;
+use crate::protobuf_types::PartitionStoreProtobufValue;
 
 pub trait ReadOnlyFsmTable {
     fn get_inbox_seq_number(&mut self) -> impl Future<Output = Result<MessageIndex>> + Send + '_;
@@ -45,4 +46,11 @@ pub trait FsmTable: ReadOnlyFsmTable {
         &mut self,
         version: &SemanticRestateVersion,
     ) -> impl Future<Output = Result<()>> + Send;
+}
+
+#[derive(Debug, Clone, Copy, derive_more::From, derive_more::Into)]
+pub struct SequenceNumber(pub u64);
+
+impl PartitionStoreProtobufValue for SequenceNumber {
+    type ProtobufType = crate::protobuf_types::v1::SequenceNumber;
 }

@@ -8,6 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::future::Future;
 use std::ops::RangeInclusive;
 
 use futures::Stream;
@@ -15,10 +16,15 @@ use futures::Stream;
 use restate_types::identifiers::{IdempotencyId, InvocationId, PartitionKey};
 
 use super::Result;
+use crate::protobuf_types::PartitionStoreProtobufValue;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IdempotencyMetadata {
     pub invocation_id: InvocationId,
+}
+
+impl PartitionStoreProtobufValue for IdempotencyMetadata {
+    type ProtobufType = crate::protobuf_types::v1::IdempotencyMetadata;
 }
 
 pub trait ReadOnlyIdempotencyTable {

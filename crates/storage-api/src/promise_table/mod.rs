@@ -24,6 +24,7 @@ use restate_types::journal_v2::{
 };
 
 use super::Result;
+use crate::protobuf_types::PartitionStoreProtobufValue;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromiseResult {
@@ -98,6 +99,10 @@ impl Default for PromiseState {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Promise {
     pub state: PromiseState,
+}
+
+impl PartitionStoreProtobufValue for Promise {
+    type ProtobufType = crate::protobuf_types::v1::Promise;
 }
 
 #[derive(Debug, Clone, PartialEq)]

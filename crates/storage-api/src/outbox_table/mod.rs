@@ -8,13 +8,16 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use crate::Result;
+use std::ops::RangeInclusive;
+
 use restate_types::identifiers::{PartitionKey, WithPartitionKey};
 use restate_types::invocation::{
     AttachInvocationRequest, InvocationResponse, InvocationTermination, NotifySignalRequest,
     ServiceInvocation,
 };
-use std::ops::RangeInclusive;
+
+use crate::Result;
+use crate::protobuf_types::PartitionStoreProtobufValue;
 
 /// Types of outbox messages.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -33,6 +36,10 @@ pub enum OutboxMessage {
 
     /// Notify signal request
     NotifySignal(NotifySignalRequest),
+}
+
+impl PartitionStoreProtobufValue for OutboxMessage {
+    type ProtobufType = crate::protobuf_types::v1::OutboxMessage;
 }
 
 impl WithPartitionKey for OutboxMessage {

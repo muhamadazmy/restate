@@ -17,7 +17,10 @@ use futures::Stream;
 use futures_util::stream;
 
 use restate_rocksdb::{Priority, RocksDbPerfGuard};
-use restate_storage_api::journal_table_v2::{JournalTable, ReadOnlyJournalTable, ScanJournalTable};
+use restate_storage_api::journal_table_v2::{
+    JournalEntryIndex, JournalTable, ReadOnlyJournalTable, ScanJournalTable, StoredEntry,
+};
+use restate_storage_api::protobuf_types::PartitionStoreProtobufValue;
 use restate_storage_api::{Result, StorageError};
 use restate_types::identifiers::{
     EntryIndex, InvocationId, InvocationUuid, JournalEntryId, PartitionKey, WithPartitionKey,
@@ -26,12 +29,11 @@ use restate_types::journal_v2::raw::{RawCommand, RawEntry, RawEntryInner};
 use restate_types::journal_v2::{CompletionId, EntryMetadata, NotificationId};
 
 use crate::TableKind::Journal;
-use crate::keys::TableKey;
-use crate::keys::{KeyKind, define_table_key};
+use crate::keys::{KeyKind, TableKey, define_table_key};
 use crate::owned_iter::OwnedIterator;
-use crate::protobuf_types::PartitionStoreProtobufValue;
-use crate::{PartitionStore, PartitionStoreTransaction, StorageAccess};
-use crate::{TableScan, TableScanIterationDecision};
+use crate::{
+    PartitionStore, PartitionStoreTransaction, StorageAccess, TableScan, TableScanIterationDecision,
+};
 
 define_table_key!(
     Journal,
@@ -68,18 +70,6 @@ fn write_journal_entry_key(invocation_id: &InvocationId, journal_index: u32) -> 
         .partition_key(invocation_id.partition_key())
         .invocation_uuid(invocation_id.invocation_uuid())
         .journal_index(journal_index)
-}
-
-#[derive(Debug, Clone)]
-pub struct StoredEntry(pub RawEntry);
-impl PartitionStoreProtobufValue for StoredEntry {
-    type ProtobufType = crate::protobuf_types::v1::Entry;
-}
-
-#[derive(Debug, Clone, Copy, derive_more::From, derive_more::Into)]
-pub(crate) struct JournalEntryIndex(pub(crate) u32);
-impl PartitionStoreProtobufValue for JournalEntryIndex {
-    type ProtobufType = crate::protobuf_types::v1::JournalEntryIndex;
 }
 
 fn put_journal_entry<S: StorageAccess>(

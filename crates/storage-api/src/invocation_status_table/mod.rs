@@ -8,11 +8,16 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use crate::Result;
+use std::collections::HashSet;
+use std::future::Future;
+use std::ops::RangeInclusive;
+use std::time::Duration;
+
 use bytes::Bytes;
 use bytestring::ByteString;
 use futures::Stream;
 use rangemap::RangeInclusiveMap;
+
 use restate_types::RestateVersion;
 use restate_types::deployment::PinnedDeployment;
 use restate_types::identifiers::{InvocationId, PartitionKey};
@@ -22,10 +27,9 @@ use restate_types::invocation::{
 };
 use restate_types::journal_v2::{CompletionId, EntryIndex, NotificationId};
 use restate_types::time::MillisSinceEpoch;
-use std::collections::HashSet;
-use std::future::Future;
-use std::ops::RangeInclusive;
-use std::time::Duration;
+
+use crate::Result;
+use crate::protobuf_types::PartitionStoreProtobufValue;
 
 /// Holds timestamps of the [`InvocationStatus`].
 #[derive(Debug, Clone, PartialEq)]
@@ -194,6 +198,10 @@ pub enum InvocationStatus {
     /// Service instance is currently not invoked
     #[default]
     Free,
+}
+
+impl PartitionStoreProtobufValue for InvocationStatus {
+    type ProtobufType = crate::protobuf_types::v1::InvocationStatusV2;
 }
 
 impl InvocationStatus {
@@ -870,6 +878,26 @@ mod test_util {
             }
         }
     }
+}
+
+/// Lite status of an invocation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct InvocationLite {
+    pub status: InvocationStatusDiscriminants,
+    pub invocation_target: InvocationTarget,
+    pub current_invocation_epoch: InvocationEpoch,
+}
+
+impl PartitionStoreProtobufValue for InvocationLite {
+    type ProtobufType = crate::protobuf_types::v1::InvocationV2Lite;
+}
+
+// TODO remove this once we remove the old InvocationStatus
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct InvocationStatusV1(pub InvocationStatus);
+
+impl PartitionStoreProtobufValue for InvocationStatusV1 {
+    type ProtobufType = crate::protobuf_types::v1::InvocationStatus;
 }
 
 #[cfg(test)]

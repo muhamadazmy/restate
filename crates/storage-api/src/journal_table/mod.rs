@@ -17,6 +17,7 @@ use restate_types::journal::enriched::EnrichedRawEntry;
 use restate_types::journal::{CompletionResult, EntryType};
 
 use crate::Result;
+use crate::protobuf_types::PartitionStoreProtobufValue;
 
 /// Different types of journal entries persisted by the runtime
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,10 @@ impl JournalEntry {
             JournalEntry::Completion(_) => false,
         }
     }
+}
+
+impl PartitionStoreProtobufValue for JournalEntry {
+    type ProtobufType = crate::protobuf_types::v1::JournalEntry;
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -14,19 +14,17 @@ use bytestring::ByteString;
 use futures::Stream;
 
 use restate_rocksdb::{Priority, RocksDbPerfGuard};
+use restate_storage_api::protobuf_types::PartitionStoreProtobufValue;
 use restate_storage_api::service_status_table::{
     ReadOnlyVirtualObjectStatusTable, ScanVirtualObjectStatusTable, VirtualObjectStatus,
     VirtualObjectStatusTable,
 };
 use restate_storage_api::{Result, StorageError};
-use restate_types::identifiers::WithPartitionKey;
-use restate_types::identifiers::{PartitionKey, ServiceId};
+use restate_types::identifiers::{PartitionKey, ServiceId, WithPartitionKey};
 
 use crate::keys::{KeyKind, TableKey, define_table_key};
-use crate::protobuf_types::PartitionStoreProtobufValue;
 use crate::scan::TableScan;
-use crate::{PartitionStore, TableKind};
-use crate::{PartitionStoreTransaction, StorageAccess};
+use crate::{PartitionStore, PartitionStoreTransaction, StorageAccess, TableKind};
 
 define_table_key!(
     TableKind::ServiceStatus,
@@ -37,10 +35,6 @@ define_table_key!(
         service_key: ByteString
     )
 );
-
-impl PartitionStoreProtobufValue for VirtualObjectStatus {
-    type ProtobufType = crate::protobuf_types::v1::VirtualObjectStatus;
-}
 
 fn write_status_key(service_id: &ServiceId) -> ServiceStatusKey {
     ServiceStatusKey::default()

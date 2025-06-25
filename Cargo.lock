@@ -7464,8 +7464,6 @@ dependencies = [
  "opentelemetry",
  "paste",
  "prost",
- "prost-build",
- "prost-types",
  "rand 0.9.1",
  "restate-core",
  "restate-errors",
@@ -7725,6 +7723,10 @@ dependencies = [
  "derive_more",
  "futures",
  "num-traits",
+ "opentelemetry",
+ "prost",
+ "prost-build",
+ "prost-types",
  "rangemap",
  "restate-types",
  "serde",
@@ -7993,7 +7995,6 @@ dependencies = [
  "enum-map",
  "prost",
  "restate-invoker-api",
- "restate-partition-store",
  "restate-storage-api",
  "restate-types",
  "serde",
@@ -8005,8 +8006,8 @@ dependencies = [
 
 [[package]]
 name = "restate-web-ui"
-version = "0.0.79"
-source = "git+https://github.com/restatedev/restate-web-ui-crate?tag=v0.0.79#7511089c2ce4fdb265077a800bc1da478234d5ea"
+version = "0.0.81"
+source = "git+https://github.com/restatedev/restate-web-ui-crate?tag=v0.0.81#73bc0af6034030dfbe66339e0a05e8c06deb8f61"
 dependencies = [
  "anyhow",
  "include_dir",
