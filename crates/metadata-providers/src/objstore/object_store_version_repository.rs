@@ -8,11 +8,13 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::str::FromStr;
+
 use anyhow::Context;
 use bytes::Bytes;
 use bytestring::ByteString;
 use object_store::path::{Path, PathPart};
-use object_store::{Error, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
+use object_store::{Attribute, Error, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 use tracing::info;
 use url::Url;
 
@@ -20,6 +22,7 @@ use restate_object_store_util::create_object_store_client;
 use restate_types::config::MetadataClientKind;
 
 use super::version_repository::{Tag, TaggedValue, VersionRepository, VersionRepositoryError};
+use crate::objstore::version_repository::ValueEncoding;
 
 #[derive(Debug)]
 pub(crate) struct ObjectStoreVersionRepository {
@@ -84,13 +87,21 @@ const DELETED_HEADER: Bytes = Bytes::from_static(b"d");
 
 #[async_trait::async_trait]
 impl VersionRepository for ObjectStoreVersionRepository {
-    async fn create(&self, key: ByteString, content: Bytes) -> Result<Tag, VersionRepositoryError> {
+    async fn create(
+        &self,
+        key: ByteString,
+        encoding: ValueEncoding,
+        content: Bytes,
+    ) -> Result<Tag, VersionRepositoryError> {
         let path = self.path(&key);
 
-        let opts = PutOptions {
+        let mut opts = PutOptions {
             mode: PutMode::Create,
             ..Default::default()
         };
+
+        opts.attributes
+            .insert(Attribute::ContentEncoding, encoding.into());
 
         let payload = PutPayload::from_iter([EXISTS_HEADER, content.clone()]);
 
@@ -124,7 +135,7 @@ impl VersionRepository for ObjectStoreVersionRepository {
                     return Err(VersionRepositoryError::AlreadyExists);
                 }
                 assert_eq!(bytes, DELETED_HEADER);
-                self.put_if_tag_matches(key, tag, content).await
+                self.put_if_tag_matches(key, tag, encoding, content).await
             }
             Err(e) => Err(VersionRepositoryError::Network(e.into())),
         }
@@ -134,6 +145,13 @@ impl VersionRepository for ObjectStoreVersionRepository {
         let path = self.path(&key);
         match self.object_store.get(&path).await {
             Ok(res) => {
+                let encoding = res
+                    .attributes
+                    .get(&Attribute::ContentEncoding)
+                    .map(|value| ValueEncoding::from_str(value))
+                    .transpose()?
+                    .unwrap_or_default();
+
                 let etag = res.meta.e_tag.as_ref().ok_or_else(|| {
                     VersionRepositoryError::UnexpectedCondition(
                         "expecting an ETag to be present".into(),
@@ -148,7 +166,11 @@ impl VersionRepository for ObjectStoreVersionRepository {
                     Err(VersionRepositoryError::NotFound)
                 } else {
                     let bytes = buf.split_off(EXISTS_HEADER.len());
-                    Ok(TaggedValue { bytes, tag })
+                    Ok(TaggedValue {
+                        bytes,
+                        encoding,
+                        tag,
+                    })
                 }
             }
             Err(Error::NotFound { .. }) => Err(VersionRepositoryError::NotFound),
@@ -160,6 +182,7 @@ impl VersionRepository for ObjectStoreVersionRepository {
         &self,
         key: ByteString,
         expected: Tag,
+        encoding: ValueEncoding,
         new_content: Bytes,
     ) -> Result<Tag, VersionRepositoryError> {
         let etag = expected.as_string();
@@ -169,12 +192,17 @@ impl VersionRepository for ObjectStoreVersionRepository {
         };
 
         let path = self.path(&key);
+        let mut put_options = PutOptions::from(PutMode::Update(update_version));
+        put_options
+            .attributes
+            .insert(Attribute::ContentEncoding, encoding.into());
+
         match self
             .object_store
             .put_opts(
                 &path,
                 PutPayload::from_iter([EXISTS_HEADER, new_content]),
-                PutOptions::from(PutMode::Update(update_version)),
+                put_options,
             )
             .await
         {
@@ -193,12 +221,22 @@ impl VersionRepository for ObjectStoreVersionRepository {
     async fn put(
         &self,
         key: ByteString,
+        encoding: ValueEncoding,
         new_content: Bytes,
     ) -> Result<Tag, VersionRepositoryError> {
         let path = self.path(&key);
+        let mut put_options = PutOptions::default();
+        put_options
+            .attributes
+            .insert(Attribute::ContentEncoding, encoding.into());
+
         match self
             .object_store
-            .put(&path, PutPayload::from_iter([EXISTS_HEADER, new_content]))
+            .put_opts(
+                &path,
+                PutPayload::from_iter([EXISTS_HEADER, new_content]),
+                put_options,
+            )
             .await
         {
             Ok(res) => {
@@ -274,12 +312,16 @@ mod tests {
     async fn simple_usage() {
         let store = ObjectStoreVersionRepository::new_for_testing();
 
-        let tag = store.create(KEY_1, HELLO_WORLD).await.unwrap();
+        let tag = store
+            .create(KEY_1, ValueEncoding::Bilrost, HELLO_WORLD)
+            .await
+            .unwrap();
 
         let tagged_value = store.get(KEY_1).await.unwrap();
 
         assert_eq!(tagged_value.tag, tag);
         assert_eq!(tagged_value.bytes, HELLO_WORLD);
+        assert_eq!(tagged_value.encoding, ValueEncoding::Bilrost);
     }
 
     #[tokio::test]
@@ -300,9 +342,12 @@ mod tests {
     async fn create_twice_should_fail() {
         let store = ObjectStoreVersionRepository::new_for_testing();
 
-        store.create(KEY_1, HELLO_WORLD).await.unwrap();
+        store
+            .create(KEY_1, ValueEncoding::Cbor, HELLO_WORLD)
+            .await
+            .unwrap();
 
-        match store.create(KEY_1, HELLO_WORLD).await {
+        match store.create(KEY_1, ValueEncoding::Cbor, HELLO_WORLD).await {
             Err(VersionRepositoryError::AlreadyExists) => {
                 // ok!
             }
@@ -316,7 +361,10 @@ mod tests {
     async fn delete_should_work() {
         let store = ObjectStoreVersionRepository::new_for_testing();
 
-        store.create(KEY_1, HELLO_WORLD).await.unwrap();
+        store
+            .create(KEY_1, ValueEncoding::Cbor, HELLO_WORLD)
+            .await
+            .unwrap();
 
         store.delete(KEY_1).await.unwrap();
 
@@ -334,24 +382,38 @@ mod tests {
     async fn create_after_delete_should_work() {
         let store = ObjectStoreVersionRepository::new_for_testing();
 
-        store.create(KEY_1, HELLO_WORLD).await.unwrap();
+        store
+            .create(KEY_1, ValueEncoding::Cbor, HELLO_WORLD)
+            .await
+            .unwrap();
 
         store.delete(KEY_1).await.unwrap();
 
-        store.create(KEY_1, WORLD).await.unwrap();
+        // also change encoding
+        store
+            .create(KEY_1, ValueEncoding::Bilrost, WORLD)
+            .await
+            .unwrap();
 
         let tv = store.get(KEY_1).await.unwrap();
 
         assert_eq!(tv.bytes, WORLD);
+        assert_eq!(tv.encoding, ValueEncoding::Bilrost);
     }
 
     #[tokio::test]
     async fn conditional_put_should_work() {
         let store = ObjectStoreVersionRepository::new_for_testing();
 
-        let tag = store.create(KEY_1, HELLO_WORLD).await.unwrap();
+        let tag = store
+            .create(KEY_1, ValueEncoding::Cbor, HELLO_WORLD)
+            .await
+            .unwrap();
 
-        store.put_if_tag_matches(KEY_1, tag, WORLD).await.unwrap();
+        store
+            .put_if_tag_matches(KEY_1, tag, ValueEncoding::Cbor, WORLD)
+            .await
+            .unwrap();
 
         let tv = store.get(KEY_1).await.unwrap();
 
@@ -362,14 +424,20 @@ mod tests {
     async fn conditional_put_should_fail() {
         let store = ObjectStoreVersionRepository::new_for_testing();
 
-        let tag = store.create(KEY_1, HELLO_WORLD).await.unwrap();
-
-        store
-            .put_if_tag_matches(KEY_1, tag.clone(), HELLO)
+        let tag = store
+            .create(KEY_1, ValueEncoding::Cbor, HELLO_WORLD)
             .await
             .unwrap();
 
-        match store.put_if_tag_matches(KEY_1, tag.clone(), WORLD).await {
+        store
+            .put_if_tag_matches(KEY_1, tag.clone(), ValueEncoding::Cbor, HELLO)
+            .await
+            .unwrap();
+
+        match store
+            .put_if_tag_matches(KEY_1, tag.clone(), ValueEncoding::Cbor, WORLD)
+            .await
+        {
             Err(VersionRepositoryError::PreconditionFailed) => {
                 // ok!
             }
@@ -382,7 +450,11 @@ mod tests {
         let store = Arc::new(ObjectStoreVersionRepository::new_for_testing());
 
         store
-            .create(KEY_1, Bytes::copy_from_slice(&0u64.to_be_bytes()))
+            .create(
+                KEY_1,
+                ValueEncoding::Cbor,
+                Bytes::copy_from_slice(&0u64.to_be_bytes()),
+            )
             .await
             .unwrap();
 
@@ -406,6 +478,7 @@ mod tests {
                         .put_if_tag_matches(
                             KEY_1.clone(),
                             tag,
+                            ValueEncoding::Cbor,
                             Bytes::copy_from_slice(&n.to_be_bytes()),
                         )
                         .await
