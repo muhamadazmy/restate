@@ -8,10 +8,13 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::borrow::Cow;
+
+use anyhow::Context;
+use bilrost::{Message, OwnedMessage};
 use bytes::{BufMut, Bytes, BytesMut};
 use bytestring::ByteString;
 use rand::random;
-use std::borrow::Cow;
 
 use restate_metadata_store::{ReadError, WriteError};
 use restate_types::Version;
@@ -20,6 +23,7 @@ use restate_types::metadata::{Precondition, VersionedValue};
 
 use super::version_repository::VersionRepositoryError::PreconditionFailed;
 use super::version_repository::{TaggedValue, VersionRepository, VersionRepositoryError};
+use crate::objstore::version_repository::{Tag, ValueEncoding};
 
 pub(crate) struct OptimisticLockingMetadataStoreBuilder {
     pub(crate) version_repository: Box<dyn VersionRepository>,
@@ -46,14 +50,27 @@ enum OnDiskValue<'a> {
     V1(Cow<'a, VersionedValue>, u64),
 }
 
-fn tagged_value_to_versioned_value(tagged_value: &TaggedValue) -> anyhow::Result<VersionedValue> {
-    let on_disk: OnDiskValue<'static> = ciborium::from_reader(tagged_value.bytes.as_ref())?;
-    match on_disk {
-        OnDiskValue::V1(cow, _) => Ok(cow.into_owned()),
-    }
+fn tagged_value_to_versioned_value(
+    tagged_value: TaggedValue,
+) -> anyhow::Result<(Tag, VersionedValue)> {
+    let tag = tagged_value.tag;
+    let versioned_value = match tagged_value.encoding {
+        ValueEncoding::Ciborium => {
+            let on_disk: OnDiskValue<'static> = ciborium::from_reader(tagged_value.bytes.as_ref())?;
+            match on_disk {
+                OnDiskValue::V1(cow, _) => Ok(cow.into_owned()),
+            }
+        }
+        ValueEncoding::Bilrost => {
+            VersionedValue::decode(tagged_value.bytes).context("failed to decode bilrost")
+        }
+    }?;
+    Ok((tag, versioned_value))
 }
 
 impl OptimisticLockingMetadataStore {
+    const DEFAULT_ENCODING: ValueEncoding = ValueEncoding::Bilrost;
+
     fn new(version_repository: Box<dyn VersionRepository>) -> Self {
         Self {
             version_repository,
@@ -67,8 +84,8 @@ impl OptimisticLockingMetadataStore {
     ) -> Result<Option<VersionedValue>, ReadError> {
         match self.version_repository.get(key).await {
             Ok(res) => {
-                let d = tagged_value_to_versioned_value(&res)
-                    .map_err(|e| ReadError::Codec(e.into()))?;
+                let (_, d) =
+                    tagged_value_to_versioned_value(res).map_err(|e| ReadError::Codec(e.into()))?;
                 Ok(Some(d))
             }
             Err(VersionRepositoryError::NotFound) => Ok(None),
@@ -89,15 +106,27 @@ impl OptimisticLockingMetadataStore {
 
     fn serialize_versioned_value(
         &mut self,
+        encoding: ValueEncoding,
         versioned_value: &VersionedValue,
         cookie: u64,
     ) -> Result<Bytes, WriteError> {
-        self.arena.clear();
-        let writer = (&mut self.arena).writer();
-        let on_disk = OnDiskValue::V1(Cow::Borrowed(versioned_value), cookie);
-        ciborium::into_writer(&on_disk, writer)
-            .map(|_| self.arena.split().freeze())
-            .map_err(|e| WriteError::Codec(e.into()))
+        match encoding {
+            ValueEncoding::Ciborium => {
+                self.arena.clear();
+                let writer = (&mut self.arena).writer();
+                let on_disk = OnDiskValue::V1(Cow::Borrowed(versioned_value), cookie);
+                ciborium::into_writer(&on_disk, writer)
+                    .map(|_| self.arena.split().freeze())
+                    .map_err(|e| WriteError::Codec(e.into()))
+            }
+            ValueEncoding::Bilrost => {
+                self.arena.clear();
+                versioned_value
+                    .encode(&mut self.arena)
+                    .map_err(|err| WriteError::Codec(err.into()))?;
+                Ok(self.arena.split().freeze())
+            }
+        }
     }
 
     pub(crate) async fn put(
@@ -108,16 +137,20 @@ impl OptimisticLockingMetadataStore {
     ) -> Result<(), WriteError> {
         // create a random cookie
         let cookie = random::<u64>();
-        let buf = self.serialize_versioned_value(&value, cookie)?;
+        let buf = self.serialize_versioned_value(Self::DEFAULT_ENCODING, &value, cookie)?;
         match precondition {
             Precondition::None => {
                 self.version_repository
-                    .put(key, buf)
+                    .put(key, Self::DEFAULT_ENCODING, buf)
                     .await
                     .map_err(WriteError::retryable)?;
                 Ok(())
             }
-            Precondition::DoesNotExist => match self.version_repository.create(key, buf).await {
+            Precondition::DoesNotExist => match self
+                .version_repository
+                .create(key, Self::DEFAULT_ENCODING, buf)
+                .await
+            {
                 Ok(_) => Ok(()),
                 Err(VersionRepositoryError::AlreadyExists) => {
                     Err(WriteError::FailedPrecondition("already exists".to_string()))
@@ -133,9 +166,9 @@ impl OptimisticLockingMetadataStore {
                 let (current_tag, current_version) =
                     match self.version_repository.get(key.clone()).await {
                         Ok(tagged) => {
-                            let versioned_value = tagged_value_to_versioned_value(&tagged)
+                            let (tag, versioned_value) = tagged_value_to_versioned_value(tagged)
                                 .map_err(|e| WriteError::Codec(e.into()))?;
-                            (tagged.tag, versioned_value.version)
+                            (tag, versioned_value.version)
                         }
                         Err(VersionRepositoryError::NotFound) => {
                             return Err(WriteError::FailedPrecondition(
@@ -158,7 +191,7 @@ impl OptimisticLockingMetadataStore {
                 //
                 match self
                     .version_repository
-                    .put_if_tag_matches(key, current_tag, buf)
+                    .put_if_tag_matches(key, current_tag, Self::DEFAULT_ENCODING, buf)
                     .await
                 {
                     Ok(_) => Ok(()),
@@ -186,10 +219,9 @@ impl OptimisticLockingMetadataStore {
                 // we need to convert a version into a tag, this mean we need to do a read first.
                 let (tag, current_version) = match self.version_repository.get(key.clone()).await {
                     Ok(res) => {
-                        let tag = res.tag.clone();
-                        let d = tagged_value_to_versioned_value(&res)
+                        let (tag, versioned_value) = tagged_value_to_versioned_value(res)
                             .map_err(|e| WriteError::Codec(e.into()))?;
-                        (tag, d.version)
+                        (tag, versioned_value.version)
                     }
                     Err(VersionRepositoryError::NotFound) => {
                         return Err(WriteError::FailedPrecondition(
@@ -230,7 +262,10 @@ mod tests {
     use restate_types::metadata::{Precondition, VersionedValue};
 
     use crate::objstore::object_store_version_repository::ObjectStoreVersionRepository;
-    use crate::objstore::optimistic_store::OptimisticLockingMetadataStore;
+    use crate::objstore::optimistic_store::{
+        OptimisticLockingMetadataStore, tagged_value_to_versioned_value,
+    };
+    use crate::objstore::version_repository::{Tag, TaggedValue, ValueEncoding};
 
     const KEY_1: ByteString = ByteString::from_static("1");
     const HELLO: Bytes = Bytes::from_static(b"hello");
@@ -323,6 +358,43 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn test_encoding() {
+        let mut store = OptimisticLockingMetadataStore::new(Box::new(
+            ObjectStoreVersionRepository::new_for_testing(),
+        ));
+
+        let value = VersionedValue::new(Version::MIN.next(), HELLO);
+
+        let buf = store
+            .serialize_versioned_value(ValueEncoding::Ciborium, &value, 0)
+            .unwrap();
+
+        let tagged_value = TaggedValue {
+            tag: Tag::from("test".to_string()),
+            encoding: ValueEncoding::Ciborium,
+            bytes: buf,
+        };
+
+        let (tag, versioned_value) = tagged_value_to_versioned_value(tagged_value).unwrap();
+        assert_eq!(tag, Tag::from("test".to_string()));
+        assert_eq!(versioned_value.value, HELLO);
+
+        let buf = store
+            .serialize_versioned_value(ValueEncoding::Bilrost, &value, 0)
+            .unwrap();
+
+        let tagged_value = TaggedValue {
+            tag: Tag::from("test".to_string()),
+            encoding: ValueEncoding::Bilrost,
+            bytes: buf,
+        };
+
+        let (tag, versioned_value) = tagged_value_to_versioned_value(tagged_value).unwrap();
+        assert_eq!(tag, Tag::from("test".to_string()));
+        assert_eq!(versioned_value.value, HELLO);
     }
 }
 
