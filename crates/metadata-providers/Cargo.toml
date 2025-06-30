@@ -15,9 +15,10 @@ objstore = [
   "restate-object-store-util",
   "object_store",
   "ciborium",
+  "bilrost",
   "serde",
   "url",
-  "rand"
+  "rand",
 ]
 replicated = [
   "restate-metadata-server-grpc",
@@ -36,10 +37,13 @@ restate-workspace-hack = { workspace = true }
 
 restate-metadata-store = { workspace = true, features = ["grpc-client"] }
 restate-types = { workspace = true }
-restate-metadata-server-grpc = { workspace = true, optional = true, features = ["grpc-client"] }
+restate-metadata-server-grpc = { workspace = true, optional = true, features = [
+  "grpc-client",
+] }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+bilrost = { workspace = true, optional = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
 thiserror = { workspace = true }
@@ -62,7 +66,11 @@ url = { workspace = true, optional = true }
 # Deps for replicated metadata client
 indexmap = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
-tonic = { workspace = true, optional = true, features = ["transport", "codegen", "prost"] }
+tonic = { workspace = true, optional = true, features = [
+  "transport",
+  "codegen",
+  "prost",
+] }
 derive_more = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
