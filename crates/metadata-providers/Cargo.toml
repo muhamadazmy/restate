@@ -40,6 +40,7 @@ restate-metadata-server-grpc = { workspace = true, optional = true, features = [
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+bilrost = { workspace = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
 thiserror = { workspace = true }
