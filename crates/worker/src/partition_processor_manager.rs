@@ -49,10 +49,7 @@ use restate_bifrost::loglet::FindTailOptions;
 use restate_core::network::{
     BackPressureMode, Incoming, MessageRouterBuilder, Rpc, ServiceMessage, ServiceReceiver, Verdict,
 };
-use restate_core::worker_api::{
-    ProcessorsManagerCommand, ProcessorsManagerHandle, SnapshotCreated, SnapshotError,
-    SnapshotErrorKind, SnapshotResult,
-};
+use restate_core::worker_api::{ProcessorsManagerCommand, ProcessorsManagerHandle};
 use restate_core::{
     Metadata, MetadataWriter, ShutdownError, TaskCenterFutureExt, TaskHandle, TaskKind,
     cancellation_watcher, my_node_id,
@@ -63,7 +60,9 @@ use restate_invoker_impl::{BuildError, ChannelStatusReader};
 use restate_metadata_server::{MetadataStoreClient, ReadModifyWriteError};
 use restate_metadata_store::{ReadWriteError, RetryError, retry_on_retryable_error};
 use restate_partition_store::PartitionStoreManager;
-use restate_partition_store::snapshots::PartitionSnapshotMetadata;
+use restate_partition_store::snapshots::{
+    PartitionSnapshotMetadata, SnapshotCreated, SnapshotError, SnapshotErrorKind,
+};
 use restate_types::cluster::cluster_state::ReplayStatus;
 use restate_types::cluster::cluster_state::{PartitionProcessorStatus, RunMode};
 use restate_types::config::Configuration;
@@ -120,12 +119,13 @@ pub struct PartitionProcessorManager {
     wait_for_partition_table_update: bool,
 }
 
+type SnapshotResult = Result<SnapshotCreated, SnapshotError>;
+type SnapshotResultInternal = Result<PartitionSnapshotMetadata, SnapshotError>;
+
 struct PendingSnapshotTask {
     snapshot_id: SnapshotId,
     sender: Option<oneshot::Sender<SnapshotResult>>,
 }
-
-type SnapshotResultInternal = Result<PartitionSnapshotMetadata, SnapshotError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -166,13 +166,17 @@ impl StatusHandle for MultiplexedInvokerStatusReader {
         for (range, reader) in self.readers.read().iter() {
             if keys.start() <= range.end() && keys.end() >= range.start() {
                 // if this partition is actually overlapping with the search range
-                overlapping_partitions.push(reader.clone())
+                overlapping_partitions.push((range.clone(), reader.clone()))
             }
         }
+        // although we never have a single scans that cross partitions (thus overlapping_partitions.len() == 1),
+        // we can make this code path abit more future resilent cheaply, by ordering the partitions by their start key.
+        // (this uniquely defines the order between the partitions)
+        overlapping_partitions.sort_by(|(a, _), (b, _)| a.start().cmp(b.start()));
 
         let mut result = Vec::with_capacity(overlapping_partitions.len());
 
-        for reader in overlapping_partitions {
+        for (_, reader) in overlapping_partitions {
             result.push(reader.read_status(keys.clone()).await);
         }
 
@@ -605,7 +609,7 @@ impl PartitionProcessorManager {
     ) {
         self.asynchronous_operations
             .build_task()
-            .name(&format!("runtime-result-{}", partition_id))
+            .name(&format!("runtime-result-{partition_id}"))
             .spawn(
                 async move {
                     let result = runtime_task_handle.await;
@@ -660,7 +664,7 @@ impl PartitionProcessorManager {
     ) {
         asynchronous_operations
             .build_task()
-            .name(&format!("obtain-leader-epoch-{}", partition_id))
+            .name(&format!("obtain-leader-epoch-{partition_id}"))
             .spawn(
                 Self::obtain_new_leader_epoch_task(
                     leader_epoch_token,
@@ -762,13 +766,6 @@ impl PartitionProcessorManager {
         match command {
             ProcessorsManagerCommand::GetState(sender) => {
                 let _ = sender.send(self.get_state());
-            }
-            ProcessorsManagerCommand::CreateSnapshot {
-                partition_id,
-                min_target_lsn,
-                tx,
-            } => {
-                self.on_create_snapshot(partition_id, min_target_lsn, tx);
             }
         }
     }
@@ -1077,7 +1074,7 @@ impl PartitionProcessorManager {
     ) {
         self.asynchronous_operations
             .build_task()
-            .name(&format!("update-archived-lsn-{}", partition_id))
+            .name(&format!("update-archived-lsn-{partition_id}"))
             .spawn(
                 async move {
                     let archived_lsn = snapshot_repository
@@ -1258,7 +1255,7 @@ impl PartitionProcessorManager {
 
         self.asynchronous_operations
             .build_task()
-            .name(&format!("start-pp-{}", partition_id))
+            .name(&format!("start-pp-{partition_id}"))
             .spawn(
                 async move {
                     let result = starting_task.run(delay);

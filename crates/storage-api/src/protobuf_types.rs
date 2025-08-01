@@ -115,9 +115,7 @@ impl From<ConversionError> for StorageDecodeError {
 }
 
 pub mod v1 {
-    #![allow(warnings)]
-    #![allow(clippy::all)]
-    #![allow(unknown_lints)]
+    #![allow(clippy::large_enum_variant)]
 
     include!(concat!(
         env!("OUT_DIR"),
@@ -125,31 +123,24 @@ pub mod v1 {
     ));
 
     pub mod pb_conversion {
-        use std::collections::{HashMap, HashSet};
+        use std::collections::HashSet;
         use std::str::FromStr;
 
         use anyhow::anyhow;
         use bytes::{Buf, Bytes};
         use bytestring::ByteString;
         use opentelemetry::trace::TraceState;
-        use prost::Message;
 
         use restate_types::deployment::PinnedDeployment;
-        use restate_types::errors::{IdDecodeError, InvocationError};
+        use restate_types::errors::InvocationError;
         use restate_types::identifiers::{
             PartitionProcessorRpcRequestId, WithInvocationId, WithPartitionKey,
         };
-        use restate_types::invocation::{
-            IngressInvocationResponseSink, InvocationMutationResponseSink, InvocationTermination,
-            TerminationFlavor,
-        };
+        use restate_types::invocation::{InvocationTermination, TerminationFlavor};
         use restate_types::journal::enriched::AwakeableEnrichmentResult;
-        use restate_types::journal::raw::RawEntry;
-        use restate_types::journal_v2::{EntryMetadata, NotificationId, NotificationType};
+        use restate_types::journal_v2::{EntryMetadata, NotificationId};
+        use restate_types::logs::Lsn;
         use restate_types::service_protocol::ServiceProtocolVersion;
-        use restate_types::storage::{
-            StorageCodecKind, StorageDecode, StorageDecodeError, StorageEncode, StorageEncodeError,
-        };
         use restate_types::time::MillisSinceEpoch;
         use restate_types::{GenerationalNodeId, journal_v2};
 
@@ -161,13 +152,12 @@ pub mod v1 {
             PeekPromise, SetState, SideEffect, Sleep,
         };
         use super::entry::EntryType;
-        use super::invocation_status::{Completed, Free, Inboxed, Invoked, Suspended};
+        use super::invocation_status::{Completed, Inboxed, Invoked, Suspended};
         use super::invocation_status_v2::JournalTrimPoint;
         use super::journal_entry::completion_result::{Empty, Failure, Success};
         use super::journal_entry::{CompletionResult, Kind, completion_result};
         use super::outbox_message::{
-            NotifySignal, OutboxCancel, OutboxKill, OutboxServiceInvocation,
-            OutboxServiceInvocationResponse,
+            OutboxCancel, OutboxKill, OutboxServiceInvocation, OutboxServiceInvocationResponse,
         };
         use super::service_invocation_response_sink::{Ingress, PartitionProcessor, ResponseSink};
         use super::{
@@ -175,16 +165,15 @@ pub mod v1 {
             Entry, EntryResult, EpochSequenceNumber, Header, IdempotencyId, IdempotencyMetadata,
             InboxEntry, InvocationId, InvocationResolutionResult, InvocationStatus,
             InvocationStatusV2, InvocationTarget, InvocationV2Lite, JournalCompletionTarget,
-            JournalEntry, JournalEntryIndex, JournalMeta, KvPair, OutboxMessage, Promise,
-            ResponseResult, RestateVersion, SequenceNumber, ServiceId, ServiceInvocation,
-            ServiceInvocationResponseSink, Source, SpanContext, SpanRelation, StateMutation,
-            SubmitNotificationSink, Timer, VirtualObjectStatus, enriched_entry_header, entry,
-            entry_result, inbox_entry, invocation_resolution_result, invocation_status,
-            invocation_status_v2, invocation_target, journal_entry, outbox_message, promise,
-            response_result, source, span_relation, submit_notification_sink, timer,
-            virtual_object_status,
+            JournalEntry, JournalEntryIndex, JournalMeta, KvPair, OutboxMessage,
+            PartitionDurability, Promise, ResponseResult, RestateVersion, SequenceNumber,
+            ServiceId, ServiceInvocation, ServiceInvocationResponseSink, Source, SpanContext,
+            SpanRelation, StateMutation, SubmitNotificationSink, Timer, VirtualObjectStatus,
+            enriched_entry_header, entry, entry_result, inbox_entry, invocation_resolution_result,
+            invocation_status, invocation_status_v2, invocation_target, journal_entry,
+            outbox_message, promise, response_result, source, span_relation,
+            submit_notification_sink, timer, virtual_object_status,
         };
-        use crate::StorageError;
         use crate::invocation_status_table::{CompletionRangeEpochMap, JournalMetadata};
         use crate::protobuf_types::ConversionError;
 
@@ -446,16 +435,16 @@ pub mod v1 {
                 let response_sinks = response_sinks
                     .into_iter()
                     .map(|s| {
-                        Ok::<_, ConversionError>(Option::<
+                        Option::<
                             restate_types::invocation::ServiceInvocationResponseSink,
                         >::try_from(s)
                             .transpose()
-                            .ok_or(ConversionError::missing_field("response_sink"))??)
+                            .ok_or(ConversionError::missing_field("response_sink"))?
                     })
                     .collect::<Result<HashSet<_>, _>>()?;
                 let headers = headers
                     .into_iter()
-                    .map(|h| restate_types::invocation::Header::try_from(h))
+                    .map(restate_types::invocation::Header::try_from)
                     .collect::<Result<Vec<_>, ConversionError>>()?;
 
                 match status.try_into().unwrap_or_default() {
@@ -588,7 +577,7 @@ pub mod v1 {
                                 .chain(
                                     waiting_for_signal_indexes
                                         .into_iter()
-                                        .map(|s| journal_v2::SignalId::for_index(s.into()))
+                                        .map(journal_v2::SignalId::for_index)
                                         .map(NotificationId::for_signal),
                                 )
                                 .chain(
@@ -662,22 +651,21 @@ pub mod v1 {
                         invocation_target: Some(invocation_target.into()),
                         source: Some(source.into()),
                         span_context: Some(span_context.into()),
-                        // SAFETY: We're only mapping data types here
-                        creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                        creation_time: timestamps.creation_time().as_u64(),
                         created_using_restate_version: created_using_restate_version.into_string(),
-                        modification_time: unsafe { timestamps.modification_time() }.as_u64(),
-                        inboxed_transition_time: unsafe { timestamps.inboxed_transition_time() }
+                        modification_time: timestamps.modification_time().as_u64(),
+                        inboxed_transition_time: timestamps
+                            .inboxed_transition_time()
                             .map(|t| t.as_u64()),
-                        scheduled_transition_time: unsafe {
-                            timestamps.scheduled_transition_time()
-                        }
-                        .map(|t| t.as_u64()),
-                        running_transition_time: unsafe { timestamps.running_transition_time() }
+                        scheduled_transition_time: timestamps
+                            .scheduled_transition_time()
                             .map(|t| t.as_u64()),
-                        completed_transition_time: unsafe {
-                            timestamps.completed_transition_time()
-                        }
-                        .map(|t| t.as_u64()),
+                        running_transition_time: timestamps
+                            .running_transition_time()
+                            .map(|t| t.as_u64()),
+                        completed_transition_time: timestamps
+                            .completed_transition_time()
+                            .map(|t| t.as_u64()),
                         response_sinks: response_sinks
                             .into_iter()
                             .map(|s| ServiceInvocationResponseSink::from(Some(s)))
@@ -725,22 +713,21 @@ pub mod v1 {
                         invocation_target: Some(invocation_target.into()),
                         source: Some(source.into()),
                         span_context: Some(span_context.into()),
-                        // SAFETY: We're only mapping data types here
-                        creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                        creation_time: timestamps.creation_time().as_u64(),
                         created_using_restate_version: created_using_restate_version.into_string(),
-                        modification_time: unsafe { timestamps.modification_time() }.as_u64(),
-                        inboxed_transition_time: unsafe { timestamps.inboxed_transition_time() }
+                        modification_time: timestamps.modification_time().as_u64(),
+                        inboxed_transition_time: timestamps
+                            .inboxed_transition_time()
                             .map(|t| t.as_u64()),
-                        scheduled_transition_time: unsafe {
-                            timestamps.scheduled_transition_time()
-                        }
-                        .map(|t| t.as_u64()),
-                        running_transition_time: unsafe { timestamps.running_transition_time() }
+                        scheduled_transition_time: timestamps
+                            .scheduled_transition_time()
                             .map(|t| t.as_u64()),
-                        completed_transition_time: unsafe {
-                            timestamps.completed_transition_time()
-                        }
-                        .map(|t| t.as_u64()),
+                        running_transition_time: timestamps
+                            .running_transition_time()
+                            .map(|t| t.as_u64()),
+                        completed_transition_time: timestamps
+                            .completed_transition_time()
+                            .map(|t| t.as_u64()),
                         response_sinks: response_sinks
                             .into_iter()
                             .map(|s| ServiceInvocationResponseSink::from(Some(s)))
@@ -795,27 +782,22 @@ pub mod v1 {
                             invocation_target: Some(invocation_target.into()),
                             source: Some(source.into()),
                             span_context: Some(journal_metadata.span_context.into()),
-                            // SAFETY: We're only mapping data types here
-                            creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                            creation_time: timestamps.creation_time().as_u64(),
                             created_using_restate_version: created_using_restate_version
                                 .into_string(),
-                            modification_time: unsafe { timestamps.modification_time() }.as_u64(),
-                            inboxed_transition_time: unsafe {
-                                timestamps.inboxed_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
-                            scheduled_transition_time: unsafe {
-                                timestamps.scheduled_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
-                            running_transition_time: unsafe {
-                                timestamps.running_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
-                            completed_transition_time: unsafe {
-                                timestamps.completed_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
+                            modification_time: timestamps.modification_time().as_u64(),
+                            inboxed_transition_time: timestamps
+                                .inboxed_transition_time()
+                                .map(|t| t.as_u64()),
+                            scheduled_transition_time: timestamps
+                                .scheduled_transition_time()
+                                .map(|t| t.as_u64()),
+                            running_transition_time: timestamps
+                                .running_transition_time()
+                                .map(|t| t.as_u64()),
+                            completed_transition_time: timestamps
+                                .completed_transition_time()
+                                .map(|t| t.as_u64()),
                             response_sinks: response_sinks
                                 .into_iter()
                                 .map(|s| ServiceInvocationResponseSink::from(Some(s)))
@@ -841,7 +823,6 @@ pub mod v1 {
                             current_invocation_epoch,
                             trim_points: completion_range_epoch_map
                                 .into_trim_points_iter()
-                                .into_iter()
                                 .map(|(completion_id, invocation_epoch)| JournalTrimPoint {
                                     completion_id,
                                     invocation_epoch,
@@ -899,27 +880,22 @@ pub mod v1 {
                             invocation_target: Some(invocation_target.into()),
                             source: Some(source.into()),
                             span_context: Some(journal_metadata.span_context.into()),
-                            // SAFETY: We're only mapping data types here
-                            creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                            creation_time: timestamps.creation_time().as_u64(),
                             created_using_restate_version: created_using_restate_version
                                 .into_string(),
-                            modification_time: unsafe { timestamps.modification_time() }.as_u64(),
-                            inboxed_transition_time: unsafe {
-                                timestamps.inboxed_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
-                            scheduled_transition_time: unsafe {
-                                timestamps.scheduled_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
-                            running_transition_time: unsafe {
-                                timestamps.running_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
-                            completed_transition_time: unsafe {
-                                timestamps.completed_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
+                            modification_time: timestamps.modification_time().as_u64(),
+                            inboxed_transition_time: timestamps
+                                .inboxed_transition_time()
+                                .map(|t| t.as_u64()),
+                            scheduled_transition_time: timestamps
+                                .scheduled_transition_time()
+                                .map(|t| t.as_u64()),
+                            running_transition_time: timestamps
+                                .running_transition_time()
+                                .map(|t| t.as_u64()),
+                            completed_transition_time: timestamps
+                                .completed_transition_time()
+                                .map(|t| t.as_u64()),
                             response_sinks: response_sinks
                                 .into_iter()
                                 .map(|s| ServiceInvocationResponseSink::from(Some(s)))
@@ -945,7 +921,6 @@ pub mod v1 {
                             current_invocation_epoch,
                             trim_points: completion_range_epoch_map
                                 .into_trim_points_iter()
-                                .into_iter()
                                 .map(|(completion_id, invocation_epoch)| JournalTrimPoint {
                                     completion_id,
                                     invocation_epoch,
@@ -981,27 +956,22 @@ pub mod v1 {
                             invocation_target: Some(invocation_target.into()),
                             source: Some(source.into()),
                             span_context: Some(journal_metadata.span_context.into()),
-                            // SAFETY: We're only mapping data types here
-                            creation_time: unsafe { timestamps.creation_time() }.as_u64(),
+                            creation_time: timestamps.creation_time().as_u64(),
                             created_using_restate_version: created_using_restate_version
                                 .into_string(),
-                            modification_time: unsafe { timestamps.modification_time() }.as_u64(),
-                            inboxed_transition_time: unsafe {
-                                timestamps.inboxed_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
-                            scheduled_transition_time: unsafe {
-                                timestamps.scheduled_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
-                            running_transition_time: unsafe {
-                                timestamps.running_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
-                            completed_transition_time: unsafe {
-                                timestamps.completed_transition_time()
-                            }
-                            .map(|t| t.as_u64()),
+                            modification_time: timestamps.modification_time().as_u64(),
+                            inboxed_transition_time: timestamps
+                                .inboxed_transition_time()
+                                .map(|t| t.as_u64()),
+                            scheduled_transition_time: timestamps
+                                .scheduled_transition_time()
+                                .map(|t| t.as_u64()),
+                            running_transition_time: timestamps
+                                .running_transition_time()
+                                .map(|t| t.as_u64()),
+                            completed_transition_time: timestamps
+                                .completed_transition_time()
+                                .map(|t| t.as_u64()),
                             response_sinks: vec![],
                             argument: None,
                             headers: vec![],
@@ -1069,11 +1039,11 @@ pub mod v1 {
                     }
                 };
 
-                Ok((crate::invocation_status_table::InvocationLite {
+                Ok(crate::invocation_status_table::InvocationLite {
                     status,
                     invocation_target,
                     current_invocation_epoch,
-                }))
+                })
             }
         }
 
@@ -1115,7 +1085,7 @@ pub mod v1 {
                             metadata,
                             waiting_for_notifications: waiting_for_completed_entries
                                 .into_iter()
-                                .map(|i| NotificationId::for_completion(i.into()))
+                                .map(NotificationId::for_completion)
                                 .collect(),
                         }
                     }
@@ -1172,7 +1142,7 @@ pub mod v1 {
                         invocation_status::Status::Completed(Completed::from(completed))
                     }
                     crate::invocation_status_table::InvocationStatus::Free => {
-                        invocation_status::Status::Free(Free {})
+                        invocation_status::Status::Free(invocation_status::Free {})
                     }
                     crate::invocation_status_table::InvocationStatus::Scheduled(_) => {
                         panic!(
@@ -1238,11 +1208,11 @@ pub mod v1 {
                     .response_sinks
                     .into_iter()
                     .map(|s| {
-                        Ok::<_, ConversionError>(Option::<
+                        Option::<
                             restate_types::invocation::ServiceInvocationResponseSink,
                         >::try_from(s)
                             .transpose()
-                            .ok_or(ConversionError::missing_field("response_sink"))??)
+                            .ok_or(ConversionError::missing_field("response_sink"))?
                     })
                     .collect::<Result<HashSet<_>, _>>()?;
 
@@ -1315,8 +1285,8 @@ pub mod v1 {
                     deployment_id,
                     service_protocol_version,
                     journal_meta: Some(JournalMeta::from(journal_metadata)),
-                    creation_time: unsafe { timestamps.creation_time() }.as_u64(),
-                    modification_time: unsafe { timestamps.modification_time() }.as_u64(),
+                    creation_time: timestamps.creation_time().as_u64(),
+                    modification_time: timestamps.modification_time().as_u64(),
                     source: Some(Source::from(source)),
                     completion_retention_time: Some(Duration::from(completion_retention_time)),
                     idempotency_key: idempotency_key.map(|key| key.to_string()),
@@ -1351,11 +1321,11 @@ pub mod v1 {
                     .response_sinks
                     .into_iter()
                     .map(|s| {
-                        Ok::<_, ConversionError>(Option::<
+                        Option::<
                             restate_types::invocation::ServiceInvocationResponseSink,
                         >::try_from(s)
                             .transpose()
-                            .ok_or(ConversionError::missing_field("response_sink"))??)
+                            .ok_or(ConversionError::missing_field("response_sink"))?
                     })
                     .collect::<Result<HashSet<_>, _>>()?;
 
@@ -1437,8 +1407,8 @@ pub mod v1 {
                     journal_meta: Some(journal_meta),
                     deployment_id,
                     service_protocol_version,
-                    creation_time: unsafe { metadata.timestamps.creation_time() }.as_u64(),
-                    modification_time: unsafe { metadata.timestamps.modification_time() }.as_u64(),
+                    creation_time: metadata.timestamps.creation_time().as_u64(),
+                    modification_time: metadata.timestamps.modification_time().as_u64(),
                     waiting_for_completed_entries,
                     source: Some(Source::from(metadata.source)),
                     completion_retention_time: Some(Duration::from(
@@ -1463,11 +1433,11 @@ pub mod v1 {
                     .response_sinks
                     .into_iter()
                     .map(|s| {
-                        Ok::<_, ConversionError>(Option::<
+                        Option::<
                             restate_types::invocation::ServiceInvocationResponseSink,
                         >::try_from(s)
                             .transpose()
-                            .ok_or(ConversionError::missing_field("response_sink"))??)
+                            .ok_or(ConversionError::missing_field("response_sink"))?
                     })
                     .collect::<Result<HashSet<_>, _>>()?;
 
@@ -1486,7 +1456,7 @@ pub mod v1 {
                 let headers = value
                     .headers
                     .into_iter()
-                    .map(|h| restate_types::invocation::Header::try_from(h))
+                    .map(restate_types::invocation::Header::try_from)
                     .collect::<Result<Vec<_>, ConversionError>>()?;
 
                 let execution_time = if value.execution_time == 0 {
@@ -1558,8 +1528,8 @@ pub mod v1 {
                         .into_iter()
                         .map(|s| ServiceInvocationResponseSink::from(Some(s)))
                         .collect(),
-                    creation_time: unsafe { timestamps.creation_time() }.as_u64(),
-                    modification_time: unsafe { timestamps.modification_time() }.as_u64(),
+                    creation_time: timestamps.creation_time().as_u64(),
+                    modification_time: timestamps.modification_time().as_u64(),
                     source: Some(Source::from(source)),
                     span_context: Some(SpanContext::from(span_context)),
                     headers,
@@ -1640,8 +1610,8 @@ pub mod v1 {
                     invocation_target: Some(InvocationTarget::from(invocation_target)),
                     source: Some(Source::from(source)),
                     result: Some(ResponseResult::from(response_result)),
-                    creation_time: unsafe { timestamps.creation_time() }.as_u64(),
-                    modification_time: unsafe { timestamps.modification_time() }.as_u64(),
+                    creation_time: timestamps.creation_time().as_u64(),
+                    modification_time: timestamps.modification_time().as_u64(),
                     idempotency_key: idempotency_key.map(|s| s.to_string()),
                 }
             }
@@ -1699,7 +1669,7 @@ pub mod v1 {
                             restate_types::identifiers::SubscriptionId::from_slice(
                                 &subscription.subscription_id,
                             )
-                            .map_err(|e| ConversionError::invalid_data(e))?,
+                            .map_err(ConversionError::invalid_data)?,
                         )
                     }
                     source::Source::Service(service) => restate_types::invocation::Source::Service(
@@ -1875,7 +1845,7 @@ pub mod v1 {
 
                 let headers = headers
                     .into_iter()
-                    .map(|h| restate_types::invocation::Header::try_from(h))
+                    .map(restate_types::invocation::Header::try_from)
                     .collect::<Result<Vec<_>, ConversionError>>()?;
 
                 let execution_time = if execution_time == 0 {
@@ -2053,7 +2023,7 @@ pub mod v1 {
                     .collect();
 
                 Ok(restate_types::state_mut::ExternalStateMutation {
-                    service_id: service_id,
+                    service_id,
                     version: state_mutation.version,
                     state,
                 })
@@ -2968,14 +2938,16 @@ pub mod v1 {
         {
             fn from(value: Option<restate_types::journal::enriched::CallEnrichmentResult>) -> Self {
                 let result = match value {
-                    None => invocation_resolution_result::Result::None(Default::default()),
-                    Some(resolution_result) => match resolution_result {
-                        restate_types::journal::enriched::CallEnrichmentResult {
+                    None => invocation_resolution_result::Result::None(()),
+                    Some(resolution_result) => {
+                        let restate_types::journal::enriched::CallEnrichmentResult {
                             invocation_id,
                             invocation_target,
                             span_context,
                             completion_retention_time,
-                        } => invocation_resolution_result::Result::Success(
+                        } = resolution_result;
+
+                        invocation_resolution_result::Result::Success(
                             invocation_resolution_result::Success {
                                 invocation_id: Some(InvocationId::from(invocation_id)),
                                 invocation_target: Some(invocation_target.into()),
@@ -2984,8 +2956,8 @@ pub mod v1 {
                                     completion_retention_time.unwrap_or_default(),
                                 )),
                             },
-                        ),
-                    },
+                        )
+                    }
                 };
 
                 InvocationResolutionResult {
@@ -3355,9 +3327,8 @@ pub mod v1 {
             type Error = ConversionError;
 
             fn try_from(value: Entry) -> Result<Self, Self::Error> {
-                let header = journal_v2::raw::RawEntryHeader {
-                    append_time: value.append_time.into(),
-                };
+                let header =
+                    restate_types::storage::StoredRawEntryHeader::new(value.append_time.into());
 
                 Ok(crate::journal_table_v2::StoredEntry(
                     match EntryType::try_from(value.ty)
@@ -3373,7 +3344,7 @@ pub mod v1 {
                             if let Some(deduplication_hash) = value.event_deduplication_hash {
                                 raw_event.set_deduplication_hash(deduplication_hash);
                             }
-                            journal_v2::raw::RawEntry::new(header, raw_event)
+                            restate_types::storage::StoredRawEntry::new(header, raw_event)
                         }
                         journal_v2::EntryType::Notification(notification_ty) => {
                             let notification_id = match value
@@ -3391,7 +3362,7 @@ pub mod v1 {
                                 }
                             };
 
-                            journal_v2::raw::RawEntry::new(
+                            restate_types::storage::StoredRawEntry::new(
                                 header,
                                 journal_v2::raw::RawNotification::new(
                                     notification_ty,
@@ -3403,7 +3374,7 @@ pub mod v1 {
                         journal_v2::EntryType::Command(ct @ journal_v2::CommandType::Call)
                         | journal_v2::EntryType::Command(
                             ct @ journal_v2::CommandType::OneWayCall,
-                        ) => journal_v2::raw::RawEntry::new(
+                        ) => restate_types::storage::StoredRawEntry::new(
                             header,
                             journal_v2::raw::RawCommand::new(ct, value.content)
                                 .with_command_specific_metadata(
@@ -3418,10 +3389,12 @@ pub mod v1 {
                                 )),
                             ),
                         ),
-                        journal_v2::EntryType::Command(ct) => journal_v2::raw::RawEntry::new(
-                            header,
-                            journal_v2::raw::RawCommand::new(ct, value.content),
-                        ),
+                        journal_v2::EntryType::Command(ct) => {
+                            restate_types::storage::StoredRawEntry::new(
+                                header,
+                                journal_v2::raw::RawCommand::new(ct, value.content),
+                            )
+                        }
                     },
                 ))
             }
@@ -3440,7 +3413,7 @@ pub mod v1 {
                     None;
                 let mut notification_id: Option<entry::NotificationId> = None;
                 let content = match raw_entry.inner {
-                    journal_v2::raw::RawEntryInner::Command(cmd) => {
+                    journal_v2::raw::RawEntry::Command(cmd) => {
                         match cmd.command_specific_metadata {
                             journal_v2::raw::RawCommandSpecificMetadata::CallOrSend(
                                 call_or_send_metadata,
@@ -3453,7 +3426,7 @@ pub mod v1 {
 
                         cmd.serialized_content
                     }
-                    journal_v2::raw::RawEntryInner::Notification(notification) => {
+                    journal_v2::raw::RawEntry::Notification(notification) => {
                         notification_id = Some(match notification.id() {
                             journal_v2::NotificationId::CompletionId(c) => {
                                 entry::NotificationId::CompletionIdx(c)
@@ -3468,7 +3441,7 @@ pub mod v1 {
 
                         notification.serialized_content()
                     }
-                    journal_v2::raw::RawEntryInner::Event(event) => {
+                    journal_v2::raw::RawEntry::Event(event) => {
                         let (ty, deduplication_hash, value) = event.into_inner();
                         event_type = ty.into();
                         event_deduplication_hash = deduplication_hash;
@@ -3620,7 +3593,7 @@ pub mod v1 {
                             invocation_id.ok_or(ConversionError::missing_field("invocation_id"))?,
                         )?,
                         caller_completion_id: entry_index,
-                        caller_invocation_epoch: caller_invocation_epoch,
+                        caller_invocation_epoch,
                     },
                     result: restate_types::invocation::ResponseResult::try_from(
                         response_result.ok_or(ConversionError::missing_field("response_result"))?,
@@ -4050,7 +4023,7 @@ pub mod v1 {
                             .invocation_id
                             .ok_or(ConversionError::missing_field("invocation_id"))?,
                     )
-                    .map_err(|e| ConversionError::invalid_data(e))?,
+                    .map_err(ConversionError::invalid_data)?,
                 })
             }
         }
@@ -4128,6 +4101,28 @@ pub mod v1 {
         impl From<SequenceNumber> for crate::fsm_table::SequenceNumber {
             fn from(value: SequenceNumber) -> Self {
                 Self::from(value.sequence_number)
+            }
+        }
+
+        impl From<crate::fsm_table::PartitionDurability> for PartitionDurability {
+            fn from(value: crate::fsm_table::PartitionDurability) -> Self {
+                PartitionDurability {
+                    durable_point: Some(SequenceNumber {
+                        sequence_number: value.durable_point.as_u64(),
+                    }),
+                    modification_time: value.modification_time.as_u64(),
+                }
+            }
+        }
+
+        impl From<PartitionDurability> for crate::fsm_table::PartitionDurability {
+            fn from(value: PartitionDurability) -> Self {
+                crate::fsm_table::PartitionDurability {
+                    durable_point: Lsn::from(
+                        value.durable_point.unwrap_or_default().sequence_number,
+                    ),
+                    modification_time: MillisSinceEpoch::new(value.modification_time),
+                }
             }
         }
 

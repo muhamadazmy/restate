@@ -20,16 +20,15 @@ restate-workspace-hack = { workspace = true }
 
 restate-admin-rest-model = { workspace = true, features = ["schema"] }
 restate-bifrost = { workspace = true, features = ["local-loglet", "replicated-loglet"] }
-restate-core = { workspace = true, features = ["options_schema"] }
+restate-core = { workspace = true }
 restate-errors = { workspace = true }
-restate-futures-util = { workspace = true }
 restate-metadata-store = { workspace = true }
 restate-service-client = { workspace = true }
 restate-service-protocol = { workspace = true, features = ["discovery"] }
 restate-storage-query-datafusion = { workspace = true }
 restate-types = { workspace = true }
 restate-wal-protocol = { workspace = true }
-restate-web-ui = { git = "https://github.com/restatedev/restate-web-ui-crate", optional = true, version = "0.0.89", tag = "v0.0.89" }
+restate-web-ui = { git = "https://github.com/restatedev/restate-web-ui-crate", optional = true, version = "0.0.91", tag = "v0.0.91" }
 
 ahash = { workspace = true }
 anyhow = { workspace = true }
@@ -41,7 +40,6 @@ codederror = { workspace = true }
 datafusion = { workspace = true }
 derive_builder = { workspace = true }
 derive_more = { workspace = true }
-enumset = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
@@ -69,7 +67,6 @@ restate-bifrost = { workspace = true, features = ["test-util"] }
 restate-core = { workspace = true, features = ["test-util"] }
 restate-test-util = { workspace = true }
 restate-types = { workspace = true, features = ["test-util"] }
-
 
 googletest = { workspace = true }
 test-log = { workspace = true }
