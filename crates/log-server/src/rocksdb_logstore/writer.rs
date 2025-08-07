@@ -26,7 +26,7 @@ use restate_types::GenerationalNodeId;
 use restate_types::config::LogServerOptions;
 use restate_types::health::HealthStatus;
 use restate_types::live::{BoxLiveLoad, LiveLoad};
-use restate_types::logs::{LogletId, LogletOffset, RecordCache, SequenceNumber};
+use restate_types::logs::{LogletId, LogletOffset, SequenceNumber};
 use restate_types::net::log_server::{Seal, Store, Trim};
 use restate_types::protobuf::common::LogServerStatus;
 
@@ -63,7 +63,6 @@ pub(crate) struct LogStoreWriter {
     batch_acks_buf: Vec<Ack>,
     buffer: BytesMut,
     updateable_options: BoxLiveLoad<LogServerOptions>,
-    record_cache: RecordCache,
     health_status: HealthStatus<LogServerStatus>,
 }
 
@@ -71,7 +70,6 @@ impl LogStoreWriter {
     pub(crate) fn new(
         rocksdb: Arc<RocksDb>,
         updateable_options: BoxLiveLoad<LogServerOptions>,
-        record_cache: RecordCache,
         health_status: HealthStatus<LogServerStatus>,
     ) -> Self {
         Self {
@@ -79,7 +77,6 @@ impl LogStoreWriter {
             batch_acks_buf: Vec::default(),
             buffer: BytesMut::with_capacity(INITIAL_SERDE_BUFFER_SIZE),
             updateable_options,
-            record_cache,
             health_status,
         }
     }
@@ -144,14 +141,12 @@ impl LogStoreWriter {
                         &data_cf,
                         &mut write_batch,
                         buffer,
-                        &self.record_cache,
                     ),
                     Some(DataUpdate::TrimLogRecords { trim_point }) => Self::trim_log_records(
                         &data_cf,
                         &mut write_batch,
                         command.loglet_id,
                         trim_point,
-                        buffer,
                     ),
                     None => {}
                 }
@@ -162,7 +157,6 @@ impl LogStoreWriter {
                         &mut write_batch,
                         command.loglet_id,
                         metadata_update,
-                        buffer,
                     )
                 }
 
@@ -181,16 +175,16 @@ impl LogStoreWriter {
         data_cf: &Arc<BoundColumnFamily>,
         write_batch: &mut WriteBatch,
         buffer: &mut BytesMut,
-        record_cache: &RecordCache,
     ) {
-        buffer.reserve(store_message.estimated_encode_size());
         let mut offset = store_message.first_offset;
         for payload in store_message.payloads.iter() {
             let key_bytes =
-                DataRecordKey::new(store_message.header.loglet_id, offset).encode_and_split(buffer);
-            record_cache.add(store_message.header.loglet_id, offset, payload);
-            let value_bytes = DataRecordEncoder::from(payload).encode_to_disk_format(buffer);
+                DataRecordKey::new(store_message.header.loglet_id, offset).to_binary_array();
+            let encoder = DataRecordEncoder::from(payload);
+            buffer.reserve(encoder.estimated_encode_size());
+            let value_bytes = encoder.encode_to_disk_format(buffer);
             write_batch.put_cf(data_cf, key_bytes, value_bytes);
+            buffer.clear();
             // advance the offset for the next record
             offset = offset.next();
         }
@@ -201,23 +195,20 @@ impl LogStoreWriter {
         write_batch: &mut WriteBatch,
         loglet_id: LogletId,
         update: MetadataUpdate,
-        buffer: &mut BytesMut,
     ) {
         match update {
             MetadataUpdate::SetSequencer { sequencer } => {
-                let key =
-                    MetadataKey::new(KeyPrefixKind::Sequencer, loglet_id).encode_and_split(buffer);
-                let value = sequencer.encode_and_split(buffer);
+                let key = MetadataKey::new(KeyPrefixKind::Sequencer, loglet_id).to_binary_array();
+                let value = sequencer.to_binary_array();
                 write_batch.put_cf(metadata_cf, key, value);
             }
             MetadataUpdate::UpdateTrimPoint { new_trim_point } => {
-                let key =
-                    MetadataKey::new(KeyPrefixKind::TrimPoint, loglet_id).encode_and_split(buffer);
-                let value = new_trim_point.encode_and_split(buffer);
+                let key = MetadataKey::new(KeyPrefixKind::TrimPoint, loglet_id).to_binary_array();
+                let value = new_trim_point.to_binary_array();
                 write_batch.merge_cf(metadata_cf, key, value);
             }
             MetadataUpdate::Seal => {
-                let key = MetadataKey::new(KeyPrefixKind::Seal, loglet_id).encode_and_split(buffer);
+                let key = MetadataKey::new(KeyPrefixKind::Seal, loglet_id).to_binary_array();
                 let now = chrono::Utc::now().to_rfc3339();
                 write_batch.put_cf(metadata_cf, key, now);
             }
@@ -229,11 +220,10 @@ impl LogStoreWriter {
         write_batch: &mut WriteBatch,
         loglet_id: LogletId,
         trim_point: LogletOffset,
-        buffer: &mut BytesMut,
     ) {
         // the upper bound is exclusive for range deletions, therefore we need to increase it
-        let from_key = DataRecordKey::new(loglet_id, LogletOffset::OLDEST).encode_and_split(buffer);
-        let to_key = DataRecordKey::new(loglet_id, trim_point.next()).encode_and_split(buffer);
+        let from_key = DataRecordKey::new(loglet_id, LogletOffset::OLDEST).to_binary_array();
+        let to_key = DataRecordKey::new(loglet_id, trim_point.next()).to_binary_array();
 
         write_batch.delete_range_cf(data_cf, from_key, to_key);
     }

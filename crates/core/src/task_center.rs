@@ -29,21 +29,26 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::FutureExt;
+use futures::future::BoxFuture;
+#[cfg(debug_assertions)]
 use metrics::counter;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 use tokio::task::LocalSet;
 use tokio::task_local;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::metric_definitions::{self, STATUS_COMPLETED, STATUS_FAILED, TC_FINISHED, TC_SPAWN};
+#[cfg(debug_assertions)]
+use crate::metric_definitions::{STATUS_COMPLETED, STATUS_FAILED, TC_FINISHED, TC_SPAWN};
 use crate::{Metadata, ShutdownError, ShutdownSourceErr};
 use restate_types::SharedString;
 use restate_types::cluster_state::ClusterState;
+use restate_types::config::Configuration;
 use restate_types::health::{Health, NodeStatus};
 use restate_types::identifiers::PartitionId;
 use restate_types::{GenerationalNodeId, NodeId};
@@ -75,7 +80,9 @@ pub enum RuntimeError {
 }
 
 /// Task center is used to manage long-running and background tasks and their lifecycle.
-pub struct TaskCenter {}
+pub struct TaskCenter {
+    _private: (),
+}
 
 impl TaskCenter {
     pub fn try_current() -> Option<Handle> {
@@ -122,6 +129,11 @@ impl TaskCenter {
         Self::with_current(|tc| tc.try_set_global_metadata(metadata))
     }
 
+    /// Set a future callback to be executed after task center finishes shutdown.
+    pub fn set_on_shutdown(on_shutdown: BoxFuture<'static, ()>) {
+        Self::with_current(|tc| tc.set_on_shutdown(on_shutdown))
+    }
+
     /// Returns true if the task center was requested to shutdown
     pub fn is_shutdown_requested() -> bool {
         Self::with_current(|tc| tc.is_shutdown_requested())
@@ -157,6 +169,10 @@ impl TaskCenter {
     /// Spawn a new task that is a child of the current task. The child task will be cancelled if the parent
     /// task is cancelled. At the moment, the parent task will not automatically wait for children tasks to
     /// finish before completion, but this might change in the future if the need for that arises.
+    ///
+    /// If the parent task is being cancelled at the time of spawning, this call will fail.
+    /// Existing children tasks will receive cancellation signal but it's up to the task to react
+    /// to the `cancellation_token()` in a cooperative manner.
     #[track_caller]
     pub fn spawn_child<F>(
         kind: TaskKind,
@@ -169,6 +185,29 @@ impl TaskCenter {
         Self::with_current(|tc| tc.spawn_child(kind, name, future))
     }
 
+    /// An unmanaged task is one that is not automatically cancelled by the task center on
+    /// shutdown. Moreover, the task ID will not be registered with task center and therefore
+    /// cannot be "taken" by calling [`TaskCenter::take_task`].
+    ///
+    /// This task is spawned as a child of the current task. If the current task is being cancelled,
+    /// this will fail to spawn, but already spawned tasks will continue to run unless they are
+    /// manually cancelled (hence the name "unmanaged").
+    #[track_caller]
+    pub fn spawn_unmanaged_child<F, T>(
+        kind: TaskKind,
+        name: impl Into<SharedString>,
+        future: F,
+    ) -> Result<TaskHandle<T>, ShutdownError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        Self::with_current(|tc| tc.spawn_unmanaged_child(kind, name, future))
+    }
+
+    /// An unmanaged task is one that is not automatically cancelled by the task center on
+    /// shutdown. Moreover, the task ID will not be registered with task center and therefore
+    /// cannot be "taken" by calling [`TaskCenter::take_task`].
     #[track_caller]
     pub fn spawn_unmanaged<F, T>(
         kind: TaskKind,
@@ -283,9 +322,9 @@ struct TaskCenterInner {
     id: u16,
     /// Should we start new runtimes with paused clock?
     #[allow(dead_code)]
+    #[cfg(any(test, feature = "test-util"))]
     pause_time: bool,
     default_runtime_handle: tokio::runtime::Handle,
-    ingress_runtime_handle: tokio::runtime::Handle,
     managed_runtimes: Mutex<HashMap<SharedString, OwnedRuntimeHandle>>,
     start_time: Instant,
     /// We hold on to the owned Runtime to ensure it's dropped when task center is dropped. If this
@@ -293,8 +332,6 @@ struct TaskCenterInner {
     /// tokio's runtime after dropping the task center.
     #[allow(dead_code)]
     default_runtime: Option<tokio::runtime::Runtime>,
-    #[allow(dead_code)]
-    ingress_runtime: Option<tokio::runtime::Runtime>,
     global_cancel_token: CancellationToken,
     shutdown_requested: AtomicBool,
     current_exit_code: AtomicI32,
@@ -303,19 +340,19 @@ struct TaskCenterInner {
     health: Health,
     cluster_state: ClusterState,
     root_task_context: TaskContext,
+    // A callback to be executed after task center finishes shutdown.
+    on_shutdown: Mutex<Option<BoxFuture<'static, ()>>>,
 }
 
 impl TaskCenterInner {
     fn new(
         default_runtime_handle: tokio::runtime::Handle,
-        ingress_runtime_handle: tokio::runtime::Handle,
         default_runtime: Option<tokio::runtime::Runtime>,
-        ingress_runtime: Option<tokio::runtime::Runtime>,
         // used in tests to start all runtimes with clock paused. Note that this only impacts
         // partition processor runtimes
-        pause_time: bool,
+        #[cfg(any(test, feature = "test-util"))] pause_time: bool,
     ) -> Self {
-        metric_definitions::describe_metrics();
+        crate::metric_definitions::describe_metrics();
         let root_task_context = TaskContext {
             id: TaskId::ROOT,
             name: "::".into(),
@@ -328,8 +365,6 @@ impl TaskCenterInner {
             start_time: Instant::now(),
             default_runtime_handle,
             default_runtime,
-            ingress_runtime_handle,
-            ingress_runtime,
             global_cancel_token: CancellationToken::new(),
             shutdown_requested: AtomicBool::new(false),
             current_exit_code: AtomicI32::new(0),
@@ -337,9 +372,11 @@ impl TaskCenterInner {
             global_metadata: OnceLock::new(),
             managed_runtimes: Mutex::new(HashMap::with_capacity(64)),
             root_task_context,
+            #[cfg(any(test, feature = "test-util"))]
             pause_time,
             cluster_state: Default::default(),
             health: Health::default(),
+            on_shutdown: Mutex::default(),
         }
     }
 
@@ -347,6 +384,11 @@ impl TaskCenterInner {
     /// at the startup of the node.
     pub fn try_set_global_metadata(self: &Arc<Self>, metadata: Metadata) -> bool {
         self.global_metadata.set(metadata).is_ok()
+    }
+
+    pub fn set_on_shutdown(&self, on_shutdown: BoxFuture<'static, ()>) {
+        let mut guard = self.on_shutdown.lock();
+        guard.replace(on_shutdown);
     }
 
     pub fn global_metadata(self: &Arc<Self>) -> Option<&Metadata> {
@@ -400,22 +442,39 @@ impl TaskCenterInner {
     pub fn spawn<F>(
         self: &Arc<Self>,
         kind: TaskKind,
-        name: &SharedString,
+        name: impl Into<SharedString>,
         future: F,
     ) -> Result<TaskId, ShutdownError>
     where
         F: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
-        if self.shutdown_requested.load(Ordering::Relaxed) {
-            return Err(ShutdownError);
-        }
+        let name = name.into();
 
         // spawned tasks get their own unlinked cancellation tokens
         let cancel = CancellationToken::new();
         let (parent_id, parent_name, parent_partition) =
             self.with_task_context(|ctx| (ctx.id, ctx.name.clone(), ctx.partition_id));
 
-        let result = self.spawn_inner(kind, name, parent_id, parent_partition, cancel, future);
+        if self.root_task_context.cancellation_token.is_cancelled() {
+            debug!(
+                kind = ?kind,
+                name = %name,
+                parent_task = %parent_id,
+                parent_name = %parent_name,
+                "Cannot start new task \"{}\" because task-center is shutting down.",
+                name,
+            );
+            return Err(ShutdownError);
+        }
+
+        let result = self.spawn_inner(
+            kind,
+            name.clone(),
+            parent_id,
+            parent_partition,
+            cancel,
+            future,
+        );
 
         trace!(
             kind = ?kind,
@@ -439,9 +498,7 @@ impl TaskCenterInner {
     where
         F: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
-        if self.shutdown_requested.load(Ordering::Relaxed) {
-            return Err(ShutdownError);
-        }
+        let name = name.into();
 
         let (parent_id, parent_name, parent_kind, parent_partition, cancel) = self
             .with_task_context(|ctx| {
@@ -454,8 +511,26 @@ impl TaskCenterInner {
                 )
             });
 
-        let name = name.into();
-        let result = self.spawn_inner(kind, &name, parent_id, parent_partition, cancel, future);
+        if cancel.is_cancelled() {
+            debug!(
+                kind = ?kind,
+                name = %name,
+                parent_task = %parent_id,
+                parent_name = %parent_name,
+                "Cannot start new task {} in \"{}\" {} because parent has been cancelled.",
+                name, parent_name, parent_id,
+            );
+            return Err(ShutdownError);
+        }
+
+        let result = self.spawn_inner(
+            kind,
+            name.clone(),
+            parent_id,
+            parent_partition,
+            cancel,
+            future,
+        );
 
         trace!(
             kind = ?parent_kind,
@@ -477,10 +552,67 @@ impl TaskCenterInner {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        if self.shutdown_requested.load(Ordering::Relaxed) {
+        let (parent_id, parent_name, parent_partition) =
+            self.with_task_context(|ctx| (ctx.id, ctx.name.clone(), ctx.partition_id));
+
+        if self.root_task_context.cancellation_token.is_cancelled() {
+            debug!(
+                kind = ?kind,
+                name = %name,
+                parent_task = %parent_id,
+                parent_name = %parent_name,
+                "Cannot start new task \"{}\" because task-center is shutting down.",
+                name,
+            );
             return Err(ShutdownError);
         }
-        let parent_partition = self.with_task_context(|ctx| (ctx.partition_id));
+
+        let cancel = CancellationToken::new();
+        let id = TaskId::default();
+        let context = TaskContext {
+            id,
+            name: name.clone(),
+            kind,
+            partition_id: parent_partition,
+            cancellation_token: cancel.clone(),
+        };
+
+        let fut = unmanaged_wrapper(Arc::clone(self), context, future);
+
+        Ok(self.spawn_on_runtime(kind, name, cancel, fut))
+    }
+
+    pub fn spawn_unmanaged_child<F, T>(
+        self: &Arc<Self>,
+        kind: TaskKind,
+        name: &SharedString,
+        future: F,
+    ) -> Result<TaskHandle<T>, ShutdownError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (parent_id, parent_name, parent_partition, is_parent_cancelled) = self
+            .with_task_context(|ctx| {
+                (
+                    ctx.id,
+                    ctx.name.clone(),
+                    ctx.partition_id,
+                    ctx.cancellation_token.is_cancelled(),
+                )
+            });
+
+        if is_parent_cancelled {
+            debug!(
+                kind = ?kind,
+                name = %name,
+                parent_task = %parent_id,
+                parent_name = %parent_name,
+                "Cannot start new task {} in \"{}\" {} because parent has been cancelled.",
+                name, parent_name, parent_id,
+            );
+            return Err(ShutdownError);
+        }
 
         let cancel = CancellationToken::new();
         let id = TaskId::default();
@@ -706,7 +838,6 @@ impl TaskCenterInner {
         };
 
         dump("default", &self.default_runtime_handle).await;
-        dump("ingress", &self.ingress_runtime_handle).await;
         for (name, handle) in managed_runtimes {
             dump(&name, &handle).await;
         }
@@ -724,7 +855,7 @@ impl TaskCenterInner {
     fn spawn_inner<F>(
         self: &Arc<Self>,
         kind: TaskKind,
-        name: &SharedString,
+        name: SharedString,
         _parent_id: TaskId,
         partition_id: Option<PartitionId>,
         cancel: CancellationToken,
@@ -752,7 +883,7 @@ impl TaskCenterInner {
         let mut handle_mut = task.handle.lock();
 
         let fut = wrapper(inner, context, future);
-        *handle_mut = Some(self.spawn_on_runtime(kind, name, cancel, fut));
+        *handle_mut = Some(self.spawn_on_runtime(kind, &name, cancel, fut));
         // drop the lock
         drop(handle_mut);
         // Task is ready
@@ -770,14 +901,16 @@ impl TaskCenterInner {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let kind_str: &'static str = kind.into();
-        let runtime_name: &'static str = kind.runtime().into();
         let tokio_task = tokio::task::Builder::new().name(name);
-        counter!(TC_SPAWN, "kind" => kind_str, "runtime" => runtime_name).increment(1);
+        #[cfg(debug_assertions)]
+        {
+            let kind_str: &'static str = kind.into();
+            let runtime_name: &'static str = kind.runtime().into();
+            counter!(TC_SPAWN, "kind" => kind_str, "runtime" => runtime_name).increment(1);
+        }
         let runtime = match kind.runtime() {
             crate::AsyncRuntime::Inherit => &tokio::runtime::Handle::current(),
             crate::AsyncRuntime::Default => &self.default_runtime_handle,
-            crate::AsyncRuntime::Ingress => &self.ingress_runtime_handle,
         };
         let inner_handle = tokio_task
             .spawn_on(fut, runtime)
@@ -802,6 +935,7 @@ impl TaskCenterInner {
             // This can happen if the task ownership was taken by calling take_task(id);
             return;
         };
+        #[cfg(debug_assertions)]
         let kind_str: &'static str = task.kind().into();
 
         let should_shutdown_on_error = task.kind().should_shutdown_on_error();
@@ -810,6 +944,7 @@ impl TaskCenterInner {
             match result {
                 Ok(Ok(())) => {
                     trace!(kind = ?task.kind(), name = ?task.name(), "Task {} exited normally", task_id);
+                    #[cfg(debug_assertions)]
                     counter!(TC_FINISHED, "kind" => kind_str, "status" => STATUS_COMPLETED)
                         .increment(1);
                 }
@@ -833,10 +968,12 @@ impl TaskCenterInner {
                     } else {
                         error!(kind = ?task.kind(), name = ?task.name(), "Task {} failed with: {:?}", task_id, err);
                     }
+                    #[cfg(debug_assertions)]
                     counter!(TC_FINISHED, "kind" => kind_str, "status" => STATUS_FAILED)
                         .increment(1);
                 }
                 Err(err) => {
+                    #[cfg(debug_assertions)]
                     counter!(TC_FINISHED, "kind" => kind_str, "status" => STATUS_FAILED)
                         .increment(1);
                     if should_shutdown_on_error {
@@ -853,7 +990,11 @@ impl TaskCenterInner {
             // Note that the task itself has been already removed from the task map, so shutdown
             // will not wait for its completion.
             self.shutdown_node(
-                &format!("task {} failed and requested a shutdown", task.name()),
+                &format!(
+                    "task {}({}) failed and requested a shutdown",
+                    task.name(),
+                    task.id()
+                ),
                 EXIT_CODE_FAILURE,
             )
             .await;
@@ -869,8 +1010,28 @@ impl TaskCenterInner {
             // already shutting down....
             return;
         }
-        self.health.node_status().merge(NodeStatus::ShuttingDown);
+
         let start = Instant::now();
+        let shutdown_result = tokio::time::timeout(
+            Configuration::pinned().common.shutdown_grace_period(),
+            self.shutdown_node_inner(reason, exit_code),
+        )
+        .await;
+
+        if shutdown_result.is_err() {
+            warn!(
+                "Timeout waiting for graceful shutdown. Shutdown took {:?}",
+                start.elapsed()
+            );
+        } else {
+            info!("Restate has gracefully shutdown in {:?}", start.elapsed());
+        };
+        self.root_task_context.cancel();
+        self.global_cancel_token.cancel();
+    }
+
+    async fn shutdown_node_inner(self: &Arc<Self>, reason: &str, exit_code: i32) {
+        self.health.node_status().merge(NodeStatus::ShuttingDown);
         self.current_exit_code.store(exit_code, Ordering::Relaxed);
 
         if exit_code != 0 {
@@ -881,20 +1042,39 @@ impl TaskCenterInner {
         self.cancel_tasks(Some(TaskKind::ClusterController), None)
             .await;
         // stop accepting ingress
-        self.cancel_tasks(Some(TaskKind::IngressServer), None).await;
-        // PPM will shutdown running processors
-        self.cancel_tasks(Some(TaskKind::PartitionProcessorManager), None)
+        self.cancel_tasks(Some(TaskKind::HttpIngressRole), None)
             .await;
+        // stop admin server and in-flight query-server requests
+        self.cancel_tasks(Some(TaskKind::AdminApiServer), None)
+            .await;
+        // Worker will shutdown running processors
+        self.cancel_tasks(Some(TaskKind::WorkerRole), None).await;
+
         self.initiate_managed_runtimes_shutdown();
         // Ask bifrost to shutdown providers and loglets
+        self.cancel_tasks(Some(TaskKind::BifrostBackgroundLowPriority), None)
+            .await;
         self.cancel_tasks(Some(TaskKind::BifrostWatchdog), None)
             .await;
+
+        // Stop log-server role
+        self.cancel_tasks(Some(TaskKind::LogServerRole), None).await;
+
+        // stop metadata server
+        self.cancel_tasks(Some(TaskKind::MetadataServer), None)
+            .await;
+
         self.shutdown_managed_runtimes();
         // global shutdown trigger
+        self.root_task_context.cancel();
         self.cancel_tasks(None, None).await;
         // notify outer components that we have completed the shutdown.
+        let on_shutdown = self.on_shutdown.lock().take();
+        if let Some(on_shutdown) = on_shutdown {
+            on_shutdown.await;
+        }
+        info!("Task center has stopped");
         self.global_cancel_token.cancel();
-        info!("** Shutdown completed in {:?}", start.elapsed());
     }
 
     /// Take control over the running task from task-center. This returns None if the task was not
@@ -1132,7 +1312,6 @@ mod tests {
         let tc = TaskCenterBuilder::default()
             .options(common_opts)
             .default_runtime_handle(tokio::runtime::Handle::current())
-            .ingress_runtime_handle(tokio::runtime::Handle::current())
             .build()?
             .into_handle();
         let start = tokio::time::Instant::now();

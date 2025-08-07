@@ -72,7 +72,6 @@ where
 
     let task_center = TaskCenterBuilder::default()
         .default_runtime_handle(tokio::runtime::Handle::current())
-        .ingress_runtime_handle(tokio::runtime::Handle::current())
         .options(config.common.clone())
         .build()
         .expect("task_center builds")
@@ -103,7 +102,7 @@ async fn start_metadata_server(mut config: Configuration) -> anyhow::Result<Meta
 
     let rpc_server_health = if !server_builder.is_empty() {
         let rpc_server_health_status = HealthStatus::default();
-        TaskCenter::spawn(TaskKind::RpcServer, "metadata-rpc-server", {
+        TaskCenter::spawn(TaskKind::MetadataServer, "metadata-rpc-server", {
             let rpc_server_health_status = rpc_server_health_status.clone();
             async move {
                 server_builder

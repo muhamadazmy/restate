@@ -76,8 +76,10 @@ pub enum TaskKind {
     SystemBoot,
     #[strum(props(OnCancel = "abort"))]
     MetadataBackgroundSync,
-    RpcServer,
-    #[strum(props(runtime = "default"))]
+    NodeRpcServer,
+    AdminApiServer,
+    LogServerRole,
+    #[strum(props(OnError = "log", runtime = "default"))]
     SocketHandler,
     /// An http2 stream handler created by the server-side of the connection.
     #[strum(props(OnError = "log", runtime = "default"))]
@@ -87,15 +89,16 @@ pub enum TaskKind {
     H2ClientStream,
     /// A type for ingress until we start enforcing timeouts for inflight requests. This enables us
     /// to shut down cleanly without waiting indefinitely.
-    #[strum(props(OnCancel = "abort", runtime = "ingress"))]
-    IngressServer,
+    #[strum(props(OnCancel = "abort"))]
+    HttpIngressRole,
+    WorkerRole,
     RoleRunner,
     /// Cluster controller is the first thing that gets stopped when the server is shut down
     ClusterController,
     #[strum(props(runtime = "default"))]
     FailureDetector,
     SystemService,
-    #[strum(props(OnCancel = "abort", runtime = "ingress"))]
+    #[strum(props(OnCancel = "abort"))]
     Ingress,
     /// Kafka ingestion related task
     Kafka,
@@ -115,6 +118,7 @@ pub enum TaskKind {
     LocalReactor,
     Shuffle,
     Cleaner,
+    LogTrimmer,
     MetadataServer,
     Background,
     // -- Bifrost Tasks
@@ -181,7 +185,6 @@ impl TaskKind {
         match self.get_str("runtime").unwrap_or("inherit") {
             "inherit" => AsyncRuntime::Inherit,
             "default" => AsyncRuntime::Default,
-            "ingress" => AsyncRuntime::Ingress,
             _ => panic!("Invalid runtime for task kind: {self}"),
         }
     }
@@ -197,6 +200,4 @@ pub enum AsyncRuntime {
     Inherit,
     /// Run on the default runtime
     Default,
-    /// Run on ingress runtime
-    Ingress,
 }

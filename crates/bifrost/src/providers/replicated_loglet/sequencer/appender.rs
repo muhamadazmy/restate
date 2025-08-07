@@ -55,6 +55,7 @@ enum State {
     Done,
     Sealed,
     Cancelled,
+    WriteUnavailable,
 }
 
 /// Appender makes sure a batch of records will run to completion
@@ -143,7 +144,9 @@ impl<T: TransportConnect> SequencerAppender<T> {
         let final_state = loop {
             state = match state {
                 // termination conditions
-                State::Done | State::Cancelled | State::Sealed => break state,
+                State::Done | State::Cancelled | State::Sealed | State::WriteUnavailable => {
+                    break state;
+                }
                 State::Wave => {
                     self.current_wave += 1;
                     // # Why is this cancellation safe?
@@ -173,6 +176,11 @@ impl<T: TransportConnect> SequencerAppender<T> {
                     if self.current_wave >= TONE_ESCALATION_THRESHOLD {
                         warn!(
                             wave = %self.current_wave,
+                            loglet_id=%self.sequencer_shared_state.loglet_id(),
+                            first_offset=%self.first_offset,
+                            to_offset=%self.records.last_offset(self.first_offset).unwrap(),
+                            length=%self.records.len(),
+                            otel.name="replicated_loglet::sequencer::appender: run",
                             "Append wave failed, retrying with a new wave after {:?}. Status is {}", delay, self.nodeset_status
                         );
                     } else {
@@ -217,6 +225,14 @@ impl<T: TransportConnect> SequencerAppender<T> {
                 if let Some(commit_resolver) = self.commit_resolver.take() {
                     commit_resolver.error(AppendError::ReconfigurationNeeded(
                         "sequencer is draining".into(),
+                    ));
+                }
+            }
+            State::WriteUnavailable => {
+                trace!("Loglet has not enough writable nodes");
+                if let Some(commit_resolver) = self.commit_resolver.take() {
+                    commit_resolver.error(AppendError::ReconfigurationNeeded(
+                        "loglet is write unavailable".into(),
                     ));
                 }
             }
@@ -271,12 +287,12 @@ impl<T: TransportConnect> SequencerAppender<T> {
         // select the spread
         let spread = match self.generate_spread() {
             Ok(spread) => spread,
-            Err(err) => {
+            Err(err @ SpreadSelectorError::InsufficientWriteableNodes) => {
                 trace!(
                     nodeset_status = %self.nodeset_status,
                     "Cannot select a spread: {err}"
                 );
-                return State::Backoff;
+                return State::WriteUnavailable;
             }
         };
 

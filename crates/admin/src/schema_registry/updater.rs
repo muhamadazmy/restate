@@ -371,7 +371,11 @@ impl SchemaUpdater {
                     None
                 },
             );
-            let workflow_completion_retention = if service_level_settings_behavior.preserve() {
+            let workflow_completion_retention = if service_level_settings_behavior.preserve()
+                // Retain previous value only if new service and old one are both workflows
+                && service_type == ServiceType::Workflow
+                && existing_service.ty == ServiceType::Workflow
+            {
                 existing_service.workflow_completion_retention
             } else if service_type == ServiceType::Workflow {
                 Some(DEFAULT_WORKFLOW_COMPLETION_RETENTION)
@@ -1062,6 +1066,24 @@ mod tests {
         }
     }
 
+    fn greeter_workflow_greet_handler() -> endpoint_manifest::Handler {
+        endpoint_manifest::Handler {
+            abort_timeout: None,
+            documentation: None,
+            idempotency_retention: None,
+            name: "greet".parse().unwrap(),
+            ty: Some(endpoint_manifest::HandlerType::Workflow),
+            input: None,
+            output: None,
+            metadata: Default::default(),
+            inactivity_timeout: None,
+            journal_retention: None,
+            workflow_completion_retention: None,
+            enable_lazy_state: None,
+            ingress_private: None,
+        }
+    }
+
     fn greeter_service() -> endpoint_manifest::Service {
         endpoint_manifest::Service {
             abort_timeout: None,
@@ -1100,6 +1122,22 @@ mod tests {
                 enable_lazy_state: None,
                 ingress_private: None,
             }],
+            idempotency_retention: None,
+            inactivity_timeout: None,
+            journal_retention: None,
+            metadata: Default::default(),
+            enable_lazy_state: None,
+        }
+    }
+
+    fn greeter_workflow() -> endpoint_manifest::Service {
+        endpoint_manifest::Service {
+            abort_timeout: None,
+            documentation: None,
+            ingress_private: None,
+            ty: endpoint_manifest::ServiceType::Workflow,
+            name: GREETER_SERVICE_NAME.parse().unwrap(),
+            handlers: vec![greeter_workflow_greet_handler()],
             idempotency_retention: None,
             inactivity_timeout: None,
             journal_retention: None,
@@ -1247,14 +1285,14 @@ mod tests {
         Ok(())
     }
 
-    mod change_instance_type {
+    mod change_service_type {
         use super::*;
 
-        use restate_test_util::assert;
+        use restate_test_util::{assert, assert_eq};
         use test_log::test;
 
         #[test]
-        fn register_new_deployment_fails_changing_instance_type() {
+        fn fails_without_force() {
             let mut updater = SchemaUpdater::default();
 
             let mut deployment_1 = Deployment::mock_with_uri("http://localhost:9080");
@@ -1280,6 +1318,68 @@ mod tests {
             assert!(let &SchemaError::Service(
                 ServiceError::DifferentType(_)
             ) = compute_result.unwrap_err());
+        }
+
+        #[test]
+        fn works_with_force() {
+            let mut updater = SchemaUpdater::default();
+
+            let mut deployment_1 = Deployment::mock_with_uri("http://localhost:9080");
+            let mut deployment_2 = Deployment::mock_with_uri("http://localhost:9081");
+
+            deployment_1.id = updater
+                .add_deployment(
+                    deployment_1.metadata.clone(),
+                    vec![greeter_service()],
+                    false,
+                )
+                .unwrap();
+            let schemas = updater.into_inner();
+            schemas.assert_service_deployment(GREETER_SERVICE_NAME, deployment_1.id);
+
+            updater = SchemaUpdater::new(schemas);
+            deployment_2.id = updater
+                .add_deployment(deployment_2.metadata, vec![greeter_virtual_object()], true)
+                .unwrap();
+            let schemas = updater.into_inner();
+            schemas.assert_service_deployment(GREETER_SERVICE_NAME, deployment_2.id);
+
+            assert_eq!(
+                schemas.assert_service(GREETER_SERVICE_NAME).ty,
+                ServiceType::VirtualObject
+            );
+        }
+
+        #[test]
+        fn works_with_force_and_correctly_set_workflow_retention() {
+            let mut updater = SchemaUpdater::default();
+
+            let mut deployment_1 = Deployment::mock_with_uri("http://localhost:9080");
+            let mut deployment_2 = Deployment::mock_with_uri("http://localhost:9081");
+
+            deployment_1.id = updater
+                .add_deployment(
+                    deployment_1.metadata.clone(),
+                    vec![greeter_service()],
+                    false,
+                )
+                .unwrap();
+            let schemas = updater.into_inner();
+            schemas.assert_service_deployment(GREETER_SERVICE_NAME, deployment_1.id);
+
+            updater = SchemaUpdater::new(schemas);
+            deployment_2.id = updater
+                .add_deployment(deployment_2.metadata, vec![greeter_workflow()], true)
+                .unwrap();
+            let schemas = updater.into_inner();
+            schemas.assert_service_deployment(GREETER_SERVICE_NAME, deployment_2.id);
+
+            let new_svc = schemas.assert_service(GREETER_SERVICE_NAME);
+            assert_eq!(new_svc.ty, ServiceType::Workflow);
+            assert_eq!(
+                new_svc.workflow_completion_retention,
+                Some(DEFAULT_WORKFLOW_COMPLETION_RETENTION)
+            );
         }
     }
 
@@ -1378,7 +1478,7 @@ mod tests {
         assert!(schemas.get_deployment(&deployment_1.id).is_none());
     }
 
-    mod remove_method {
+    mod remove_handler {
         use super::*;
 
         use restate_test_util::{check, let_assert};
@@ -2017,7 +2117,8 @@ mod tests {
         use googletest::prelude::*;
         use restate_types::config::Configuration;
         use restate_types::invocation::InvocationRetention;
-        use restate_types::schema::service::InvocationAttemptOptions;
+        use restate_types::schema::invocation_target::InvocationTargetResolver;
+        use restate_types::schema::service::{InvocationAttemptOptions, ServiceMetadata};
         use std::time::Duration;
         use test_log::test;
 
@@ -2115,6 +2216,47 @@ mod tests {
                 err(pat!(SchemaError::Service(pat!(
                     ServiceError::BadHandlerVisibility { .. }
                 ))))
+            );
+        }
+
+        #[test]
+        fn workflow_retention() {
+            let schema_information = Schema::default();
+            let mut updater = SchemaUpdater::new(schema_information);
+
+            let mut deployment = Deployment::mock();
+            deployment.id = updater
+                .add_deployment(
+                    deployment.metadata.clone(),
+                    vec![endpoint_manifest::Service {
+                        handlers: vec![endpoint_manifest::Handler {
+                            workflow_completion_retention: Some(30 * 1000),
+                            ..greeter_workflow_greet_handler()
+                        }],
+                        ..greeter_workflow()
+                    }],
+                    false,
+                )
+                .unwrap();
+            let schema = updater.into_inner();
+
+            assert_that!(
+                schema.assert_service(GREETER_SERVICE_NAME),
+                pat!(ServiceMetadata {
+                    revision: eq(1),
+                    deployment_id: eq(deployment.id),
+                    workflow_completion_retention: eq(Some(Duration::from_secs(30)))
+                })
+            );
+            assert_that!(
+                schema
+                    .resolve_latest_invocation_target(GREETER_SERVICE_NAME, GREET_HANDLER_NAME)
+                    .unwrap()
+                    .compute_retention(false),
+                eq(InvocationRetention {
+                    completion_retention: Duration::from_secs(30),
+                    journal_retention: Duration::ZERO,
+                })
             );
         }
 
@@ -2367,6 +2509,81 @@ mod tests {
                     enable_lazy_state: None,
                 })
             )
+        }
+    }
+
+    mod modify_service {
+        use super::*;
+
+        use googletest::prelude::*;
+        use restate_types::invocation::InvocationRetention;
+        use restate_types::schema::invocation_target::InvocationTargetResolver;
+        use restate_types::schema::service::ServiceMetadata;
+        use test_log::test;
+
+        #[test]
+        fn workflow_retention() {
+            // Register a plain workflow first
+            let schema_information = Schema::default();
+            let mut updater = SchemaUpdater::new(schema_information);
+
+            let mut deployment = Deployment::mock();
+            deployment.id = updater
+                .add_deployment(deployment.metadata.clone(), vec![greeter_workflow()], false)
+                .unwrap();
+
+            let schema = updater.into_inner();
+
+            assert_that!(
+                schema.assert_service(GREETER_SERVICE_NAME),
+                pat!(ServiceMetadata {
+                    revision: eq(1),
+                    deployment_id: eq(deployment.id),
+                    workflow_completion_retention: eq(Some(DEFAULT_WORKFLOW_COMPLETION_RETENTION))
+                })
+            );
+            assert_that!(
+                schema
+                    .resolve_latest_invocation_target(GREETER_SERVICE_NAME, GREET_HANDLER_NAME)
+                    .unwrap()
+                    .compute_retention(false),
+                eq(InvocationRetention {
+                    completion_retention: DEFAULT_WORKFLOW_COMPLETION_RETENTION,
+                    journal_retention: Duration::ZERO,
+                })
+            );
+
+            // Now update it
+            let new_retention = Duration::from_secs(30);
+            let mut updater = SchemaUpdater::new(schema);
+
+            updater
+                .modify_service(
+                    GREETER_SERVICE_NAME.to_owned(),
+                    vec![ModifyServiceChange::WorkflowCompletionRetention(
+                        new_retention,
+                    )],
+                )
+                .unwrap();
+
+            let schema = updater.into_inner();
+
+            assert_that!(
+                schema.assert_service(GREETER_SERVICE_NAME),
+                pat!(ServiceMetadata {
+                    workflow_completion_retention: eq(Some(new_retention))
+                })
+            );
+            assert_that!(
+                schema
+                    .resolve_latest_invocation_target(GREETER_SERVICE_NAME, GREET_HANDLER_NAME)
+                    .unwrap()
+                    .compute_retention(false),
+                eq(InvocationRetention {
+                    completion_retention: new_retention,
+                    journal_retention: Duration::ZERO,
+                })
+            );
         }
     }
 }

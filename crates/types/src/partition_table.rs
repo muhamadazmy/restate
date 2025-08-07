@@ -229,12 +229,20 @@ impl AsRef<str> for DbName {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, derive_more::Display, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct CfName(SmartString);
 
 impl CfName {
     pub fn for_partition(partition_id: PartitionId) -> Self {
         Self(format!("{PARTITION_CF_PREFIX}{partition_id}").into())
+    }
+}
+
+impl From<CfName> for SmartString {
+    fn from(val: CfName) -> Self {
+        val.0
     }
 }
 
@@ -254,7 +262,7 @@ pub struct Partition {
 }
 
 impl Partition {
-    pub fn new(partition_id: PartitionId, key_range: RangeInclusive<PartitionKey>) -> Self {
+    pub const fn new(partition_id: PartitionId, key_range: RangeInclusive<PartitionKey>) -> Self {
         Self {
             partition_id,
             key_range,

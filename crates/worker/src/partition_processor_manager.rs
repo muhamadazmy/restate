@@ -16,7 +16,7 @@ use std::collections::hash_map::Entry;
 use std::ops::{Add, RangeInclusive};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ahash::{HashMap, HashSet};
 use anyhow::{Context, bail};
@@ -31,15 +31,12 @@ use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, info_span, instrument, trace, warn};
 
-use crate::metric_definitions::PARTITION_DURABLE_LSN;
-use crate::metric_definitions::PARTITION_IS_ACTIVE;
+use crate::metric_definitions::NUM_PARTITIONS;
 use crate::metric_definitions::PARTITION_IS_EFFECTIVE_LEADER;
 use crate::metric_definitions::PARTITION_LABEL;
 use crate::metric_definitions::PARTITION_TIME_SINCE_LAST_STATUS_UPDATE;
 use crate::metric_definitions::{NUM_ACTIVE_PARTITIONS, PARTITION_APPLIED_LSN_LAG};
-use crate::metric_definitions::{NUM_PARTITIONS, PARTITION_APPLIED_LSN};
 use crate::partition::ProcessorError;
-use crate::partition::snapshots::{SnapshotPartitionTask, SnapshotRepository};
 use crate::partition_processor_manager::processor_state::{
     LeaderEpochToken, ProcessorState, StartedProcessor,
 };
@@ -61,8 +58,9 @@ use restate_metadata_server::{MetadataStoreClient, ReadModifyWriteError};
 use restate_metadata_store::{ReadWriteError, RetryError, retry_on_retryable_error};
 use restate_partition_store::PartitionStoreManager;
 use restate_partition_store::snapshots::{
-    PartitionSnapshotMetadata, SnapshotCreated, SnapshotError, SnapshotErrorKind,
+    PartitionSnapshotMetadata, SnapshotPartitionTask, SnapshotRepository,
 };
+use restate_partition_store::{SnapshotError, SnapshotErrorKind};
 use restate_types::cluster::cluster_state::ReplayStatus;
 use restate_types::cluster::cluster_state::{PartitionProcessorStatus, RunMode};
 use restate_types::config::Configuration;
@@ -71,7 +69,7 @@ use restate_types::health::HealthStatus;
 use restate_types::identifiers::SnapshotId;
 use restate_types::identifiers::{LeaderEpoch, PartitionId, PartitionKey};
 use restate_types::live::Live;
-use restate_types::logs::{Lsn, SequenceNumber};
+use restate_types::logs::{LogId, Lsn, SequenceNumber};
 use restate_types::metadata_store::keys::partition_processor_epoch_key;
 use restate_types::net::metadata::MetadataKind;
 use restate_types::net::partition_processor::PartitionLeaderService;
@@ -87,6 +85,24 @@ use restate_types::partitions::state::PartitionReplicaSetStates;
 use restate_types::protobuf::common::WorkerStatus;
 use restate_types::retries::with_jitter;
 use restate_types::{GenerationalNodeId, SharedString};
+
+#[derive(Debug, Clone, derive_more::Display)]
+#[display("{}", snapshot_id)]
+pub struct SnapshotCreated {
+    pub snapshot_id: SnapshotId,
+    pub log_id: LogId,
+    pub min_applied_lsn: Lsn,
+}
+
+impl From<&PartitionSnapshotMetadata> for SnapshotCreated {
+    fn from(metadata: &PartitionSnapshotMetadata) -> SnapshotCreated {
+        SnapshotCreated {
+            snapshot_id: metadata.snapshot_id,
+            log_id: metadata.log_id,
+            min_applied_lsn: metadata.min_applied_lsn,
+        }
+    }
+}
 
 pub struct PartitionProcessorManager {
     health_status: HealthStatus<WorkerStatus>,
@@ -137,6 +153,16 @@ pub enum Error {
     InvokerBuild(#[from] BuildError),
 }
 
+enum RestartDelay {
+    Immediate,
+    Fixed,
+    Exponential {
+        start_time: Instant,
+        last_delay: Option<Duration>,
+    },
+    MaxBackoff,
+}
+
 type ChannelStatusReaderList = Vec<(RangeInclusive<PartitionKey>, ChannelStatusReader)>;
 
 #[derive(Debug, Clone, Default)]
@@ -170,7 +196,7 @@ impl StatusHandle for MultiplexedInvokerStatusReader {
             }
         }
         // although we never have a single scans that cross partitions (thus overlapping_partitions.len() == 1),
-        // we can make this code path abit more future resilent cheaply, by ordering the partitions by their start key.
+        // we can make this code path a bit more future resilient cheaply, by ordering the partitions by their start key.
         // (this uniquely defines the order between the partitions)
         overlapping_partitions.sort_by(|(a, _), (b, _)| a.start().cmp(b.start()));
 
@@ -289,7 +315,7 @@ impl PartitionProcessorManager {
                     }
                 }
                 Some(event) = self.asynchronous_operations.join_next() => {
-                    self.on_asynchronous_event(event.expect("asynchronous operations must not panic"));
+                    self.on_asynchronous_event(event.context("asynchronous operations must not panic")?);
                 }
                 Some(partition_processor_rpc) = pp_rpc_rx.next() => {
                     self.on_partition_processor_rpc(partition_processor_rpc);
@@ -401,9 +427,6 @@ impl PartitionProcessorManager {
         fields(partition_id = %event.partition_id, event = %<&'static str as From<&EventKind>>::from(&event.inner))
     )]
     fn on_asynchronous_event(&mut self, event: AsynchronousEvent) {
-        // todo make dependent on retry attempt (e.g. using an exponential retry policy)
-        const PARTITION_PROCESSOR_ERROR_RESTART_DELAY: Duration = Duration::from_secs(1);
-
         let AsynchronousEvent {
             partition_id,
             inner,
@@ -416,14 +439,22 @@ impl PartitionProcessorManager {
                         if let Some(processor_state) = self.processor_states.get_mut(&partition_id)
                         {
                             match processor_state {
-                                ProcessorState::Starting { target_run_mode } => {
+                                ProcessorState::Starting {
+                                    target_run_mode,
+                                    start_time,
+                                    delay,
+                                } => {
                                     debug!(%target_run_mode, "Partition processor was successfully created.");
                                     self.invokers_status_reader.push(
                                         started_processor.key_range().clone(),
                                         started_processor.invoker_status_reader().clone(),
                                     );
 
-                                    let mut new_state = ProcessorState::started(started_processor);
+                                    let mut new_state = ProcessorState::started(
+                                        started_processor,
+                                        *start_time,
+                                        *delay,
+                                    );
                                     // check whether we need to obtain a new leader epoch
                                     if *target_run_mode == RunMode::Leader {
                                         if let Some(leader_epoch_token) = new_state.run_as_leader()
@@ -474,9 +505,9 @@ impl PartitionProcessorManager {
                     Err(err) => {
                         info!(%partition_id, %err, "Partition processor failed to start");
                         self.processor_states.remove(&partition_id);
-                        self.start_partition_processor_if_replica(
+                        self.restart_partition_processor_if_replica(
                             partition_id,
-                            Some(PARTITION_PROCESSOR_ERROR_RESTART_DELAY),
+                            RestartDelay::Fixed,
                         );
                     }
                 }
@@ -487,14 +518,19 @@ impl PartitionProcessorManager {
                     None => {
                         debug!("Stopped partition processor which is no longer running.");
                         // immediately try to restart if we are still part of the partition's membership
-                        None
+                        RestartDelay::Immediate
                     }
                     Some(processor_state) => match processor_state {
                         ProcessorState::Starting { .. } => {
                             warn!(%partition_id, "Partition processor failed to start: {result:?}");
-                            Some(PARTITION_PROCESSOR_ERROR_RESTART_DELAY)
+                            RestartDelay::Fixed
                         }
-                        ProcessorState::Started { processor, .. } => {
+                        ProcessorState::Started {
+                            processor,
+                            start_time,
+                            delay,
+                            ..
+                        } => {
                             self.invokers_status_reader
                                 .remove(processor.as_ref().expect("must be some").key_range());
 
@@ -503,7 +539,7 @@ impl PartitionProcessorManager {
                                     trim_gap_end: to_lsn,
                                     read_pointer: sequence_number,
                                 }) => {
-                                    if self.snapshot_repository.is_some() {
+                                    if self.partition_store_manager.is_repository_configured() {
                                         info!(
                                             %partition_id,
                                             trim_gap_to_lsn = ?to_lsn,
@@ -511,41 +547,40 @@ impl PartitionProcessorManager {
                                             "Partition processor stopped due to a log trim gap, will attempt to fast-forward on restart",
                                         );
                                         self.fast_forward_on_startup.insert(partition_id, *to_lsn);
-                                        // immediately try to restart if we are still part of the partition's membership
-                                        None
+                                        RestartDelay::Immediate
                                     } else {
-                                        warn!(
+                                        error!(
                                             %partition_id,
                                             trim_gap_to_lsn = ?to_lsn,
                                             "Partition processor stopped due to a log trim gap, and no snapshot repository is configured",
                                         );
-                                        Some(PARTITION_PROCESSOR_ERROR_RESTART_DELAY)
+                                        // configuration problem; until we have peer-to-peer state exchange we can only wait
+                                        RestartDelay::MaxBackoff
                                     }
                                 }
                                 Err(err) => {
                                     warn!(%partition_id, %err, "Partition processor exited unexpectedly");
-                                    // todo make delay depending on number of restart attempts
-                                    Some(PARTITION_PROCESSOR_ERROR_RESTART_DELAY)
+                                    RestartDelay::Exponential {
+                                        start_time,
+                                        last_delay: delay,
+                                    }
                                 }
                                 Ok(_) => {
                                     info!(%partition_id, "Partition processor stopped");
-                                    // immediately try to restart if we are still part of the partition's membership
-                                    None
+                                    RestartDelay::Immediate
                                 }
                             }
                         }
-                        ProcessorState::Stopping { processor } => {
+                        ProcessorState::Stopping { processor, .. } => {
                             if let Some(processor) = processor {
                                 self.invokers_status_reader.remove(processor.key_range());
                             }
-
-                            // immediately try to restart if we are still part of the partition's membership
-                            None
+                            RestartDelay::Immediate
                         }
                     },
                 };
 
-                if !self.start_partition_processor_if_replica(partition_id, delay) {
+                if !self.restart_partition_processor_if_replica(partition_id, delay) {
                     debug!("Partition processor stopped: {result:?}");
                 }
 
@@ -683,55 +718,22 @@ impl PartitionProcessorManager {
             .iter()
             .filter_map(|(partition_id, processor_state)| {
                 let mut status = processor_state.partition_processor_status()?;
+                let labels = [(PARTITION_LABEL, partition_id.to_string())];
 
-                gauge!(PARTITION_TIME_SINCE_LAST_STATUS_UPDATE,
-                        PARTITION_LABEL => partition_id.to_string())
-                .set(status.updated_at.elapsed());
+                gauge!(PARTITION_TIME_SINCE_LAST_STATUS_UPDATE, &labels)
+                    .set(status.updated_at.elapsed());
 
-                gauge!(PARTITION_IS_EFFECTIVE_LEADER,
-                        PARTITION_LABEL => partition_id.to_string())
-                .set(if status.is_effective_leader() {
-                    1.0
-                } else {
-                    0.0
-                });
-
-                gauge!(PARTITION_IS_ACTIVE,
-                        PARTITION_LABEL => partition_id.to_string())
-                .set(if status.replay_status == ReplayStatus::Active {
-                    1.0
-                } else {
-                    0.0
-                });
-
-                if let Some(last_applied_log_lsn) = status.last_applied_log_lsn {
-                    gauge!(PARTITION_APPLIED_LSN,
-                        PARTITION_LABEL => partition_id.to_string())
-                    .set(last_applied_log_lsn.as_u64() as f64);
-                }
-
-                if let Some(durable_lsn) = status.last_persisted_log_lsn {
-                    gauge!(PARTITION_DURABLE_LSN,
-                        PARTITION_LABEL => partition_id.to_string())
-                    .set(durable_lsn.as_u64() as f64);
-                }
+                gauge!(PARTITION_IS_EFFECTIVE_LEADER, &labels).set(
+                    if status.is_effective_leader() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                );
 
                 // it is a bit unfortunate that we share PartitionProcessorStatus between the
                 // PP and the PPManager :-(. Maybe at some point we want to split the struct for it.
-                status.last_persisted_log_lsn = self.partition_store_manager.get_durable_lsn(*partition_id);
                 status.last_archived_log_lsn = self.archived_lsns.get(partition_id).cloned();
-
-                // todo: this will need to be moved to a place where PPM updates it regularly, or
-                // to be directly integrated into durable lsn tracking so we update it immediately
-                // after flush.
-                if let Some(durable_lsn) = status.last_persisted_log_lsn {
-                    self.replica_set_states.note_durable_lsn(
-                        *partition_id,
-                        my_node_id().as_plain(),
-                        durable_lsn,
-                    );
-                }
-
                 let current_tail_lsn = self.target_tail_lsns.get(partition_id).cloned();
 
                 let target_tail_lsn = if current_tail_lsn > status.target_tail_lsn {
@@ -744,16 +746,18 @@ impl PartitionProcessorManager {
                     None => {
                         // current tail lsn is unknown.
                         // This might indicate an issue, so we set the metric to infinity
-                        gauge!(PARTITION_APPLIED_LSN_LAG, PARTITION_LABEL => partition_id.to_string())
-                        .set(f64::INFINITY);
-                    },
+                        gauge!(PARTITION_APPLIED_LSN_LAG, &labels).set(f64::INFINITY);
+                    }
                     Some(target_tail_lsn) => {
                         status.target_tail_lsn = Some(target_tail_lsn);
 
                         // tail lsn always points to the next "free" lsn slot. Therefor the lag is calculate as `lsn-1`
                         // hence we do target_tail_lsn.prev() below
-                        gauge!(PARTITION_APPLIED_LSN_LAG, PARTITION_LABEL => partition_id.to_string())
-                        .set(target_tail_lsn.prev().as_u64().saturating_sub(status.last_applied_log_lsn.unwrap_or(Lsn::OLDEST).as_u64()) as f64);
+                        gauge!(PARTITION_APPLIED_LSN_LAG, &labels).set(
+                            target_tail_lsn.prev().as_u64().saturating_sub(
+                                status.last_applied_log_lsn.unwrap_or(Lsn::OLDEST).as_u64(),
+                            ) as f64,
+                        );
                     }
                 }
 
@@ -931,7 +935,7 @@ impl PartitionProcessorManager {
             });
 
         for partition_id in unknown_archived_lsn {
-            self.spawn_update_archived_lsn_task(partition_id, snapshot_repository.clone());
+            self.spawn_update_archived_lsn_task(partition_id);
         }
 
         // Limit the number of snapshots we schedule automatically
@@ -1024,7 +1028,7 @@ impl PartitionProcessorManager {
                 } else {
                     Duration::from_millis(rand::rng().random_range(0..10_000))
                 };
-                let spawn_task_result = TaskCenter::spawn_unmanaged(
+                let spawn_task_result = TaskCenter::spawn_unmanaged_child(
                     TaskKind::PartitionSnapshotProducer,
                     "create-snapshot",
                     async move {
@@ -1067,25 +1071,17 @@ impl PartitionProcessorManager {
         }
     }
 
-    fn spawn_update_archived_lsn_task(
-        &mut self,
-        partition_id: PartitionId,
-        snapshot_repository: SnapshotRepository,
-    ) {
+    fn spawn_update_archived_lsn_task(&mut self, partition_id: PartitionId) {
+        let psm = self.partition_store_manager.clone();
         self.asynchronous_operations
             .build_task()
             .name(&format!("update-archived-lsn-{partition_id}"))
             .spawn(
                 async move {
-                    let archived_lsn = snapshot_repository
-                        .get_latest_archived_lsn(partition_id)
+                    let archived_lsn = psm
+                        .refresh_latest_archived_lsn(partition_id)
                         .await
-                        .inspect(|lsn| debug!(?partition_id, "Latest archived LSN: {}", lsn))
-                        .inspect_err(|err| {
-                            warn!(?partition_id, "Unable to get latest archived LSN: {}", err)
-                        })
-                        .ok()
-                        .unwrap_or(Lsn::INVALID);
+                        .expect("repository must be configured here");
 
                     AsynchronousEvent {
                         partition_id,
@@ -1195,22 +1191,48 @@ impl PartitionProcessorManager {
 
     /// Starts a partition processor if this node is part of the replica set of the given partition.
     /// Returns true if this node is part of the replica set of the given partition. Otherwise, false.
-    fn start_partition_processor_if_replica(
+    fn restart_partition_processor_if_replica(
         &mut self,
         partition_id: PartitionId,
-        delay: Option<Duration>,
+        delay: RestartDelay,
     ) -> bool {
+        const PARTITION_PROCESSOR_ERROR_RESTART_DELAY_BASE: Duration = Duration::from_secs(1);
+        const PARTITION_PROCESSOR_ERROR_RESTART_DELAY_MAX: Duration = Duration::from_secs(30);
+        const PARTITION_PROCESSOR_DELAY_RESET_RUNNING_TIME: Duration = Duration::from_secs(60);
+
         // only restart partition processors if the partition processor manager is still supposed to run
         if restate_core::is_cancellation_requested() {
             return false;
         }
+
+        let delay = match delay {
+            RestartDelay::Immediate => None,
+            RestartDelay::Fixed => Some(PARTITION_PROCESSOR_ERROR_RESTART_DELAY_BASE),
+            RestartDelay::Exponential {
+                start_time,
+                last_delay: previous_backoff,
+            } => {
+                if start_time.elapsed() > PARTITION_PROCESSOR_DELAY_RESET_RUNNING_TIME {
+                    // if we have been running for a while, reset back to the base delay
+                    Some(PARTITION_PROCESSOR_ERROR_RESTART_DELAY_BASE)
+                } else {
+                    Some(
+                        previous_backoff
+                            .unwrap_or(PARTITION_PROCESSOR_ERROR_RESTART_DELAY_BASE)
+                            .mul_f64(2.0)
+                            .min(PARTITION_PROCESSOR_ERROR_RESTART_DELAY_MAX),
+                    )
+                }
+            }
+            RestartDelay::MaxBackoff => Some(PARTITION_PROCESSOR_ERROR_RESTART_DELAY_MAX),
+        };
 
         if self
             .replica_set_states
             .membership_state(partition_id)
             .contains(Metadata::with_current(|m| m.my_node_id().as_plain()))
         {
-            self.start_partition_processor(partition_id, delay);
+            self.start_partition_processor(partition_id, delay.map(|d| with_jitter(d, 0.3)));
             true
         } else {
             false
@@ -1219,12 +1241,7 @@ impl PartitionProcessorManager {
 
     #[instrument(level = "info", skip_all, fields(partition_id = %partition_id))]
     fn start_partition_processor(&mut self, partition_id: PartitionId, delay: Option<Duration>) {
-        let Some(partition_key_range) = self
-            .partition_table
-            .live_load()
-            .get(&partition_id)
-            .map(|partition| partition.key_range.clone())
-        else {
+        let Some(partition) = self.partition_table.live_load().get(&partition_id).cloned() else {
             debug!(
                 "Cannot start partition processor because it is not contained in the partition table. Waiting for a partition table update."
             );
@@ -1243,13 +1260,11 @@ impl PartitionProcessorManager {
 
         let starting_task = SpawnPartitionProcessorTask::new(
             task_name.clone(),
-            partition_id,
-            partition_key_range,
+            partition,
             self.updateable_config.clone(),
             self.bifrost.clone(),
             self.replica_set_states.clone(),
             self.partition_store_manager.clone(),
-            self.snapshot_repository.clone(),
             self.fast_forward_on_startup.remove(&partition_id),
         );
 
@@ -1268,8 +1283,10 @@ impl PartitionProcessorManager {
             )
             .expect("to spawn starting pp task");
 
-        self.processor_states
-            .insert(partition_id, ProcessorState::starting(RunMode::Follower));
+        self.processor_states.insert(
+            partition_id,
+            ProcessorState::starting(RunMode::Follower, delay),
+        );
     }
 }
 
@@ -1409,9 +1426,9 @@ mod tests {
     use restate_core::{TaskCenter, TaskKind, TestCoreEnvBuilder};
     use restate_partition_store::PartitionStoreManager;
     use restate_rocksdb::RocksDbManager;
-    use restate_types::config::{CommonOptions, Configuration, StorageOptions};
+    use restate_types::config::{CommonOptions, Configuration};
     use restate_types::health::HealthStatus;
-    use restate_types::identifiers::{PartitionId, PartitionKey};
+    use restate_types::identifiers::PartitionId;
     use restate_types::live::{Constant, Live};
     use restate_types::logs::{Lsn, SequenceNumber};
     use restate_types::net::AdvertisedAddress;
@@ -1452,11 +1469,7 @@ mod tests {
 
         let replica_set_states = PartitionReplicaSetStates::default();
 
-        let partition_store_manager = PartitionStoreManager::create(
-            Constant::new(StorageOptions::default()),
-            &[(PartitionId::MIN, 0..=PartitionKey::MAX)],
-        )
-        .await?;
+        let partition_store_manager = PartitionStoreManager::create().await?;
 
         let partition_processor_manager = PartitionProcessorManager::new(
             health_status,

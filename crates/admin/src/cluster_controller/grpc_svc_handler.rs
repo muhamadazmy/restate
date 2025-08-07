@@ -24,12 +24,13 @@ use restate_core::protobuf::cluster_ctrl_svc::{
     CreatePartitionSnapshotResponse, DescribeLogRequest, DescribeLogResponse, FindTailRequest,
     FindTailResponse, GetClusterConfigurationRequest, GetClusterConfigurationResponse,
     ListLogsRequest, ListLogsResponse, QueryRequest, QueryResponse, SealAndExtendChainRequest,
-    SealAndExtendChainResponse, SealedSegment, SetClusterConfigurationRequest,
-    SetClusterConfigurationResponse, TailState, TrimLogRequest,
+    SealAndExtendChainResponse, SealChainRequest, SealChainResponse, SealedSegment,
+    SetClusterConfigurationRequest, SetClusterConfigurationResponse, TailState, TrimLogRequest,
     cluster_ctrl_svc_server::{ClusterCtrlSvc, ClusterCtrlSvcServer},
 };
 use restate_core::{Metadata, MetadataWriter};
 use restate_storage_query_datafusion::context::QueryContext;
+use restate_types::config::NetworkingOptions;
 use restate_types::identifiers::PartitionId;
 use restate_types::logs::metadata::SegmentIndex;
 use restate_types::logs::{LogId, Lsn, SequenceNumber};
@@ -71,16 +72,21 @@ impl ClusterCtrlSvcHandler {
         }
     }
 
-    pub fn into_server(self) -> ClusterCtrlSvcServer<Self> {
-        ClusterCtrlSvcServer::new(self)
+    pub fn into_server(self, config: &NetworkingOptions) -> ClusterCtrlSvcServer<Self> {
+        let server = ClusterCtrlSvcServer::new(self)
             // note: the order of those calls defines the priority
             .accept_compressed(CompressionEncoding::Zstd)
-            .accept_compressed(CompressionEncoding::Gzip)
+            .accept_compressed(CompressionEncoding::Gzip);
+        if config.disable_compression {
+            server
+        } else {
             // note: the order of those calls defines the priority
             // deflate/gzip has significantly higher CPU overhead according to our CPU profiling,
             // so we prefer zstd over gzip.
-            .send_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Gzip)
+            server
+                .send_compressed(CompressionEncoding::Zstd)
+                .send_compressed(CompressionEncoding::Gzip)
+        }
     }
 }
 
@@ -210,6 +216,29 @@ impl ClusterCtrlSvc for ClusterCtrlSvcHandler {
                 min_applied_lsn: min_applied_lsn.as_u64(),
             })),
         }
+    }
+
+    async fn seal_chain(
+        &self,
+        request: Request<SealChainRequest>,
+    ) -> Result<Response<SealChainResponse>, Status> {
+        let request = request.into_inner();
+
+        let tail_lsn = self
+            .controller_handle
+            .seal_chain(
+                request.log_id.into(),
+                request.segment_index.map(SegmentIndex::from),
+                false, /* permanent_seal */
+                request.context,
+            )
+            .await
+            .map_err(|_| Status::aborted("Node is shutting down"))?
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        Ok(Response::new(SealChainResponse {
+            tail_offset: tail_lsn.into(),
+        }))
     }
 
     async fn seal_and_extend_chain(

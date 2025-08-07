@@ -10,7 +10,7 @@
 
 use std::fmt;
 use std::fmt::Display;
-use std::ops::Add;
+use std::ops::{Add, Sub};
 use std::time::{Duration, SystemTime};
 
 use restate_encoding::{BilrostNewType, NetSerde};
@@ -58,6 +58,13 @@ impl MillisSinceEpoch {
         self.0
     }
 
+    /// Note, this doesn't fail if the timestamp is higher than Timestamp::MAX instead
+    /// it returns the default value (now). There are no practical cases where this can happen
+    /// so it's decided to do this for API convenience.
+    pub fn into_timestamp(self) -> jiff::Timestamp {
+        jiff::Timestamp::from_millisecond(self.0 as i64).unwrap_or_default()
+    }
+
     /// Returns zero duration if self is in the future. Should not be used where monotonic
     /// clock/duration is expected.
     pub fn elapsed(&self) -> Duration {
@@ -71,6 +78,16 @@ impl Add<Duration> for MillisSinceEpoch {
 
     fn add(self, rhs: Duration) -> Self::Output {
         MillisSinceEpoch(self.0.saturating_add(
+            u64::try_from(rhs.as_millis()).expect("millis since Unix epoch should fit in u64"),
+        ))
+    }
+}
+
+impl Sub<Duration> for MillisSinceEpoch {
+    type Output = MillisSinceEpoch;
+
+    fn sub(self, rhs: Duration) -> Self::Output {
+        MillisSinceEpoch(self.0.saturating_sub(
             u64::try_from(rhs.as_millis()).expect("millis since Unix epoch should fit in u64"),
         ))
     }

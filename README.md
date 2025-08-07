@@ -8,9 +8,9 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/restatedev/img/refs/heads/main/restate-overview-light.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/restatedev/img/refs/heads/main/restate-overview-dark.png">
-    <img alt="Restate overview" src="https://raw.githubusercontent.com/restatedev/img/refs/heads/main/restate-overview-dark.png" width="650">
+    <source media="(prefers-color-scheme: dark)" srcset="https://restate.dev/blog/announcing-restate-1.0-restate-cloud-and-our-seed-funding-round/title_figure_hudf3f5cd4c2c091de8198c7c4b273b831_2636815_6620x0_resize_q75_h2_box_3.webp">
+    <source media="(prefers-color-scheme: light)" srcset="https://restate.dev/blog/announcing-restate-1.0-restate-cloud-and-our-seed-funding-round/title_figure_hudf3f5cd4c2c091de8198c7c4b273b831_2636815_6620x0_resize_q75_h2_box_3.webp">
+    <img alt="Restate overview" src="https://restate.dev/blog/announcing-restate-1.0-restate-cloud-and-our-seed-funding-round/title_figure_hudf3f5cd4c2c091de8198c7c4b273b831_2636815_6620x0_resize_q75_h2_box_3.webp" width="100%">
   </picture>
 </p>
 
@@ -18,8 +18,9 @@
 
 Restate provides a distributed durable version of your everyday building blocks, letting you build a wide range of use cases:
 
+* [Durable AI Agents](https://github.com/restatedev/ai-examples)
 * [Workflows-as-Code](https://docs.restate.dev/use-cases/workflows)
-* [Microservice orchestration](https://docs.restate.dev/use-cases/microservice-orchestration)
+* [Microservice Orchestration](https://docs.restate.dev/use-cases/microservice-orchestration)
 * [Event Processing](https://docs.restate.dev/use-cases/event-processing)
 * [Async Tasks](https://docs.restate.dev/use-cases/async-tasks)
 * [Agents, Stateful Actors, state machines, and much more](https://github.com/restatedev/examples)

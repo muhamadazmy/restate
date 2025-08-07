@@ -26,13 +26,13 @@ use tokio::time;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use restate_bifrost::{Bifrost, SealedSegment};
-use restate_core::cancellation_token;
+use restate_bifrost::{Bifrost, MaybeSealedSegment};
 use restate_core::network::tonic_service_filter::{TonicServiceFilter, WaitForReady};
 use restate_core::network::{
     NetworkSender, NetworkServerBuilder, Networking, Swimlane, TransportConnect,
 };
 use restate_core::{Metadata, MetadataWriter, ShutdownError, TaskCenter, TaskKind};
+use restate_core::{cancellation_token, my_node_id};
 use restate_metadata_store::ReadModifyWriteError;
 use restate_storage_query_datafusion::BuildError;
 use restate_storage_query_datafusion::context::{ClusterTables, QueryContext};
@@ -43,7 +43,7 @@ use restate_types::identifiers::PartitionId;
 use restate_types::live::Live;
 use restate_types::logs::metadata::{
     LogletParams, Logs, LogsConfiguration, ProviderConfiguration, ProviderKind,
-    ReplicatedLogletConfig, SegmentIndex,
+    ReplicatedLogletConfig, SealMetadata, SegmentIndex,
 };
 use restate_types::logs::{LogId, LogletId, Lsn};
 use restate_types::net::node::NodeState;
@@ -56,7 +56,7 @@ use restate_types::partitions::Partition;
 use restate_types::partitions::state::{MembershipState, PartitionReplicaSetStates};
 use restate_types::protobuf::common::AdminStatus;
 use restate_types::replicated_loglet::ReplicatedLogletParams;
-use restate_types::replication::{NodeSet, ReplicationProperty};
+use restate_types::replication::{NodeSet, NodeSetChecker, ReplicationProperty};
 use restate_types::{GenerationalNodeId, NodeId, Version};
 
 use crate::cluster_controller::cluster_state_refresher::ClusterStateRefresher;
@@ -129,7 +129,7 @@ where
                     cluster_query_context,
                     replica_set_states.clone(),
                 )
-                .into_server(),
+                .into_server(&configuration.live_load().networking),
                 WaitForReady::new(health_status.clone(), AdminStatus::Ready),
             ),
             restate_core::protobuf::cluster_ctrl_svc::FILE_DESCRIPTOR_SET,
@@ -194,7 +194,14 @@ enum ClusterControllerCommand {
         log_id: LogId,
         min_version: Version,
         extension: Option<ChainExtension>,
-        response_tx: oneshot::Sender<anyhow::Result<SealedSegment>>,
+        response_tx: oneshot::Sender<anyhow::Result<MaybeSealedSegment>>,
+    },
+    SealChain {
+        log_id: LogId,
+        segment_index: Option<SegmentIndex>,
+        permanent_seal: bool,
+        context: std::collections::HashMap<String, String>,
+        response_tx: oneshot::Sender<anyhow::Result<Lsn>>,
     },
 }
 
@@ -290,12 +297,35 @@ impl ClusterControllerHandle {
         response_rx.await.map_err(|_| ShutdownError)
     }
 
+    pub async fn seal_chain(
+        &self,
+        log_id: LogId,
+        segment_index: Option<SegmentIndex>,
+        permanent_seal: bool,
+        context: std::collections::HashMap<String, String>,
+    ) -> Result<anyhow::Result<Lsn>, ShutdownError> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let _ = self
+            .tx
+            .send(ClusterControllerCommand::SealChain {
+                log_id,
+                segment_index,
+                permanent_seal,
+                context,
+                response_tx,
+            })
+            .await;
+
+        response_rx.await.map_err(|_| ShutdownError)
+    }
+
     pub async fn seal_and_extend_chain(
         &self,
         log_id: LogId,
         min_version: Version,
         extension: Option<ChainExtension>,
-    ) -> Result<anyhow::Result<SealedSegment>, ShutdownError> {
+    ) -> Result<anyhow::Result<MaybeSealedSegment>, ShutdownError> {
         let (response_tx, response_rx) = oneshot::channel();
 
         let _ = self
@@ -499,6 +529,33 @@ impl<T: TransportConnect> Service<T> {
                         Ok(())
                     });
             }
+            ClusterControllerCommand::SealChain {
+                log_id,
+                segment_index,
+                permanent_seal,
+                mut context,
+                response_tx,
+            } => {
+                let bifrost = self.bifrost.clone();
+
+                // receiver will get error if response_tx is dropped
+                _ = TaskCenter::spawn(TaskKind::Disposable, "seal-chain", async move {
+                    context.insert("node".to_owned(), my_node_id().to_string());
+
+                    let result = SealChainTask {
+                        log_id,
+                        segment_index,
+                        permanent_seal,
+                        context,
+                        bifrost,
+                    }
+                    .run()
+                    .await;
+
+                    _ = response_tx.send(result);
+                    Ok(())
+                });
+            }
             ClusterControllerCommand::SealAndExtendChain {
                 log_id,
                 min_version,
@@ -672,6 +729,36 @@ where
     }
 }
 
+struct SealChainTask {
+    log_id: LogId,
+    segment_index: Option<SegmentIndex>,
+    permanent_seal: bool,
+    context: std::collections::HashMap<String, String>,
+    bifrost: Bifrost,
+}
+
+impl SealChainTask {
+    async fn run(self) -> anyhow::Result<Lsn> {
+        let logs = Metadata::with_current(|m| m.logs_ref());
+        let actual_tail_segment = logs
+            .chain(&self.log_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown log id"))?
+            .tail()
+            .index();
+
+        let segment_index = self.segment_index.unwrap_or(actual_tail_segment);
+        let seal_metadata = SealMetadata::with_context(self.permanent_seal, self.context);
+
+        let tail_lsn = self
+            .bifrost
+            .admin()
+            .seal(self.log_id, segment_index, seal_metadata)
+            .await?;
+
+        Ok(tail_lsn)
+    }
+}
+
 struct SealAndExtendTask {
     log_id: LogId,
     min_version: Version,
@@ -681,7 +768,7 @@ struct SealAndExtendTask {
 }
 
 impl SealAndExtendTask {
-    async fn run(self) -> anyhow::Result<SealedSegment> {
+    async fn run(self) -> anyhow::Result<MaybeSealedSegment> {
         let last_segment_index = self
             .extension
             .as_ref()
@@ -713,7 +800,7 @@ impl SealAndExtendTask {
             .tail();
 
         let next_loglet_id = LogletId::new(self.log_id, segment.index().next());
-        let previous_params = if matches!(segment.config.kind, ProviderKind::Replicated) {
+        let previous_params = if segment.config.kind == ProviderKind::Replicated {
             let replicated_loglet_params =
                 ReplicatedLogletParams::deserialize_from(segment.config.params.as_bytes())
                     .context("Invalid replicated loglet params")?;
@@ -863,9 +950,17 @@ pub fn build_new_replicated_loglet_configuration(
     match selection {
         Ok(nodeset) => {
             // todo(asoli): here is the right place to do additional validation and reject the nodeset if it
-            // fails to meet some safety margin. For now, we'll accept the nodeset as it meets the
-            // minimum replication requirement only.
-            debug_assert!(nodeset.len() >= replication.num_copies() as usize);
+            //  fails to meet some safety margin. For now, we'll accept the nodeset if it fulfills the replication
+            //  property.
+            let mut node_set_checker = NodeSetChecker::new(&nodeset, nodes_config, &replication);
+            node_set_checker.fill_with(true);
+
+            // check that the new node set fulfills the replication property
+            if !node_set_checker.check_write_quorum(|attr| *attr) {
+                // we couldn't find a nodeset that fulfills the desired replication property
+                return None;
+            }
+
             if replication.num_copies() > 1 && nodeset.len() == replication.num_copies() as usize {
                 warn!(
                     ?log_id,

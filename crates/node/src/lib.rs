@@ -236,7 +236,6 @@ impl Node {
                     tc.health().log_server_status(),
                     updateable_config.clone(),
                     metadata.clone(),
-                    record_cache,
                     &mut router_builder,
                     &mut server_builder,
                 )
@@ -250,10 +249,7 @@ impl Node {
             Some(
                 WorkerRole::create(
                     tc.health().worker_status(),
-                    metadata.clone(),
-                    PartitionRouting::new(replica_set_states.clone(), tc.clone()),
                     replica_set_states.clone(),
-                    updateable_config.clone(),
                     &mut router_builder,
                     networking.clone(),
                     bifrost_svc.handle(),
@@ -357,15 +353,13 @@ impl Node {
         spawn_metadata_manager(self.metadata_manager)?;
 
         // spawn the node rpc server first to enable connecting to the metadata store
-        TaskCenter::spawn(TaskKind::RpcServer, "node-rpc-server", {
-            let common_options = config.common.clone();
+        TaskCenter::spawn(TaskKind::NodeRpcServer, "node-rpc-server", {
             let connection_manager = self.networking.connection_manager().clone();
             let metadata_writer = metadata_writer.clone();
             async move {
                 NetworkServer::run(
                     connection_manager,
                     self.server_builder,
-                    common_options,
                     metadata_writer,
                     self.prometheus,
                 )
@@ -507,15 +501,15 @@ impl Node {
         }
 
         if let Some(ingress_role) = self.ingress_role {
-            TaskCenter::spawn(TaskKind::IngressServer, "ingress-http", ingress_role.run())?;
+            ingress_role.start()?;
         }
 
         if let Some(worker_role) = self.worker_role {
-            TaskCenter::spawn(TaskKind::SystemBoot, "worker-init", worker_role.start())?;
+            worker_role.start()?;
         }
 
         if let Some(admin_role) = self.admin_role {
-            TaskCenter::spawn(TaskKind::SystemBoot, "admin-init", admin_role.start())?;
+            admin_role.start()?;
         }
 
         let my_roles = my_node_config.roles;

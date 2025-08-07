@@ -25,6 +25,7 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -52,6 +53,7 @@ use self::background::StorageTask;
 use self::background::StorageTaskKind;
 use self::metric_definitions::*;
 
+pub type RawRocksDb = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 type BoxedCfMatcher = Box<dyn CfNameMatch + Send + Sync>;
 type BoxedCfOptionUpdater = Box<dyn Fn(rocksdb::Options) -> rocksdb::Options + Send + Sync>;
 
@@ -85,42 +87,63 @@ pub enum IoMode {
     Default,
 }
 
-#[derive(derive_more::Display, derive_more::Debug, Clone)]
-#[display("{}", name)]
-#[debug("RocksDb({} at {}", name, path.display())]
+#[derive(derive_more::Display, derive_more::Debug)]
+#[display("{:?}", db)]
+#[debug("{:?}", db)]
 pub struct RocksDb {
     manager: &'static RocksDbManager,
-    pub name: DbName,
-    pub path: PathBuf,
-    pub db_options: rocksdb::Options,
-    cf_patterns: Arc<[(BoxedCfMatcher, BoxedCfOptionUpdater)]>,
-    flush_on_shutdown: Arc<[BoxedCfMatcher]>,
-    db: Arc<dyn RocksAccess + Send + Sync + 'static>,
+    db: ManuallyDrop<RocksAccess>,
+}
+
+impl Drop for RocksDb {
+    fn drop(&mut self) {
+        // Safety: self.db is exclusives "taken" at drop time, so we know that it's
+        // still valid. We don't provide &mut access to db, and it's not a public field.
+        let inner_db = unsafe { ManuallyDrop::take(&mut self.db) };
+
+        if let Ok(_handle) = tokio::runtime::Handle::try_current() {
+            self.manager.background_close_db(inner_db);
+        } else {
+            // inline shutdown if the last drop was outside of tokio (in tests mainly)
+            inner_db.shutdown();
+        }
+    }
 }
 
 static_assertions::assert_impl_all!(RocksDb: Send, Sync);
 
 impl RocksDb {
-    pub(crate) fn new<T>(manager: &'static RocksDbManager, spec: DbSpec, db: Arc<T>) -> Self
-    where
-        T: RocksAccess + Send + Sync + 'static,
-    {
-        Self {
+    pub fn name(&self) -> &DbName {
+        &self.db.spec().name
+    }
+
+    pub(crate) async fn open(
+        manager: &'static RocksDbManager,
+        spec: DbSpec,
+        default_cf_options: rocksdb::Options,
+    ) -> Result<Arc<Self>, RocksError> {
+        let task = StorageTask::default()
+            .kind(StorageTaskKind::OpenDb)
+            .op(move || {
+                let _x = RocksDbPerfGuard::new("open-db");
+                RocksAccess::open_db(spec, default_cf_options)
+            })
+            .build()
+            .unwrap();
+
+        let db = manager.async_spawn(task).await??;
+
+        Ok(Arc::new(Self {
             manager,
-            name: spec.name,
-            path: spec.path,
-            cf_patterns: spec.cf_patterns.into(),
-            db,
-            db_options: spec.db_options,
-            flush_on_shutdown: spec.flush_on_shutdown.into(),
-        }
+            db: ManuallyDrop::new(db),
+        }))
     }
 
     /// Returns the raw rocksdb handle, this should only be used for server operations that
     /// require direct access to rocksdb.
     ///
     /// todo: remove this once all access is migrated to this abstraction
-    pub fn inner(&self) -> &Arc<dyn RocksAccess + Send + Sync + 'static> {
+    pub fn inner(self: &Arc<Self>) -> &RocksAccess {
         &self.db
     }
 
@@ -128,9 +151,9 @@ impl RocksDb {
         self.db.cfs()
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
     pub async fn write_batch(
-        &self,
+        self: &Arc<Self>,
         name: &'static str,
         priority: Priority,
         io_mode: IoMode,
@@ -147,9 +170,9 @@ impl RocksDb {
         .await
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
     pub async fn write_batch_with_index(
-        &self,
+        self: &Arc<Self>,
         name: &'static str,
         priority: Priority,
         io_mode: IoMode,
@@ -167,7 +190,7 @@ impl RocksDb {
     }
 
     async fn write_batch_internal<OP>(
-        &self,
+        self: &Arc<Self>,
         name: &'static str,
         priority: Priority,
         io_mode: IoMode,
@@ -175,9 +198,7 @@ impl RocksDb {
         write_op: OP,
     ) -> Result<(), RocksError>
     where
-        OP: Fn(&dyn RocksAccess, &rocksdb::WriteOptions) -> Result<(), rocksdb::Error>
-            + Send
-            + 'static,
+        OP: Fn(&RocksAccess, &rocksdb::WriteOptions) -> Result<(), rocksdb::Error> + Send + 'static,
     {
         //  depending on the IoMode, we decide how to do the write.
         match io_mode {
@@ -187,7 +208,7 @@ impl RocksDb {
                     "Blocking IO is allowed for write_batch, stall detection will not be used in this operation!"
                 );
                 write_options.set_no_slowdown(false);
-                write_op(self.db.as_ref(), &write_options)?;
+                write_op(&self.db, &write_options)?;
                 counter!(STORAGE_IO_OP,
                     DISPOSITION => DISPOSITION_MAYBE_BLOCKING,
                     OP_TYPE => StorageTaskKind::WriteBatch.as_static_str(),
@@ -198,7 +219,7 @@ impl RocksDb {
             }
             IoMode::AlwaysBackground => {
                 // Operation will block, dispatch to background.
-                let db = self.db.clone();
+                let db = Arc::clone(self);
                 // In the background thread pool we can block on IO
                 write_options.set_no_slowdown(false);
                 let task = StorageTask::default()
@@ -206,7 +227,7 @@ impl RocksDb {
                     .kind(StorageTaskKind::WriteBatch)
                     .op(move || {
                         let _x = RocksDbPerfGuard::new(name);
-                        write_op(db.as_ref(), &write_options)
+                        write_op(&db.db, &write_options)
                     })
                     .build()
                     .unwrap();
@@ -223,7 +244,7 @@ impl RocksDb {
             IoMode::OnlyIfNonBlocking => {
                 let _x = RocksDbPerfGuard::new(name);
                 write_options.set_no_slowdown(true);
-                write_op(self.db.as_ref(), &write_options)?;
+                write_op(&self.db, &write_options)?;
                 counter!(STORAGE_IO_OP,
                     DISPOSITION => DISPOSITION_NON_BLOCKING,
                     OP_TYPE => StorageTaskKind::WriteBatch.as_static_str(),
@@ -240,7 +261,7 @@ impl RocksDb {
         write_options.set_no_slowdown(true);
 
         let perf_guard = RocksDbPerfGuard::new(name);
-        let result = write_op(self.db.as_ref(), &write_options);
+        let result = write_op(&self.db, &write_options);
         match result {
             Ok(_) => {
                 counter!(STORAGE_IO_OP,
@@ -263,7 +284,7 @@ impl RocksDb {
                 // StorageOpKind to differentiate the two.
                 perf_guard.forget();
                 // Operation will block, dispatch to background.
-                let db = self.db.clone();
+                let db = Arc::clone(self);
                 // In the background thread pool we can block on IO
                 write_options.set_no_slowdown(false);
                 let task = StorageTask::default()
@@ -271,7 +292,7 @@ impl RocksDb {
                     .kind(StorageTaskKind::WriteBatch)
                     .op(move || {
                         let _x = RocksDbPerfGuard::new(name);
-                        write_op(db.as_ref(), &write_options)
+                        write_op(&db.db, &write_options)
                     })
                     .build()
                     .unwrap();
@@ -290,9 +311,9 @@ impl RocksDb {
         }
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
     pub fn run_background_iterator(
-        &self,
+        self: Arc<Self>,
         cf: CfName,
         name: &'static str,
         priority: Priority,
@@ -303,7 +324,7 @@ impl RocksDb {
         // ensure that we allow blocking IO.
         read_options.set_read_tier(rocksdb::ReadTier::All);
 
-        let db = self.db.clone();
+        let manager = self.manager;
         let task = StorageTask::default()
             .kind(StorageTaskKind::BackgroundIterator)
             .priority(priority)
@@ -311,12 +332,12 @@ impl RocksDb {
                 // note: the perf guard's lifetime encapsulates all operations in the iterator and
                 // the total duration includes all the time spent blocking on the tx's capacity.
                 let _x = RocksDbPerfGuard::new(name);
-                let Some(cf) = db.cf_handle(cf.as_str()) else {
+                let Some(cf) = self.db.cf_handle(cf.as_str()) else {
                     on_item(Err(RocksError::UnknownColumnFamily(cf)));
                     return;
                 };
                 let mut iter = RocksIterator::new(
-                    db.as_raw_db().raw_iterator_cf_opt(&cf, read_options),
+                    self.db.as_raw_db().raw_iterator_cf_opt(&cf, read_options),
                     initial_action,
                     on_item,
                 );
@@ -343,149 +364,156 @@ impl RocksDb {
             .build()
             .unwrap();
 
-        self.manager.spawn(task)
+        manager.spawn(task)
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
-    pub async fn flush_wal(&self, sync: bool) -> Result<(), RocksError> {
-        let db = self.db.clone();
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
+    pub async fn flush_wal(self: Arc<Self>, sync: bool) -> Result<(), RocksError> {
+        let manager = self.manager;
         let task = StorageTask::default()
             .kind(StorageTaskKind::FlushWal)
             .op(move || {
                 let _x = RocksDbPerfGuard::new("flush-wal");
-                db.flush_wal(sync)
+                self.db.flush_wal(sync)
             })
             .build()
             .unwrap();
 
-        self.manager.async_spawn(task).await?
+        manager.async_spawn(task).await?
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
-    pub fn run_bg_wal_sync(&self) {
-        let db = self.db.clone();
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
+    pub fn run_bg_wal_sync(self: Arc<Self>) {
+        let manager = self.manager;
         let task = StorageTask::default()
             .kind(StorageTaskKind::FlushWal)
             .op(move || {
                 let _x = RocksDbPerfGuard::new("bg-wal-sync");
-                if let Err(e) = db.flush_wal(true) {
+                if let Err(e) = self.db.flush_wal(true) {
                     error!("Failed to flush rocksdb WAL: {}", e);
                 }
             })
             .build()
             .unwrap();
         // always spawn wal flushes.
-        self.manager.spawn_unchecked(task);
+        manager.spawn_unchecked(task);
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
-    pub async fn flush_memtables(&self, cfs: &[CfName], wait: bool) -> Result<(), RocksError> {
-        let db = Arc::clone(&self.db);
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
+    pub async fn flush_memtables(
+        self: Arc<Self>,
+        cfs: &[CfName],
+        wait: bool,
+    ) -> Result<(), RocksError> {
+        let manager = self.manager;
         let mut owned_cfs = Vec::with_capacity(cfs.len());
         owned_cfs.extend_from_slice(cfs);
         let task = StorageTask::default()
             .kind(StorageTaskKind::FlushMemtables)
-            .op(move || db.flush_memtables(&owned_cfs, wait))
+            .op(move || self.db.flush_memtables(&owned_cfs, wait))
             .build()
             .unwrap();
-        self.manager.async_spawn(task).await?
+        manager.async_spawn(task).await?
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
-    pub async fn flush_all(&self) -> Result<(), RocksError> {
-        let db = self.db.clone();
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
+    pub async fn flush_all(self: Arc<Self>) -> Result<(), RocksError> {
+        let manager = self.manager;
         let task = StorageTask::default()
             .kind(StorageTaskKind::FlushMemtables)
             .op(move || {
                 let _x = RocksDbPerfGuard::new("manual-flush");
-                db.flush_all()
+                self.db.flush_all()
             })
             .build()
             .unwrap();
 
-        self.manager.async_spawn_unchecked(task).await?
+        manager.async_spawn_unchecked(task).await?
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
-    pub async fn compact_all(&self) {
-        let db = self.db.clone();
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
+    pub async fn compact_all(self: Arc<Self>) {
+        let manager = self.manager;
         let task = StorageTask::default()
             .kind(StorageTaskKind::Compaction)
             .op(move || {
                 let _x = RocksDbPerfGuard::new("manual-compaction");
-                db.compact_all();
+                self.db.compact_all();
             })
             .build()
             .unwrap();
 
-        let _ = self.manager.async_spawn_unchecked(task).await;
+        let _ = manager.async_spawn_unchecked(task).await;
     }
 
     pub fn get_histogram_data(&self, histogram: Histogram) -> HistogramData {
-        self.db_options.get_histogram_data(histogram)
+        self.db.db_options().get_histogram_data(histogram)
     }
 
     pub fn get_ticker_count(&self, ticker: Ticker) -> u64 {
-        self.db_options.get_ticker_count(ticker)
+        self.db.db_options().get_ticker_count(ticker)
     }
 
     pub fn get_statistics_str(&self) -> Option<String> {
-        self.db_options.get_statistics()
+        self.db.db_options().get_statistics()
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
-    pub async fn open_cf(&self, name: CfName, opts: &RocksDbOptions) -> Result<(), RocksError> {
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
+    pub async fn open_cf(
+        self: Arc<Self>,
+        name: CfName,
+        opts: &RocksDbOptions,
+    ) -> Result<(), RocksError> {
+        let manager = self.manager;
         let default_cf_options = self.manager.default_cf_options(opts);
-        let db = self.db.clone();
-        let cf_patterns = self.cf_patterns.clone();
         let task = StorageTask::default()
             .kind(StorageTaskKind::OpenColumnFamily)
-            .op(move || db.open_cf(name, default_cf_options, cf_patterns))
+            .op(move || self.db.open_cf(name, default_cf_options))
             .build()
             .unwrap();
 
-        self.manager.async_spawn(task).await?
+        manager.async_spawn(task).await?
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
     pub async fn import_cf(
-        &self,
+        self: Arc<Self>,
         name: CfName,
         opts: &RocksDbOptions,
         metadata: ExportImportFilesMetaData,
     ) -> Result<(), RocksError> {
+        let manager = self.manager;
         let default_cf_options = self.manager.default_cf_options(opts);
-        let cf_patterns = self.cf_patterns.clone();
-        let db = self.db.clone();
         let task = StorageTask::default()
             .kind(StorageTaskKind::ImportColumnFamily)
             .priority(Priority::Low)
             .op(move || {
                 let _x = RocksDbPerfGuard::new("import-column-family");
-                db.import_cf(name, default_cf_options, cf_patterns, metadata)
+                self.db.import_cf(name, default_cf_options, metadata)
             })
             .build()
             .unwrap();
 
-        self.manager.async_spawn(task).await?
+        manager.async_spawn(task).await?
     }
 
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
+    #[tracing::instrument(skip_all, fields(db = %self.name()))]
     pub async fn export_cf(
-        &self,
+        self: Arc<Self>,
         name: CfName,
         export_dir: PathBuf,
     ) -> Result<ExportImportFilesMetaData, RocksError> {
-        let db = self.db.clone();
+        let manager = self.manager;
         let task = StorageTask::default()
             .kind(StorageTaskKind::ExportColumnFamily)
             .priority(Priority::Low)
             .op(move || {
                 let _x = RocksDbPerfGuard::new("export-column-family");
 
-                let checkpoint = Checkpoint::new(db.as_raw_db()).unwrap();
+                let checkpoint = Checkpoint::new(self.db.as_raw_db()).unwrap();
 
-                let data_cf_handle = db
+                let data_cf_handle = self
+                    .db
                     .cf_handle(name.as_str())
                     .ok_or_else(|| RocksError::UnknownColumnFamily(name.clone()))?;
 
@@ -507,70 +535,14 @@ impl RocksDb {
             .build()
             .unwrap();
 
-        self.manager.async_spawn(task).await?
+        manager.async_spawn(task).await?
     }
 
-    pub async fn close(&self) {
-        self.manager.close_db(&self.name).await
-    }
-
-    #[tracing::instrument(skip_all, fields(db = %self.name))]
-    async fn shutdown(self: Arc<Self>) {
-        let manager = self.manager;
-        let op = move || {
-            let _x = RocksDbPerfGuard::new("shutdown");
-            if let Err(e) = self.db.flush_wal(true) {
-                warn!(
-                    db = %self.name,
-                    "Failed to flush rocksdb WAL: {}",
-                    e
-                );
-            }
-
-            let cfs_to_flush = self
-                .cfs()
-                .into_iter()
-                .filter(|c| {
-                    self.flush_on_shutdown
-                        .iter()
-                        .any(|matcher| matcher.cf_matches(c))
-                })
-                .collect::<Vec<_>>();
-            if cfs_to_flush.is_empty() {
-                debug!(
-                    db = %self.name,
-                    "No column families to flush for db on shutdown"
-                );
-                return;
-            }
-            let start = Instant::now();
-
-            debug!(
-            db = %self.name,
-            "Number of column families to flush on shutdown: {}", cfs_to_flush.len());
-            if let Err(e) = self.db.flush_memtables(cfs_to_flush.as_slice(), true) {
-                warn!(
-                    db = %self.name,
-                    "Failed to flush memtables: {}",
-                    e
-                );
-            } else {
-                info!(
-                    db = %self.name,
-                    "{} column families flushed in {:?}",
-                    cfs_to_flush.len(),
-                    start.elapsed(),
-                );
-            }
-            self.db.cancel_all_background_work(true);
-        };
-        // intentionally ignore scheduling error
-        let task = StorageTask::default()
-            .kind(StorageTaskKind::Shutdown)
-            .op(op)
-            .build()
-            .unwrap();
-        let _ = manager.async_spawn_unchecked(task).await;
+    /// Performs a clean shutdown of the database and waits for completion.
+    ///
+    /// This fails if there other live references to the database.
+    pub async fn close(self: Arc<Self>) -> Result<(), Arc<Self>> {
+        self.manager.close_db(self).await
     }
 }
 

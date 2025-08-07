@@ -8,8 +8,14 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+mod cleaner;
+pub mod invoker_storage_reader;
+mod leadership;
+pub mod shuffle;
+mod state_machine;
+pub mod types;
+
 use std::fmt::Debug;
-use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +23,7 @@ use anyhow::Context;
 use assert2::let_assert;
 use enumset::EnumSet;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt as _};
-use metrics::{SharedString, counter, gauge, histogram};
+use metrics::{SharedString, gauge, histogram};
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 use tracing::{Span, debug, error, info, instrument, trace, warn};
@@ -25,13 +31,13 @@ use tracing::{Span, debug, error, info, instrument, trace, warn};
 use restate_bifrost::Bifrost;
 use restate_bifrost::loglet::FindTailOptions;
 use restate_core::network::{Oneshot, Reciprocal, ServiceMessage, Verdict};
-use restate_core::{Metadata, ShutdownError, cancellation_watcher};
+use restate_core::{ShutdownError, cancellation_watcher, my_node_id};
 use restate_partition_store::{PartitionStore, PartitionStoreTransaction};
 use restate_storage_api::deduplication_table::{
     DedupInformation, DedupSequenceNumber, DeduplicationTable, ProducerId,
     ReadOnlyDeduplicationTable,
 };
-use restate_storage_api::fsm_table::{FsmTable, ReadOnlyFsmTable};
+use restate_storage_api::fsm_table::{FsmTable, PartitionDurability, ReadOnlyFsmTable};
 use restate_storage_api::idempotency_table::ReadOnlyIdempotencyTable;
 use restate_storage_api::invocation_status_table::{
     InvocationStatus, ReadOnlyInvocationStatusTable,
@@ -42,10 +48,8 @@ use restate_storage_api::service_status_table::{
 };
 use restate_storage_api::{StorageError, Transaction};
 use restate_types::cluster::cluster_state::{PartitionProcessorStatus, ReplayStatus, RunMode};
-use restate_types::config::WorkerOptions;
-use restate_types::identifiers::{
-    LeaderEpoch, PartitionId, PartitionKey, PartitionProcessorRpcRequestId, WithPartitionKey,
-};
+use restate_types::config::Configuration;
+use restate_types::identifiers::{LeaderEpoch, PartitionProcessorRpcRequestId, WithPartitionKey};
 use restate_types::invocation::client::{InvocationOutput, InvocationOutputResponse};
 use restate_types::invocation::{
     AttachInvocationRequest, IngressInvocationResponseSink, InvocationMutationResponseSink,
@@ -69,21 +73,13 @@ use restate_types::{GenerationalNodeId, SemanticRestateVersion, invocation};
 use restate_wal_protocol::control::AnnounceLeader;
 use restate_wal_protocol::{Command, Destination, Envelope, Header, Source};
 
+use self::leadership::trim_queue::TrimQueue;
 use crate::metric_definitions::{
     PARTITION_BLOCKED_FLARE, PARTITION_LABEL, PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS,
-    PARTITION_RECORD_READ_COUNT,
 };
 use crate::partition::invoker_storage_reader::InvokerStorageReader;
-use crate::partition::leadership::{LeadershipState, PartitionProcessorMetadata};
+use crate::partition::leadership::LeadershipState;
 use crate::partition::state_machine::{ActionCollector, StateMachine};
-
-mod cleaner;
-pub mod invoker_storage_reader;
-mod leadership;
-pub mod shuffle;
-pub mod snapshots;
-mod state_machine;
-pub mod types;
 
 /// Target leader state of the partition processor.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -95,14 +91,6 @@ pub enum TargetLeaderState {
 
 #[derive(Debug)]
 pub(super) struct PartitionProcessorBuilder<InvokerInputSender> {
-    pub partition_id: PartitionId,
-    pub partition_key_range: RangeInclusive<PartitionKey>,
-
-    num_timers_in_memory_limit: Option<usize>,
-    cleanup_interval: Duration,
-    channel_size: usize,
-    max_command_batch_size: usize,
-
     status: PartitionProcessorStatus,
     invoker_tx: InvokerInputSender,
     target_leader_state_rx: watch::Receiver<TargetLeaderState>,
@@ -115,25 +103,15 @@ where
     InvokerInputSender:
         restate_invoker_api::InvokerHandle<InvokerStorageReader<PartitionStore>> + Clone,
 {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        partition_id: PartitionId,
-        partition_key_range: RangeInclusive<PartitionKey>,
         status: PartitionProcessorStatus,
-        options: &WorkerOptions,
         target_leader_state_rx: watch::Receiver<TargetLeaderState>,
         network_svc_rx: mpsc::Receiver<ServiceMessage<PartitionLeaderService>>,
         status_watch_tx: watch::Sender<PartitionProcessorStatus>,
         invoker_tx: InvokerInputSender,
     ) -> Self {
         Self {
-            partition_id,
-            partition_key_range,
             status,
-            num_timers_in_memory_limit: options.num_timers_in_memory_limit(),
-            cleanup_interval: options.cleanup_interval(),
-            channel_size: options.internal_queue_length(),
-            max_command_batch_size: options.max_command_batch_size(),
             invoker_tx,
             target_leader_state_rx,
             network_svc_rx,
@@ -148,12 +126,6 @@ where
         replica_set_states: PartitionReplicaSetStates,
     ) -> Result<PartitionProcessor<InvokerInputSender>, state_machine::Error> {
         let PartitionProcessorBuilder {
-            partition_id,
-            partition_key_range,
-            num_timers_in_memory_limit,
-            cleanup_interval,
-            channel_size,
-            max_command_batch_size,
             invoker_tx,
             target_leader_state_rx,
             network_svc_rx: rpc_rx,
@@ -162,8 +134,13 @@ where
             ..
         } = self;
 
-        let state_machine =
-            Self::create_state_machine(&mut partition_store, partition_key_range.clone()).await?;
+        let partition_id_str = SharedString::from(partition_store.partition_id().to_string());
+        let state_machine = Self::create_state_machine(&mut partition_store).await?;
+
+        let trim_queue = TrimQueue::default();
+        if let Some(ref partition_durability) = partition_store.get_partition_durability().await? {
+            trim_queue.push(partition_durability);
+        }
 
         let last_seen_leader_epoch = partition_store
             .get_dedup_sequence_number(&ProducerId::self_producer())
@@ -178,7 +155,7 @@ where
 
         if let Some(last_leader_epoch) = last_seen_leader_epoch {
             replica_set_states.note_observed_leader(
-                partition_id,
+                partition_store.partition_id(),
                 restate_types::partitions::state::LeadershipState {
                     current_leader_epoch: last_leader_epoch,
                     // we don't know the old leader node-id, another node might update it
@@ -188,21 +165,17 @@ where
         }
 
         let leadership_state = LeadershipState::new(
-            PartitionProcessorMetadata::new(partition_id, partition_key_range.clone()),
-            num_timers_in_memory_limit,
-            cleanup_interval,
-            channel_size,
+            Arc::clone(partition_store.partition()),
             invoker_tx,
             bifrost.clone(),
             last_seen_leader_epoch,
+            trim_queue.clone(),
         );
 
         Ok(PartitionProcessor {
-            partition_id,
-            partition_key_range,
+            partition_id_str,
             leadership_state,
             state_machine,
-            max_command_batch_size,
             partition_store,
             bifrost,
             target_leader_state_rx,
@@ -210,12 +183,12 @@ where
             status_watch_tx,
             status,
             replica_set_states,
+            trim_queue,
         })
     }
 
     async fn create_state_machine(
         partition_store: &mut PartitionStore,
-        partition_key_range: RangeInclusive<PartitionKey>,
     ) -> Result<StateMachine, state_machine::Error> {
         let inbox_seq_number = partition_store.get_inbox_seq_number().await?;
         let outbox_seq_number = partition_store.get_outbox_seq_number().await?;
@@ -236,7 +209,7 @@ where
             inbox_seq_number,
             outbox_seq_number,
             outbox_head_seq_number,
-            partition_key_range,
+            partition_store.partition_key_range().clone(),
             min_restate_version,
             EnumSet::empty(),
         );
@@ -246,8 +219,7 @@ where
 }
 
 pub struct PartitionProcessor<InvokerSender> {
-    partition_id: PartitionId,
-    partition_key_range: RangeInclusive<PartitionKey>,
+    partition_id_str: SharedString,
     leadership_state: LeadershipState<InvokerSender>,
     state_machine: StateMachine,
     bifrost: Bifrost,
@@ -257,8 +229,8 @@ pub struct PartitionProcessor<InvokerSender> {
     status: PartitionProcessorStatus,
     replica_set_states: PartitionReplicaSetStates,
 
-    max_command_batch_size: usize,
     partition_store: PartitionStore,
+    trim_queue: TrimQueue,
 }
 
 #[derive(Debug, derive_more::Display, thiserror::Error)]
@@ -276,6 +248,7 @@ pub enum ProcessorError {
     Storage(#[from] StorageError),
     Decode(#[from] StorageDecodeError),
     Bifrost(#[from] restate_bifrost::Error),
+    StoreOpen(#[from] restate_partition_store::OpenError),
     StateMachine(#[from] state_machine::Error),
     ActionEffect(#[from] leadership::Error),
     ShutdownError(#[from] ShutdownError),
@@ -295,7 +268,7 @@ where
 {
     #[instrument(
         level = "error", skip_all,
-        fields(partition_id = %self.partition_id)
+        fields(partition_id = %self.partition_store.partition_id())
     )]
     pub async fn run(mut self) -> Result<(), ProcessorError> {
         debug!("Starting the partition processor.");
@@ -312,7 +285,7 @@ where
                             "Shutting partition processor down because it encountered a trim gap in the log."
                         ),
                     Err(ProcessorError::StateMachine(state_machine::Error::VersionBarrier { .. })) => {
-                        gauge!(PARTITION_BLOCKED_FLARE, PARTITION_LABEL => self.partition_id.to_string()).set(1);
+                        gauge!(PARTITION_BLOCKED_FLARE, PARTITION_LABEL => self.partition_id_str.clone()).set(1);
                     }
                     Err(err) => warn!("Shutting partition processor down because of error: {err}"),
                 }
@@ -339,22 +312,23 @@ where
 
     async fn run_inner(&mut self) -> Result<(), ProcessorError> {
         let mut partition_store = self.partition_store.clone();
-        let last_applied_lsn = partition_store.get_applied_lsn().await?;
-        let last_applied_lsn = last_applied_lsn.unwrap_or(Lsn::INVALID);
+        let last_applied_lsn = partition_store
+            .get_applied_lsn()
+            .await?
+            .unwrap_or(Lsn::INVALID);
+
+        let log_id = self.partition_store.partition().log_id();
+        let partition_id = self.partition_store.partition_id();
+        let my_node = my_node_id().as_plain();
 
         self.status.last_applied_log_lsn = Some(last_applied_lsn);
-        let log_id = Metadata::with_current(|m| {
-            m.partition_table_ref()
-                .get(&self.partition_id)
-                .map(|p| p.log_id())
-        });
-
-        let Some(log_id) = log_id else {
-            return Err(ProcessorError::Other(anyhow::anyhow!(
-                "Partition {} was not found in partition table!",
-                self.partition_id
-            )));
-        };
+        let mut durable_lsn_watch = self.partition_store.get_durable_lsn().await?;
+        let durable_lsn = durable_lsn_watch
+            .borrow_and_update()
+            .unwrap_or(Lsn::INVALID);
+        self.status.last_persisted_log_lsn = Some(durable_lsn);
+        self.replica_set_states
+            .note_durable_lsn(partition_id, my_node, durable_lsn);
 
         // If the underlying log is not provisioned, now is the time to provision it.
         // We'll retry a few times before giving back control to PPM
@@ -373,7 +347,7 @@ where
             if let Some(dur) = retries.next() {
                 debug!(
                     "Cannot create a bifrost log for partition {}, will retry in {:?}; reason={}",
-                    self.partition_id, dur, e
+                    partition_id, dur, e
                 );
                 tokio::time::sleep(dur).await;
             } else {
@@ -425,14 +399,15 @@ where
             );
         }
 
+        let mut live_config = Configuration::live();
+
         // Telemetry setup
-        let partition_id_str = SharedString::from(self.partition_id.to_string());
-        let leader_record_write_to_read_latency = histogram!(PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, PARTITION_LABEL => partition_id_str.clone(), "leader" => "1");
-        let follower_record_write_to_read_latency = histogram!(PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, PARTITION_LABEL => partition_id_str.clone(), "leader" => "0");
-        let command_read_count =
-            counter!(PARTITION_RECORD_READ_COUNT, PARTITION_LABEL => partition_id_str.clone());
+        let leader_record_write_to_read_latency =
+            histogram!(PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, "leader" => "1");
+        let follower_record_write_to_read_latency =
+            histogram!(PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS, "leader" => "0");
         // Start reading after the last applied lsn
-        let key_query = KeyFilter::Within(self.partition_key_range.clone());
+        let key_query = KeyFilter::Within(self.partition_store.partition_key_range().clone());
 
         let mut record_stream = self
             .bifrost
@@ -476,16 +451,16 @@ where
         status_update_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         let mut action_collector = ActionCollector::default();
-        let mut command_buffer = Vec::with_capacity(self.max_command_batch_size);
+        let mut command_buffer =
+            Vec::with_capacity(live_config.live_load().worker.max_command_batch_size());
 
-        let mut watch_leader_changes = self
-            .replica_set_states
-            .watch_leadership_state(self.partition_id);
+        let mut watch_leader_changes = self.replica_set_states.watch_leadership_state(partition_id);
         watch_leader_changes.mark_changed();
 
-        info!("Partition {} started", self.partition_id);
+        info!("Partition {} started", partition_id);
 
         loop {
+            let config = live_config.live_load();
             tokio::select! {
                 _ = self.target_leader_state_rx.changed() => {
                     let target_leader_state = *self.target_leader_state_rx.borrow_and_update();
@@ -515,16 +490,25 @@ where
                     }
                 }
                 _ = status_update_timer.tick() => {
+                    if durable_lsn_watch.has_changed().map_err(|e| ProcessorError::Other(e.into()))? {
+                        let durable_lsn = durable_lsn_watch
+                                .borrow_and_update()
+                                .unwrap_or(Lsn::INVALID);
+                        self.status.last_persisted_log_lsn = Some(durable_lsn);
+                        self.replica_set_states.note_durable_lsn(
+                            partition_id,
+                            my_node,
+                            durable_lsn,
+                        );
+                    }
                     self.status_watch_tx.send_modify(|old| {
                         old.clone_from(&self.status);
                         old.updated_at = MillisSinceEpoch::now();
                     });
                 }
-                operation = Self::read_commands(&mut record_stream, self.max_command_batch_size, &mut command_buffer) => {
+                operation = Self::read_commands(&mut record_stream, config.worker.max_command_batch_size(), &mut command_buffer) => {
                     // check that reading has succeeded
                     operation?;
-
-                    command_read_count.increment(u64::try_from(command_buffer.len()).expect("usize fit in u64"));
 
                     let mut transaction = partition_store.transaction();
 
@@ -542,7 +526,8 @@ where
                         let leadership_change = self.apply_record(
                             record,
                             &mut transaction,
-                            &mut action_collector).await?;
+                            &mut action_collector,
+                        ).await?;
 
                         if let Some((header, announce_leader)) = leadership_change {
                             // commit all changes so far, this is important so that the actuators see all changes
@@ -565,14 +550,14 @@ where
                                 self.status.last_observed_leader_node = announce_leader.node_id;
                             }
                             self.replica_set_states.note_observed_leader(
-                                self.partition_id,
+                                partition_id,
                                 restate_types::partitions::state::LeadershipState {
                                     current_leader_epoch: announce_leader.leader_epoch,
                                     current_leader:
                                     self.status.last_observed_leader_node.unwrap_or(GenerationalNodeId::INVALID),
                                 });
 
-                            let is_leader = self.leadership_state.on_announce_leader(&announce_leader, &mut partition_store).await?;
+                            let is_leader = self.leadership_state.on_announce_leader(&announce_leader, &mut partition_store, &self.replica_set_states, config).await?;
 
                             Span::current().record("is_leader", is_leader);
 
@@ -950,19 +935,25 @@ where
             } else if let Command::UpdatePartitionDurability(partition_durability) =
                 envelope.command
             {
-                if partition_durability.partition_id != self.partition_id {
+                if partition_durability.partition_id != self.partition_store.partition_id() {
                     self.status.num_skipped_records += 1;
                     trace!(
                         "Ignore update-partition-durability message which is not targeted to me. Message is for {} but I'm {}",
-                        partition_durability.partition_id, self.partition_id
+                        partition_durability.partition_id,
+                        self.partition_store.partition_id()
                     );
                     return Ok(None);
                 }
-                // todos:
-                // - call put_partition_durability after validating that durability point is
-                // monotonically increasing. `transaction.put_partition_durability(durability)`
-                // - inform the leadership state machine about the new durability point, the leader
-                // state will schedule the trim if/when necessary.
+
+                let partition_durability = PartitionDurability {
+                    modification_time: partition_durability.modification_time,
+                    durable_point: partition_durability.durable_point,
+                };
+                if self.trim_queue.push(&partition_durability) {
+                    transaction
+                        .put_partition_durability(&partition_durability)
+                        .await?;
+                }
             } else {
                 self.state_machine
                     .apply(
@@ -990,7 +981,13 @@ where
             Destination::Processor {
                 partition_key,
                 dedup,
-            } if self.partition_key_range.contains(partition_key) => Some(dedup),
+            } if self
+                .partition_store
+                .partition_key_range()
+                .contains(partition_key) =>
+            {
+                Some(dedup)
+            }
             _ => None,
         }
     }
