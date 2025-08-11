@@ -41,10 +41,12 @@ use restate_types::schema::deployment::DeploymentResolver;
 use status_store::InvocationStatusStore;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::time::SystemTime;
+use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime};
 use std::{cmp, panic};
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinSet};
@@ -71,6 +73,8 @@ use restate_types::journal_v2::{
 use restate_types::schema::invocation_target::InvocationTargetResolver;
 use restate_types::schema::service::ServiceMetadataResolver;
 use restate_types::service_protocol::ServiceProtocolVersion;
+
+pub type TokenBucket = gardal::TokenBucket<gardal::AtomicSharedStorage, gardal::TokioClock>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Notification {
@@ -183,6 +187,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
         deployment_metadata_resolver: Live<Schemas>,
         client: ServiceClient,
         entry_enricher: EE,
+        token_bucket: TokenBucket,
     ) -> Service<IR, EE, Schemas>
     where
         IR: InvocationReader + Clone + Send + Sync + 'static,
@@ -212,6 +217,8 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
                 quota: quota::InvokerConcurrencyQuota::new(options.concurrent_invocations_limit()),
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
+                token_bucket,
+                token_state: TokenState::None,
             },
         }
     }
@@ -221,6 +228,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
         invoker_options: &InvokerOptions,
         entry_enricher: EE,
         schemas: Live<Schemas>,
+        token_bucket: TokenBucket,
     ) -> Result<Service<IR, EE, Schemas>, BuildError>
     where
         IR: InvocationReader + Clone + Send + Sync + 'static,
@@ -236,6 +244,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
             schemas,
             client,
             entry_enricher,
+            token_bucket,
         ))
     }
 }
@@ -302,7 +311,35 @@ where
     }
 }
 
-#[derive(Debug)]
+enum TokenState {
+    None,
+    Waiting { sleep: Pin<Box<tokio::time::Sleep>> },
+    Ready,
+}
+
+impl TokenState {
+    fn is_ready(&self) -> bool {
+        matches!(self, TokenState::Ready)
+    }
+
+    fn wait_for(&mut self, duration: Duration) {
+        debug_assert!(!matches!(self, TokenState::Waiting { .. }));
+        *self = TokenState::Waiting {
+            sleep: Box::pin(tokio::time::sleep(duration)),
+        };
+    }
+}
+
+impl Future for TokenState {
+    type Output = Option<()>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.get_mut() {
+            TokenState::Waiting { sleep } => sleep.as_mut().poll(cx).map(|_| Some(())),
+            _ => Poll::Ready(None),
+        }
+    }
+}
+
 struct ServiceInner<InvocationTaskRunner, SR> {
     input_rx: mpsc::UnboundedReceiver<InputCommand<SR>>,
     status_rx: mpsc::UnboundedReceiver<
@@ -325,6 +362,8 @@ struct ServiceInner<InvocationTaskRunner, SR> {
     quota: quota::InvokerConcurrencyQuota,
     status_store: InvocationStatusStore,
     invocation_state_machine_manager: state_machine_manager::InvocationStateMachineManager<SR>,
+    token_bucket: TokenBucket,
+    token_state: TokenState,
 }
 
 impl<ITR, IR> ServiceInner<ITR, IR>
@@ -342,6 +381,19 @@ where
     where
         F: Future<Output = ()>,
     {
+        if let TokenState::None = self.token_state {
+            match self
+                .token_bucket
+                .consume_with_borrow(NonZeroU32::new(1).unwrap())
+                .expect("1 is less than burst capacity")
+            {
+                None => self.token_state = TokenState::Ready,
+                Some(duration) => {
+                    self.token_state.wait_for(duration.into());
+                }
+            }
+        }
+
         tokio::select! {
             Some(cmd) = self.status_rx.recv() => {
                 let keys = cmd.payload();
@@ -384,8 +436,11 @@ where
                     }
                 }
             },
-
-            Some(invoke_input_command) = segmented_input_queue.dequeue(), if !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
+            Some(_) = &mut self.token_state => {
+                self.token_state = TokenState::Ready;
+            },
+            Some(invoke_input_command) = segmented_input_queue.dequeue(), if self.token_state.is_ready() && !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
+                self.token_state = TokenState::None;
                 self.handle_invoke(options, invoke_input_command.partition, invoke_input_command.invocation_id, invoke_input_command.invocation_epoch, invoke_input_command.invocation_target, invoke_input_command.journal);
             },
 
@@ -1420,6 +1475,16 @@ mod tests {
     use crate::error::{InvokerError, SdkInvocationErrorV2};
     use crate::quota::InvokerConcurrencyQuota;
 
+    pub fn new_token_bucket() -> TokenBucket {
+        gardal::TokenBucket::from_parts(
+            gardal::RateLimit::per_second_and_burst(
+                NonZeroU32::new(1).unwrap(),
+                NonZeroU32::new(100).unwrap(),
+            ),
+            gardal::TokioClock::default(),
+        )
+    }
+
     // -- Mocks
 
     const MOCK_PARTITION: PartitionLeaderEpoch = (PartitionId::MIN, LeaderEpoch::INITIAL);
@@ -1457,6 +1522,8 @@ mod tests {
                 quota: InvokerConcurrencyQuota::new(concurrency_limit),
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
+                token_bucket: new_token_bucket(),
+                token_state: TokenState::None,
             };
             (input_tx, status_tx, service_inner)
         }
@@ -1649,6 +1716,7 @@ mod tests {
             )
             .unwrap(),
             entry_enricher::test_util::MockEntryEnricher,
+            new_token_bucket(),
         );
 
         let mut handle = service.handle();
