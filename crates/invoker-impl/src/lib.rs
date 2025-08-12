@@ -16,6 +16,7 @@ mod metric_definitions;
 mod quota;
 mod state_machine_manager;
 mod status_store;
+mod throttling;
 
 use input_command::{InputCommand, InvokeCommand};
 use invocation_state_machine::InvocationStateMachine;
@@ -56,6 +57,7 @@ use crate::metric_definitions::{
     INVOKER_ENQUEUE, INVOKER_INVOCATION_TASKS, TASK_OP_COMPLETED, TASK_OP_FAILED, TASK_OP_STARTED,
     TASK_OP_SUSPENDED,
 };
+use crate::throttling::TokenState;
 use error::InvokerError;
 pub use input_command::ChannelStatusReader;
 pub use input_command::InvokerHandle;
@@ -71,6 +73,8 @@ use restate_types::journal_v2::{
 use restate_types::schema::invocation_target::InvocationTargetResolver;
 use restate_types::schema::service::ServiceMetadataResolver;
 use restate_types::service_protocol::ServiceProtocolVersion;
+
+pub type TokenBucket = gardal::TokenBucket<gardal::AtomicSharedStorage, gardal::TokioClock>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Notification {
@@ -183,6 +187,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
         deployment_metadata_resolver: Live<Schemas>,
         client: ServiceClient,
         entry_enricher: EE,
+        token_bucket: TokenBucket,
     ) -> Service<IR, EE, Schemas>
     where
         IR: InvocationReader + Clone + Send + Sync + 'static,
@@ -212,6 +217,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
                 quota: quota::InvokerConcurrencyQuota::new(options.concurrent_invocations_limit()),
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
+                token_state: TokenState::new(token_bucket),
             },
         }
     }
@@ -221,6 +227,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
         invoker_options: &InvokerOptions,
         entry_enricher: EE,
         schemas: Live<Schemas>,
+        token_bucket: TokenBucket,
     ) -> Result<Service<IR, EE, Schemas>, BuildError>
     where
         IR: InvocationReader + Clone + Send + Sync + 'static,
@@ -236,6 +243,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
             schemas,
             client,
             entry_enricher,
+            token_bucket,
         ))
     }
 }
@@ -302,7 +310,6 @@ where
     }
 }
 
-#[derive(Debug)]
 struct ServiceInner<InvocationTaskRunner, SR> {
     input_rx: mpsc::UnboundedReceiver<InputCommand<SR>>,
     status_rx: mpsc::UnboundedReceiver<
@@ -325,6 +332,7 @@ struct ServiceInner<InvocationTaskRunner, SR> {
     quota: quota::InvokerConcurrencyQuota,
     status_store: InvocationStatusStore,
     invocation_state_machine_manager: state_machine_manager::InvocationStateMachineManager<SR>,
+    token_state: TokenState,
 }
 
 impl<ITR, IR> ServiceInner<ITR, IR>
@@ -384,8 +392,12 @@ where
                     }
                 }
             },
-
-            Some(invoke_input_command) = segmented_input_queue.dequeue(), if !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
+            Some(_) = &mut self.token_state => {
+                // drives the token bucket state machine.
+                // nothing to do here. The bucket is_ready() now should return true.
+            },
+            Some(invoke_input_command) = segmented_input_queue.dequeue(), if self.token_state.is_ready() && !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
+                self.token_state.consume();
                 self.handle_invoke(options, invoke_input_command.partition, invoke_input_command.invocation_id, invoke_input_command.invocation_epoch, invoke_input_command.invocation_target, invoke_input_command.journal);
             },
 
@@ -1384,7 +1396,7 @@ mod tests {
     use super::*;
 
     use std::future::{pending, ready};
-    use std::num::NonZeroUsize;
+    use std::num::{NonZeroU32, NonZeroUsize};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -1419,6 +1431,18 @@ mod tests {
 
     use crate::error::{InvokerError, SdkInvocationErrorV2};
     use crate::quota::InvokerConcurrencyQuota;
+
+    pub fn new_token_bucket() -> TokenBucket {
+        let bucket = gardal::TokenBucket::from_parts(
+            gardal::RateLimit::per_second_and_burst(
+                NonZeroU32::new(100).unwrap(),
+                NonZeroU32::new(10000).unwrap(),
+            ),
+            gardal::TokioClock::default(),
+        );
+        bucket.add_tokens(10000);
+        bucket
+    }
 
     // -- Mocks
 
@@ -1457,6 +1481,7 @@ mod tests {
                 quota: InvokerConcurrencyQuota::new(concurrency_limit),
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
+                token_state: TokenState::new(new_token_bucket()),
             };
             (input_tx, status_tx, service_inner)
         }
@@ -1649,6 +1674,7 @@ mod tests {
             )
             .unwrap(),
             entry_enricher::test_util::MockEntryEnricher,
+            new_token_bucket(),
         );
 
         let mut handle = service.handle();
@@ -1782,7 +1808,7 @@ mod tests {
         // Step now should invoke sid_2
         assert!(
             service_inner
-                .step(&invoker_options, &mut segment_queue, shutdown.as_mut())
+                .step(&invoker_options, &mut segment_queue, shutdown.as_mut(),)
                 .await
         );
         assert!(
