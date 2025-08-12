@@ -53,7 +53,7 @@ use restate_core::{
 };
 use restate_core::{RuntimeTaskHandle, TaskCenter};
 use restate_invoker_api::StatusHandle;
-use restate_invoker_impl::{BuildError, ChannelStatusReader};
+use restate_invoker_impl::{BuildError, ChannelStatusReader, TokenBucket};
 use restate_metadata_server::{MetadataStoreClient, ReadModifyWriteError};
 use restate_metadata_store::{ReadWriteError, RetryError, retry_on_retryable_error};
 use restate_partition_store::PartitionStoreManager;
@@ -133,6 +133,8 @@ pub struct PartitionProcessorManager {
 
     partition_table: Live<PartitionTable>,
     wait_for_partition_table_update: bool,
+
+    token_bucket: TokenBucket,
 }
 
 type SnapshotResult = Result<SnapshotCreated, SnapshotError>;
@@ -226,6 +228,18 @@ impl PartitionProcessorManager {
         let pp_rpc_rx = router_builder.register_service(24, BackPressureMode::PushBack);
 
         let (tx, rx) = mpsc::channel(updateable_config.pinned().worker.internal_queue_length());
+        let config = updateable_config.pinned();
+        let token_bucket = gardal::TokenBucket::from_parts(
+            gardal::RateLimit::per_second_and_burst(
+                config.worker.invoker.throttling.rate,
+                config.worker.invoker.throttling.burst,
+            ),
+            gardal::TokioClock::default(),
+        );
+
+        // start with the burst capacity
+        token_bucket.add_tokens(config.worker.invoker.throttling.burst.get());
+
         Self {
             health_status,
             updateable_config,
@@ -250,6 +264,7 @@ impl PartitionProcessorManager {
             fast_forward_on_startup: HashMap::default(),
             partition_table: Metadata::with_current(|m| m.updateable_partition_table()),
             wait_for_partition_table_update: false,
+            token_bucket,
         }
     }
 
@@ -1266,6 +1281,7 @@ impl PartitionProcessorManager {
             self.replica_set_states.clone(),
             self.partition_store_manager.clone(),
             self.fast_forward_on_startup.remove(&partition_id),
+            self.token_bucket.clone(),
         );
 
         self.asynchronous_operations
