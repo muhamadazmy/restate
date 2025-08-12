@@ -1396,7 +1396,7 @@ mod tests {
     use super::*;
 
     use std::future::{pending, ready};
-    use std::num::NonZeroUsize;
+    use std::num::{NonZeroU32, NonZeroUsize};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
