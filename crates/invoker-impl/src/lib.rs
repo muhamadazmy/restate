@@ -199,6 +199,21 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         let (invocation_tasks_tx, invocation_tasks_rx) = mpsc::unbounded_channel();
 
+        // we create a bucket per partition/invoker. This way the operator gets more control over
+        // the invocation rate even in a multi-node setup.
+        //
+        // max-rate = rate * number-of-partitions
+        let token_bucket = TokenBucket::from_parts(
+            gardal::RateLimit::per_second_and_burst(
+                options.throttling.rate,
+                options.throttling.burst,
+            ),
+            gardal::TokioClock::default(),
+        );
+
+        // start with the burst capacity
+        token_bucket.add_tokens(options.throttling.burst.get());
+
         Self {
             input_tx,
             status_tx,
