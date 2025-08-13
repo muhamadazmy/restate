@@ -17,7 +17,7 @@ use tracing::{instrument, warn};
 
 use restate_bifrost::Bifrost;
 use restate_core::{Metadata, RuntimeTaskHandle, TaskCenter, TaskKind, cancellation_token};
-use restate_invoker_impl::Service as InvokerService;
+use restate_invoker_impl::{Service as InvokerService, TokenBucket};
 use restate_partition_store::{PartitionStore, PartitionStoreManager};
 use restate_service_protocol::codec::ProtobufRawEntryCodec;
 use restate_types::SharedString;
@@ -44,6 +44,7 @@ pub struct SpawnPartitionProcessorTask {
     replica_set_states: PartitionReplicaSetStates,
     partition_store_manager: PartitionStoreManager,
     fast_forward_lsn: Option<Lsn>,
+    token_bucket: TokenBucket,
 }
 
 impl SpawnPartitionProcessorTask {
@@ -56,6 +57,7 @@ impl SpawnPartitionProcessorTask {
         replica_set_states: PartitionReplicaSetStates,
         partition_store_manager: PartitionStoreManager,
         fast_forward_lsn: Option<Lsn>,
+        token_bucket: TokenBucket,
     ) -> Self {
         Self {
             task_name,
@@ -65,6 +67,7 @@ impl SpawnPartitionProcessorTask {
             replica_set_states,
             partition_store_manager,
             fast_forward_lsn,
+            token_bucket,
         }
     }
 
@@ -91,6 +94,7 @@ impl SpawnPartitionProcessorTask {
             replica_set_states,
             partition_store_manager,
             fast_forward_lsn,
+            token_bucket,
         } = self;
 
         let config = configuration.pinned();
@@ -104,6 +108,7 @@ impl SpawnPartitionProcessorTask {
             &config.worker.invoker,
             EntryEnricher::new(schema.clone()),
             schema,
+            token_bucket,
         )?;
 
         let status_reader = invoker.status_reader();
