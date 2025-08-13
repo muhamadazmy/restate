@@ -226,6 +226,7 @@ impl PartitionProcessorManager {
         let pp_rpc_rx = router_builder.register_service(24, BackPressureMode::PushBack);
 
         let (tx, rx) = mpsc::channel(updateable_config.pinned().worker.internal_queue_length());
+
         Self {
             health_status,
             updateable_config,
@@ -1258,6 +1259,23 @@ impl PartitionProcessorManager {
             .entry(partition_id)
             .or_insert_with(|| SharedString::from(Arc::from(format!("pp-{partition_id}"))));
 
+        let config = self.updateable_config.live_load();
+
+        // we create a bucket per partition/invoker. This way the operator gets more control over
+        // the invocation rate even in a multi-node setup.
+        //
+        // max-rate = rate * number-of-partitions
+        let token_bucket = gardal::TokenBucket::from_parts(
+            gardal::RateLimit::per_second_and_burst(
+                config.worker.invoker.throttling.rate,
+                config.worker.invoker.throttling.burst,
+            ),
+            gardal::TokioClock::default(),
+        );
+
+        // start with the burst capacity
+        token_bucket.add_tokens(config.worker.invoker.throttling.burst.get());
+
         let starting_task = SpawnPartitionProcessorTask::new(
             task_name.clone(),
             partition,
@@ -1266,6 +1284,7 @@ impl PartitionProcessorManager {
             self.replica_set_states.clone(),
             self.partition_store_manager.clone(),
             self.fast_forward_on_startup.remove(&partition_id),
+            token_bucket,
         );
 
         self.asynchronous_operations
