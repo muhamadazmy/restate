@@ -10,51 +10,41 @@
 
 use crate::partition::state_machine::entries::ApplyJournalCommandEffect;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
-use opentelemetry::global::ObjectSafeSpan;
-use restate_storage_api::timer_table::TimerTable;
+use restate_storage_api::state_table::StateTable;
 use restate_tracing_instrumentation as instrumentation;
-use restate_types::journal_v2::command::SleepCommand;
-use restate_wal_protocol::timer::TimerKeyValue;
+use restate_types::journal_v2::RunCommand;
 
-pub(super) type ApplySleepCommand<'e> = ApplyJournalCommandEffect<'e, SleepCommand>;
+pub(super) type ApplyRunCommand<'e> = ApplyJournalCommandEffect<'e, RunCommand>;
 
 impl<'e, 'ctx: 'e, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
-    for ApplySleepCommand<'e>
+    for ApplyRunCommand<'e>
 where
-    S: TimerTable,
+    S: StateTable,
 {
-    async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
+    async fn apply(self, _ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         let invocation_metadata = self
             .invocation_status
             .get_invocation_metadata()
             .expect("In-Flight invocation metadata must be present");
 
-        // Create the instrumentation span
-        let mut span = instrumentation::info_invocation_span!(
+        //todo(azmy): avoid "format!" if tracing is not enabled?
+
+        // unfortunately the RunCommand `entry` does not have "duration" of the run hence
+        // the span here only shows the instance the span was created
+        //
+        // todo(azmy): RunCommand entry should have duration of the `run`
+        let _span = instrumentation::info_invocation_span!(
             relation = invocation_metadata
                 .journal_metadata
                 .span_context
                 .as_parent(),
             id = self.invocation_id,
-            name = "sleep",
+            name = format!("run {}", self.entry.name),
             tags = (rpc.service = invocation_metadata
                 .invocation_target
                 .service_name()
                 .to_string())
         );
-
-        span.end_with_timestamp(self.entry.wake_up_time.into());
-
-        ctx.register_timer(
-            TimerKeyValue::complete_journal_entry(
-                self.entry.wake_up_time,
-                self.invocation_id,
-                self.entry.completion_id,
-                invocation_metadata.current_invocation_epoch,
-            ),
-            invocation_metadata.journal_metadata.span_context.clone(),
-        )
-        .await?;
 
         Ok(())
     }
