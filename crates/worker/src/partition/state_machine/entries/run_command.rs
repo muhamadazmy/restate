@@ -10,49 +10,42 @@
 
 use crate::partition::state_machine::entries::ApplyJournalCommandEffect;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
-use restate_storage_api::timer_table::TimerTable;
 use restate_tracing_instrumentation as instrumentation;
-use restate_types::journal_v2::command::SleepCommand;
-use restate_wal_protocol::timer::TimerKeyValue;
+use restate_types::journal_v2::RunCommand;
 
-pub(super) type ApplySleepCommand<'e> = ApplyJournalCommandEffect<'e, SleepCommand>;
+pub(super) type ApplyRunCommand<'e> = ApplyJournalCommandEffect<'e, RunCommand>;
 
 impl<'e, 'ctx: 'e, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
-    for ApplySleepCommand<'e>
-where
-    S: TimerTable,
+    for ApplyRunCommand<'e>
 {
-    async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
+    async fn apply(self, _ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         let invocation_metadata = self
             .invocation_status
             .get_invocation_metadata()
             .expect("In-Flight invocation metadata must be present");
 
-        // Create the instrumentation span
+        //todo(azmy): avoid "format!" if tracing is not enabled?
+
+        // unfortunately the RunCommand `entry` does not have "duration" of the run hence
+        // the span here only shows the instance the span was created
+        //
+        // todo(azmy): RunCommand entry should have duration of the `run`. Since this piece of
+        // information is not available in the entry, we instead get an "approximation" by using
+        // the invocation status last modification time.
+
         let _span = instrumentation::info_invocation_span!(
             relation = invocation_metadata
                 .journal_metadata
                 .span_context
                 .as_parent(),
             id = self.invocation_id,
-            name = "sleep",
+            name = format!("run {}", self.entry.name),
             tags = (rpc.service = invocation_metadata
                 .invocation_target
                 .service_name()
                 .to_string()),
-            fields = (with_end_time = self.entry.wake_up_time)
+            fields = (with_start_time = invocation_metadata.timestamps.modification_time())
         );
-
-        ctx.register_timer(
-            TimerKeyValue::complete_journal_entry(
-                self.entry.wake_up_time,
-                self.invocation_id,
-                self.entry.completion_id,
-                invocation_metadata.current_invocation_epoch,
-            ),
-            invocation_metadata.journal_metadata.span_context.clone(),
-        )
-        .await?;
 
         Ok(())
     }
