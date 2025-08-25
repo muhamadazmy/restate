@@ -10,6 +10,7 @@
 
 use crate::partition::state_machine::entries::ApplyJournalCommandEffect;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
+use opentelemetry::global::ObjectSafeSpan;
 use restate_storage_api::timer_table::TimerTable;
 use restate_tracing_instrumentation as instrumentation;
 use restate_types::journal_v2::command::SleepCommand;
@@ -29,7 +30,7 @@ where
             .expect("In-Flight invocation metadata must be present");
 
         // Create the instrumentation span
-        let _span = instrumentation::info_invocation_span!(
+        let mut span = instrumentation::info_invocation_span!(
             relation = invocation_metadata
                 .journal_metadata
                 .span_context
@@ -41,6 +42,8 @@ where
                 .service_name()
                 .to_string())
         );
+
+        span.end_with_timestamp(self.entry.wake_up_time.into());
 
         ctx.register_timer(
             TimerKeyValue::complete_journal_entry(
