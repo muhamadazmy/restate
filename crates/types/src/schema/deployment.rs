@@ -32,13 +32,13 @@ pub enum ProtocolType {
     BidiStream,
 }
 
+// TODO this type is serde because it represents how data is stored in the schema registry
+//  re-evaluate whether we should use another ad-hoc data structure for storage representation after schema v2 migration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct DeliveryOptions {
     #[serde(
         with = "serde_with::As::<serde_with::FromInto<restate_serde_util::SerdeableHeaderHashMap>>"
     )]
-    #[cfg_attr(feature = "schemars", schemars(with = "HashMap<String, String>"))]
     pub additional_headers: HashMap<HeaderName, HeaderValue>,
 }
 
@@ -48,18 +48,16 @@ impl DeliveryOptions {
     }
 }
 
-// TODO this type should not be serde, the actual type we need in the Admin API should be moved there.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone)]
 pub struct Deployment {
     pub id: DeploymentId,
     pub metadata: DeploymentMetadata,
 }
 
-// TODO this type should not be serde, the actual type we need in the Admin API should be moved there.
+// TODO this type is serde because it represents how data is stored in the schema registry
+//  re-evaluate whether we should use another ad-hoc data structure for storage representation after schema v2 migration.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct DeploymentMetadata {
     pub ty: DeploymentType,
     pub delivery_options: DeliveryOptions,
@@ -69,25 +67,39 @@ pub struct DeploymentMetadata {
     pub created_at: MillisSinceEpoch,
 }
 
-// TODO this type should not be serde, the actual type we need in the Admin API should be moved there.
+/// Lambda compression
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub enum EndpointLambdaCompression {
+    Zstd,
+}
+
+impl EndpointLambdaCompression {
+    pub fn http_name(&self) -> &'static str {
+        match self {
+            EndpointLambdaCompression::Zstd => "zstd",
+        }
+    }
+}
+
+// TODO this type is serde because it represents how data is stored in the schema registry
+//  re-evaluate whether we should use another ad-hoc data structure for storage representation after schema v2 migration.
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "serde_hacks::DeploymentType")]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum DeploymentType {
     Http {
         #[serde(with = "serde_with::As::<serde_with::DisplayFromStr>")]
-        #[cfg_attr(feature = "schemars", schemars(with = "String"))]
         address: Uri,
         protocol_type: ProtocolType,
         #[serde(with = "serde_with::As::<restate_serde_util::VersionSerde>")]
-        #[cfg_attr(feature = "schemars", schemars(with = "String"))]
         http_version: http::Version,
     },
     Lambda {
         arn: LambdaARN,
-        #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
         assume_role_arn: Option<ByteString>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compression: Option<EndpointLambdaCompression>,
     },
 }
 
@@ -127,6 +139,8 @@ mod serde_hacks {
         Lambda {
             arn: LambdaARN,
             assume_role_arn: Option<ByteString>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            compression: Option<EndpointLambdaCompression>,
         },
     }
 
@@ -148,9 +162,11 @@ mod serde_hacks {
                 DeploymentType::Lambda {
                     arn,
                     assume_role_arn,
+                    compression,
                 } => Self::Lambda {
                     arn,
                     assume_role_arn,
+                    compression,
                 },
             }
         }
@@ -278,6 +294,7 @@ impl DeploymentMetadata {
     pub fn new_lambda(
         arn: LambdaARN,
         assume_role_arn: Option<ByteString>,
+        compression: Option<EndpointLambdaCompression>,
         delivery_options: DeliveryOptions,
         supported_protocol_versions: RangeInclusive<i32>,
         sdk_version: Option<String>,
@@ -286,6 +303,7 @@ impl DeploymentMetadata {
             ty: DeploymentType::Lambda {
                 arn,
                 assume_role_arn,
+                compression,
             },
             delivery_options,
             created_at: MillisSinceEpoch::now(),

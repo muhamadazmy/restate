@@ -10,10 +10,15 @@
 
 use super::AdminClient;
 use super::admin_client::Envelope;
+use http::{Uri, Version};
 
 use restate_admin_rest_model::deployments::*;
+use restate_admin_rest_model::invocations::RestartAsNewInvocationResponse;
 use restate_admin_rest_model::services::*;
 use restate_admin_rest_model::version::VersionInformation;
+use restate_serde_util::SerdeableHeaderHashMap;
+use restate_types::identifiers::{DeploymentId, LambdaARN};
+use restate_types::schema::deployment::ProtocolType;
 use restate_types::schema::service::ServiceMetadata;
 
 pub trait AdminClientInterface {
@@ -39,6 +44,11 @@ pub trait AdminClientInterface {
     ) -> reqwest::Result<Envelope<RegisterDeploymentResponse>>;
 
     async fn purge_invocation(&self, id: &str) -> reqwest::Result<Envelope<()>>;
+
+    async fn restart_invocation(
+        &self,
+        id: &str,
+    ) -> reqwest::Result<Envelope<RestartAsNewInvocationResponse>>;
 
     async fn cancel_invocation(&self, id: &str, kill: bool) -> reqwest::Result<Envelope<()>>;
 
@@ -112,6 +122,14 @@ impl AdminClientInterface for AdminClient {
         self.run(reqwest::Method::DELETE, url).await
     }
 
+    async fn restart_invocation(
+        &self,
+        id: &str,
+    ) -> reqwest::Result<Envelope<RestartAsNewInvocationResponse>> {
+        let url = self.versioned_url(["invocations", id, "restart-as-new"]);
+        self.run(reqwest::Method::PATCH, url).await
+    }
+
     async fn cancel_invocation(&self, id: &str, kill: bool) -> reqwest::Result<Envelope<()>> {
         let mut url = self.versioned_url(["invocations", id]);
         url.set_query(Some(&format!(
@@ -134,5 +152,135 @@ impl AdminClientInterface for AdminClient {
     async fn version(&self) -> reqwest::Result<Envelope<VersionInformation>> {
         let url = self.versioned_url(["version"]);
         self.run(reqwest::Method::GET, url).await
+    }
+}
+
+// Helper type used within the cli crate
+#[derive(Clone, Debug)]
+pub enum Deployment {
+    Http {
+        uri: Uri,
+        protocol_type: ProtocolType,
+        http_version: Version,
+        additional_headers: SerdeableHeaderHashMap,
+        created_at: humantime::Timestamp,
+        min_protocol_version: i32,
+        max_protocol_version: i32,
+    },
+    Lambda {
+        arn: LambdaARN,
+        assume_role_arn: Option<String>,
+        additional_headers: SerdeableHeaderHashMap,
+        created_at: humantime::Timestamp,
+        min_protocol_version: i32,
+        max_protocol_version: i32,
+    },
+}
+
+impl Deployment {
+    pub fn from_deployment_response(
+        deployment_response: DeploymentResponse,
+    ) -> (DeploymentId, Self, Vec<ServiceNameRevPair>) {
+        match deployment_response {
+            DeploymentResponse::Http {
+                id,
+                uri,
+                protocol_type,
+                http_version,
+                additional_headers,
+                created_at,
+                min_protocol_version,
+                max_protocol_version,
+                services,
+                ..
+            } => (
+                id,
+                Deployment::Http {
+                    uri,
+                    protocol_type,
+                    http_version,
+                    additional_headers,
+                    created_at,
+                    min_protocol_version,
+                    max_protocol_version,
+                },
+                services,
+            ),
+            DeploymentResponse::Lambda {
+                id,
+                arn,
+                assume_role_arn,
+                additional_headers,
+                created_at,
+                min_protocol_version,
+                max_protocol_version,
+                services,
+                ..
+            } => (
+                id,
+                Deployment::Lambda {
+                    arn,
+                    assume_role_arn,
+                    additional_headers,
+                    created_at,
+                    min_protocol_version,
+                    max_protocol_version,
+                },
+                services,
+            ),
+        }
+    }
+
+    pub fn from_detailed_deployment_response(
+        detailed_deployment_response: DetailedDeploymentResponse,
+    ) -> (DeploymentId, Self, Vec<ServiceMetadata>) {
+        match detailed_deployment_response {
+            DetailedDeploymentResponse::Http {
+                id,
+                uri,
+                protocol_type,
+                http_version,
+                additional_headers,
+                created_at,
+                min_protocol_version,
+                max_protocol_version,
+                services,
+                ..
+            } => (
+                id,
+                Deployment::Http {
+                    uri,
+                    protocol_type,
+                    http_version,
+                    additional_headers,
+                    created_at,
+                    min_protocol_version,
+                    max_protocol_version,
+                },
+                services,
+            ),
+            DetailedDeploymentResponse::Lambda {
+                id,
+                arn,
+                assume_role_arn,
+                additional_headers,
+                created_at,
+                min_protocol_version,
+                max_protocol_version,
+                services,
+                ..
+            } => (
+                id,
+                Deployment::Lambda {
+                    arn,
+                    assume_role_arn,
+                    additional_headers,
+                    created_at,
+                    min_protocol_version,
+                    max_protocol_version,
+                },
+                services,
+            ),
+        }
     }
 }

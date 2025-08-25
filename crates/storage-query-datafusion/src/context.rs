@@ -55,6 +55,7 @@ const SYS_INVOCATION_VIEW: &str = "CREATE VIEW sys_invocation as SELECT
             ss.invoked_by_id,
             ss.invoked_by_subscription_id,
             ss.invoked_by_target,
+            ss.restarted_from,
             ss.pinned_deployment_id,
             ss.pinned_service_protocol_version,
             ss.trace_id,
@@ -350,6 +351,7 @@ impl QueryContext {
         }
 
         session_config = session_config
+            .with_batch_size(128)
             .with_information_schema(true)
             .with_default_catalog_and_schema("restate", "public");
 

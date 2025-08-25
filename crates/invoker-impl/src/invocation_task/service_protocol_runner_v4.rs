@@ -266,7 +266,9 @@ where
                 if let Ok(header_value) = HeaderValue::try_from(header_value) {
                     headers.insert("traceparent", header_value);
                 }
-                if let Ok(tracestate) = HeaderValue::try_from(span_context.trace_state().header()) {
+                if let Ok(tracestate) =
+                    HeaderValue::from_str(span_context.trace_state().header().as_ref())
+                {
                     headers.insert("tracestate", tracestate);
                 }
             }
@@ -276,7 +278,8 @@ where
             DeploymentType::Lambda {
                 arn,
                 assume_role_arn,
-            } => Endpoint::Lambda(arn, assume_role_arn),
+                compression,
+            } => Endpoint::Lambda(arn, assume_role_arn, compression),
             DeploymentType::Http {
                 address,
                 http_version,
