@@ -264,6 +264,7 @@ fn get_command_by_completion_id<S: StorageAccess>(
     }
 
     let entry = opt.unwrap().0;
+
     let entry_ty = entry.ty();
     Ok(Some(entry.inner.try_as_command().ok_or_else(|| {
         StorageError::Conversion(anyhow!(
