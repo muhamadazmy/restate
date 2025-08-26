@@ -7,19 +7,107 @@
 // As of the Change Date specified in that file, in accordance with
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
+use tracing::trace;
+
+use restate_service_protocol_v4::entry_codec::ServiceProtocolV4Codec;
+use restate_storage_api::invocation_status_table::InvocationStatus;
+use restate_storage_api::journal_table_v2::ReadOnlyJournalTable;
+use restate_tracing_instrumentation as instrumentation;
+use restate_types::identifiers::InvocationId;
+use restate_types::journal_v2::raw::RawNotification;
+use restate_types::journal_v2::{Command, CommandType, CompletionId, NotificationId};
 
 use crate::partition::state_machine::lifecycle::ResumeInvocationCommand;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
-use restate_storage_api::invocation_status_table::InvocationStatus;
-use restate_storage_api::journal_table_v2::ReadOnlyJournalTable;
-use restate_types::identifiers::InvocationId;
-use restate_types::journal_v2::NotificationId;
-use restate_types::journal_v2::raw::RawNotification;
 
 pub(super) struct ApplyNotificationCommand<'e> {
     pub(super) invocation_id: InvocationId,
     pub(super) invocation_status: &'e mut InvocationStatus,
     pub(super) entry: &'e RawNotification,
+}
+
+impl<'e> ApplyNotificationCommand<'e> {
+    async fn create_trace_span<'s, S>(
+        &self,
+        completion_id: CompletionId,
+        ctx: &'_ mut StateMachineApplyContext<'s, S>,
+    ) -> Result<(), Error>
+    where
+        S: ReadOnlyJournalTable,
+    {
+        let (header, command) = ctx.storage
+                    .get_command_by_completion_id(self.invocation_id, completion_id)
+                    .await?.expect("For given completion id, the corresponding command must be present already in the journal");
+
+        if !ctx.is_leader
+            || !matches!(
+                command.command_type(),
+                CommandType::Run | CommandType::Sleep | CommandType::GetPromise
+            )
+        {
+            return Ok(());
+        }
+
+        let cmd = command.decode::<ServiceProtocolV4Codec, Command>()?;
+
+        let invocation_metadata = self
+            .invocation_status
+            .get_invocation_metadata()
+            .expect("In-Flight invocation metadata must be present");
+
+        trace!("Received notification for completion id {completion_id} of command {cmd:?}");
+
+        match cmd {
+            Command::Run(run) => {
+                let _span = instrumentation::info_invocation_span!(
+                    relation = invocation_metadata
+                        .journal_metadata
+                        .span_context
+                        .as_parent(),
+                    id = self.invocation_id,
+                    name = format!("RUN {}", run.name),
+                    tags = (rpc.service = invocation_metadata
+                        .invocation_target
+                        .service_name()
+                        .to_string()),
+                    fields = (with_start_time = header.append_time)
+                );
+            }
+            Command::Sleep(_) => {
+                let _span = instrumentation::info_invocation_span!(
+                    relation = invocation_metadata
+                        .journal_metadata
+                        .span_context
+                        .as_parent(),
+                    id = self.invocation_id,
+                    name = "sleep",
+                    tags = (rpc.service = invocation_metadata
+                        .invocation_target
+                        .service_name()
+                        .to_string()),
+                    fields = (with_start_time = header.append_time)
+                );
+            }
+            Command::GetPromise(get_promise) => {
+                let _span = instrumentation::info_invocation_span!(
+                    relation = invocation_metadata
+                        .journal_metadata
+                        .span_context
+                        .as_parent(),
+                    id = self.invocation_id,
+                    name = format!("get-promise ({})", get_promise.completion_id),
+                    tags = (rpc.service = invocation_metadata
+                        .invocation_target
+                        .service_name()
+                        .to_string()),
+                    fields = (with_start_time = header.append_time)
+                );
+            }
+            _ => unreachable!("Invalid matches! filter"),
+        }
+
+        Ok(())
+    }
 }
 
 impl<'e, 'ctx: 'e, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
@@ -28,16 +116,8 @@ where
     S: ReadOnlyJournalTable,
 {
     async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
-        if cfg!(debug_assertions)
-            && let NotificationId::CompletionId(completion_id) = self.entry.id()
-        {
-            assert!(
-                ctx.storage
-                    .get_command_by_completion_id(self.invocation_id, completion_id)
-                    .await?
-                    .is_some(),
-                "For given completion id {completion_id}, the corresponding command must be present already in the journal"
-            )
+        if let NotificationId::CompletionId(completion_id) = self.entry.id() {
+            self.create_trace_span(completion_id, ctx).await?;
         }
 
         // If we're suspended, let's figure out if we need to resume
