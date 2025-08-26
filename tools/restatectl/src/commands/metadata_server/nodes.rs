@@ -64,11 +64,28 @@ async fn add_node(
             .context(format!("failed connecting to node {node_to_add}"))?;
         let mut client = MetadataServerSvcClient::new(channel);
         // todo think about whether to run these calls in parallel
-        client.add_node(()).await.context(format!(
-            "failed adding node {node_to_add} to metadata cluster"
-        ))?;
+        match client.add_node(()).await {
+            Ok(_) => {
+                c_println!("Added node '{node_to_add}' to the metadata cluster",);
+            }
+            Err(status)
+                if status.code() == tonic::Code::AlreadyExists
+                    || status.message().contains(
+                        "cannot add node because it is still a member of the metadata cluster",
+                    ) =>
+            {
+                // the check (status.message().contains()) is a for backward compatibility in case running against an older
+                // version that did not return proper error codes.
 
-        c_println!("Added node '{node_to_add}' to the metadata cluster",);
+                c_println!("Node '{node_to_add}' is already a member of the metadata cluster");
+            }
+
+            err @ Err(_) => {
+                err.context(format!(
+                    "failed adding node {node_to_add} to metadata cluster"
+                ))?;
+            }
+        }
     }
 
     Ok(())
