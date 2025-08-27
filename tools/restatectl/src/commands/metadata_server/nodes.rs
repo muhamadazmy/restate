@@ -199,6 +199,7 @@ async fn try_remove_node(
             }
             Err(err) if err.message().contains("is not a member") => {
                 // todo(azmy): grpc server should return proper error codes.
+                c_println!("Node '{node_to_remove}' is not a member of the metadata cluster");
                 return Ok(());
             }
             Err(err) => {
