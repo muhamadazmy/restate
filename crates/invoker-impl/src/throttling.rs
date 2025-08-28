@@ -163,6 +163,33 @@ where
     }
 }
 
+pub struct ThrottlingBucketsMut<'a> {
+    pub invocations: Pin<&'a mut TokenState>,
+    pub actions: Pin<&'a mut TokenState>,
+}
+
+/// A collection of token buckets for throttling invocations and actions.
+pub struct ThrottlingBuckets {
+    invocations: TokenState,
+    actions: TokenState,
+}
+
+impl ThrottlingBuckets {
+    pub fn new(invocations: TokenState, actions: TokenState) -> Self {
+        Self {
+            invocations,
+            actions,
+        }
+    }
+
+    pub fn as_mut(&mut self) -> ThrottlingBucketsMut<'_> {
+        ThrottlingBucketsMut {
+            invocations: Pin::new(&mut self.invocations),
+            actions: Pin::new(&mut self.actions),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
