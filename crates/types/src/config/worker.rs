@@ -303,10 +303,15 @@ pub struct InvokerOptions {
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     experimental_features_propose_events: bool,
 
-    /// # Throttling
+    /// # Invocation throttling
     ///
-    /// Throttling options for per invoker.
-    pub throttling: ThrottlingOptions,
+    /// Throttling options for invocations per invoker.
+    pub invocations_throttling: ThrottlingOptions,
+
+    /// # Actions throttling
+    ///
+    /// Throttling options for actions per invoker.
+    pub actions_throttling: ThrottlingOptions,
 }
 
 impl InvokerOptions {
@@ -352,7 +357,8 @@ impl Default for InvokerOptions {
             concurrent_invocations_limit: Some(NonZeroUsize::new(1000).expect("is non zero")),
             disable_eager_state: false,
             experimental_features_propose_events: false,
-            throttling: Default::default(),
+            invocations_throttling: Default::default(),
+            actions_throttling: Default::default(),
         }
     }
 }
