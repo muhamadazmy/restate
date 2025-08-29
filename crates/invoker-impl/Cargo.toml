@@ -21,10 +21,7 @@ restate-invoker-api = { workspace = true }
 restate-queue = { workspace = true }
 restate-service-client = { workspace = true }
 restate-service-protocol = { workspace = true, features = ["message", "codec"] }
-restate-service-protocol-v4 = { workspace = true, features = [
-    "message-codec",
-    "entry-codec",
-] }
+restate-service-protocol-v4 = { workspace = true, features = ["message-codec", "entry-codec"] }
 restate-timer-queue = { workspace = true }
 restate-types = { workspace = true }
 
@@ -33,7 +30,7 @@ bytes = { workspace = true }
 bytestring = { workspace = true }
 codederror = { workspace = true }
 futures = { workspace = true }
-gardal = { workspace = true, features = ["async", "tokio-hrtime"] }
+gardal = { workspace = true , features = ["async", "tokio-hrtime"]}
 humantime = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
