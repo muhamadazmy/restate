@@ -171,7 +171,8 @@ pub struct Service<IR, EntryEnricher, DeploymentRegistry> {
     // We have this level of indirection to hide the InvocationTaskRunner,
     // which is a rather internal thing we have only for mocking.
     inner: ServiceInner<DefaultInvocationTaskRunner<EntryEnricher, DeploymentRegistry>, IR>,
-    token_bucket: TokenBucket,
+    invocation_token_bucket: TokenBucket,
+    action_token_bucket: TokenBucket,
 }
 
 impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
@@ -195,16 +196,27 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
         // the invocation rate even in a multi-node setup.
         //
         // max-rate = rate * number-of-partitions
-        let token_bucket = TokenBucket::from_parts(
+        let invocation_token_bucket = TokenBucket::from_parts(
             gardal::RateLimit::per_second_and_burst(
-                options.throttling.rate,
-                options.throttling.burst,
+                options.invocations_throttling.rate,
+                options.invocations_throttling.burst,
             ),
             gardal::TokioClock::default(),
         );
 
         // start with the burst capacity
-        token_bucket.add_tokens(options.throttling.burst.get());
+        invocation_token_bucket.add_tokens(options.invocations_throttling.burst.get());
+
+        let action_token_bucket = TokenBucket::from_parts(
+            gardal::RateLimit::per_second_and_burst(
+                options.actions_throttling.rate,
+                options.actions_throttling.burst,
+            ),
+            gardal::TokioClock::default(),
+        );
+
+        // start with the burst capacity
+        action_token_bucket.add_tokens(options.actions_throttling.burst.get());
 
         Self {
             input_tx,
@@ -226,8 +238,10 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
                 invocation_token: None,
+                action_token: None,
             },
-            token_bucket,
+            invocation_token_bucket,
+            action_token_bucket,
         }
     }
 
@@ -282,15 +296,19 @@ where
         let Service {
             tmp_dir,
             inner: mut service,
-            token_bucket,
+            invocation_token_bucket: invocations_bucket,
+            action_token_bucket: actions_bucket,
             ..
         } = self;
 
         let shutdown = cancellation_watcher();
         tokio::pin!(shutdown);
 
-        let mut token_stream =
-            std::pin::pin!(stream::iter(std::iter::repeat(())).rate_limit(token_bucket));
+        let mut invocation_token_stream =
+            std::pin::pin!(stream::iter(std::iter::repeat(())).rate_limit(invocations_bucket));
+
+        let mut action_token_stream =
+            std::pin::pin!(stream::iter(std::iter::repeat(())).rate_limit(actions_bucket));
 
         let in_memory_limit = updateable_options
             .live_load()
@@ -306,7 +324,8 @@ where
                 .step(
                     options,
                     &mut segmented_input_queue,
-                    token_stream.as_mut(),
+                    invocation_token_stream.as_mut(),
+                    action_token_stream.as_mut(),
                     shutdown.as_mut(),
                 )
                 .await
@@ -344,6 +363,7 @@ struct ServiceInner<InvocationTaskRunner, SR> {
     invocation_state_machine_manager: state_machine_manager::InvocationStateMachineManager<SR>,
 
     invocation_token: Option<()>,
+    action_token: Option<()>,
 }
 
 impl<ITR, IR> ServiceInner<ITR, IR>
@@ -356,7 +376,8 @@ where
         &mut self,
         options: &InvokerOptions,
         segmented_input_queue: &mut SegmentQueue<Box<InvokeCommand>>,
-        mut token_stream: Pin<&mut impl StreamExt<Item = ()>>,
+        mut invocation_token_stream: Pin<&mut impl StreamExt<Item = ()>>,
+        mut action_token_stream: Pin<&mut impl StreamExt<Item = ()>>,
         mut shutdown: Pin<&mut F>,
     ) -> bool
     where
@@ -404,15 +425,18 @@ where
                     }
                 }
             },
-            item = token_stream.next(), if self.invocation_token.is_none() => {
+            item = action_token_stream.next(), if self.action_token.is_none() => {
+                self.action_token = item;
+            },
+            item = invocation_token_stream.next(), if self.invocation_token.is_none() => {
                 self.invocation_token = item;
             },
             Some(invoke_input_command) = segmented_input_queue.dequeue(), if self.invocation_token.is_some() && !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
                 self.invocation_token.take();
                 self.handle_invoke(options, invoke_input_command.partition, invoke_input_command.invocation_id, invoke_input_command.invocation_epoch, invoke_input_command.invocation_target, invoke_input_command.journal);
             },
-            Some(invocation_task_msg) = self.invocation_tasks_rx.recv(), if self.invocation_token.is_some() => {
-                self.invocation_token.take();
+            Some(invocation_task_msg) = self.invocation_tasks_rx.recv(), if self.action_token.is_some() => {
+                self.action_token.take();
                 let InvocationTaskOutput {
                     invocation_id,
                     partition,
@@ -1493,6 +1517,7 @@ mod tests {
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
                 invocation_token: None,
+                action_token: None,
             };
             (input_tx, status_tx, service_inner)
         }
@@ -1735,7 +1760,8 @@ mod tests {
         let shutdown = cancel_token.cancelled();
         tokio::pin!(shutdown);
 
-        let mut token_stream = std::pin::pin!(unlimited_token_stream());
+        let mut invocation_token_stream = std::pin::pin!(unlimited_token_stream());
+        let mut action_token_stream = std::pin::pin!(unlimited_token_stream());
 
         let invocation_id_1 = InvocationId::mock_random();
         let invocation_id_2 = InvocationId::mock_random();
@@ -1770,7 +1796,8 @@ mod tests {
                 .step(
                     &invoker_options,
                     &mut segment_queue,
-                    token_stream.as_mut(),
+                    invocation_token_stream.as_mut(),
+                    action_token_stream.as_mut(),
                     shutdown.as_mut()
                 )
                 .await
@@ -1792,7 +1819,8 @@ mod tests {
                 .step(
                     &invoker_options,
                     &mut segment_queue,
-                    token_stream.as_mut(),
+                    invocation_token_stream.as_mut(),
+                    action_token_stream.as_mut(),
                     shutdown.as_mut()
                 )
                 .await
@@ -1819,7 +1847,8 @@ mod tests {
                 .step(
                     &invoker_options,
                     &mut segment_queue,
-                    token_stream.as_mut(),
+                    invocation_token_stream.as_mut(),
+                    action_token_stream.as_mut(),
                     shutdown.as_mut(),
                 )
                 .await
