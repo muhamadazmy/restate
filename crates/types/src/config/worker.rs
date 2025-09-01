@@ -307,6 +307,11 @@ pub struct InvokerOptions {
     ///
     /// Throttling options for invocations per invoker.
     pub invocation_throttling: Option<ThrottlingOptions>,
+
+    /// # Actions throttling
+    ///
+    /// Throttling options for actions per invoker.
+    pub action_throttling: Option<ThrottlingOptions>,
 }
 
 impl InvokerOptions {
@@ -353,6 +358,7 @@ impl Default for InvokerOptions {
             disable_eager_state: false,
             experimental_features_propose_events: false,
             invocation_throttling: Default::default(),
+            action_throttling: Default::default(),
         }
     }
 }

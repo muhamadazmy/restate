@@ -172,6 +172,7 @@ pub struct Service<IR, EntryEnricher, DeploymentRegistry> {
     // which is a rather internal thing we have only for mocking.
     inner: ServiceInner<DefaultInvocationTaskRunner<EntryEnricher, DeploymentRegistry>, IR>,
     invocation_token_bucket: Option<TokenBucket>,
+    action_token_bucket: Option<TokenBucket>,
 }
 
 impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
@@ -204,6 +205,15 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
             bucket
         });
 
+        let action_token_bucket = options.action_throttling.as_ref().map(|opts| {
+            let bucket = TokenBucket::from_parts(
+                gardal::RateLimit::per_second_and_burst(opts.rate, opts.burst),
+                gardal::TokioClock::default(),
+            );
+            bucket.add_tokens(opts.burst.get());
+            bucket
+        });
+
         Self {
             input_tx,
             status_tx,
@@ -225,6 +235,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
                 invocation_state_machine_manager: Default::default(),
             },
             invocation_token_bucket,
+            action_token_bucket,
         }
     }
 
@@ -279,7 +290,8 @@ where
         let Service {
             tmp_dir,
             inner: mut service,
-            invocation_token_bucket: token_bucket,
+            invocation_token_bucket,
+            action_token_bucket,
             ..
         } = self;
 
@@ -287,7 +299,13 @@ where
         tokio::pin!(shutdown);
 
         let mut invocation_throttler = std::pin::pin!(
-            token_bucket
+            invocation_token_bucket
+                .map(Throttler::limited)
+                .unwrap_or_else(Throttler::unlimited)
+        );
+
+        let mut action_throttler = std::pin::pin!(
+            action_token_bucket
                 .map(Throttler::limited)
                 .unwrap_or_else(Throttler::unlimited)
         );
@@ -307,6 +325,7 @@ where
                     options,
                     &mut segmented_input_queue,
                     invocation_throttler.as_mut(),
+                    action_throttler.as_mut(),
                     shutdown.as_mut(),
                 )
                 .await
@@ -355,6 +374,7 @@ where
         options: &InvokerOptions,
         segmented_input_queue: &mut SegmentQueue<Box<InvokeCommand>>,
         mut invocation_throttler: Pin<&mut Throttler>,
+        mut action_throttler: Pin<&mut Throttler>,
         mut shutdown: Pin<&mut F>,
     ) -> bool
     where
@@ -405,12 +425,15 @@ where
             _ = invocation_throttler.as_mut().next(), if !invocation_throttler.is_ready() => {
                 // nothing to do here, just driving the stream forward.
             },
+            _ = action_throttler.as_mut().next(), if !action_throttler.is_ready() => {
+                // nothing to do here, just driving the stream forward.
+            },
             Some(invoke_input_command) = segmented_input_queue.dequeue(), if invocation_throttler.is_ready() && !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
                 invocation_throttler.consume();
                 self.handle_invoke(options, invoke_input_command.partition, invoke_input_command.invocation_id, invoke_input_command.invocation_epoch, invoke_input_command.invocation_target, invoke_input_command.journal);
             },
-            Some(invocation_task_msg) = self.invocation_tasks_rx.recv(), if invocation_throttler.is_ready() => {
-                invocation_throttler.consume();
+            Some(invocation_task_msg) = self.invocation_tasks_rx.recv(), if action_throttler.is_ready() => {
+                action_throttler.consume();
                 let InvocationTaskOutput {
                     invocation_id,
                     partition,
@@ -1728,6 +1751,7 @@ mod tests {
         tokio::pin!(shutdown);
 
         let mut invocation_throttler = std::pin::pin!(Throttler::unlimited());
+        let mut action_throttler = std::pin::pin!(Throttler::unlimited());
 
         let invocation_id_1 = InvocationId::mock_random();
         let invocation_id_2 = InvocationId::mock_random();
@@ -1765,6 +1789,7 @@ mod tests {
                     &invoker_options,
                     &mut segment_queue,
                     invocation_throttler.as_mut(),
+                    action_throttler.as_mut(),
                     shutdown.as_mut()
                 )
                 .await
@@ -1787,6 +1812,7 @@ mod tests {
                     &invoker_options,
                     &mut segment_queue,
                     invocation_throttler.as_mut(),
+                    action_throttler.as_mut(),
                     shutdown.as_mut()
                 )
                 .await
@@ -1814,6 +1840,7 @@ mod tests {
                     &invoker_options,
                     &mut segment_queue,
                     invocation_throttler.as_mut(),
+                    action_throttler.as_mut(),
                     shutdown.as_mut(),
                 )
                 .await
