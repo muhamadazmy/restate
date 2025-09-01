@@ -1790,6 +1790,10 @@ mod tests {
             }))
             .await;
 
+        // make tokens available for processing
+        service_inner.invocation_token = Some(());
+        service_inner.action_token = Some(());
+
         // Now step the state machine to start the invocation
         assert!(
             service_inner
