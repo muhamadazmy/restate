@@ -10,13 +10,16 @@
 
 use std::collections::HashSet;
 use std::future::poll_fn;
+use std::num::NonZeroU32;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::time::Duration;
 
 use bytes::Bytes;
 use bytestring::ByteString;
 use futures::future::FusedFuture;
 use futures::{FutureExt, Stream, StreamExt};
+use gardal::{RateLimit, TokenBucket, TokioClock};
 use http::uri::PathAndQuery;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use http_body::Frame;
@@ -54,7 +57,6 @@ use restate_types::schema::deployment::{
 use restate_types::schema::invocation_target::InvocationTargetResolver;
 use restate_types::service_protocol::ServiceProtocolVersion;
 
-use crate::Notification;
 use crate::error::{
     CommandPreconditionError, InvocationErrorRelatedCommandV2, InvokerError, SdkInvocationErrorV2,
 };
@@ -63,6 +65,8 @@ use crate::invocation_task::{
     ResponseChunk, ResponseStreamState, TerminalLoopState, X_RESTATE_SERVER,
     invocation_id_to_header_value, service_protocol_version_to_header_value,
 };
+use crate::throttling::Throttler;
+use crate::{Notification, throttling};
 
 ///  Provides the value of the invocation id
 const INVOCATION_ID_HEADER_NAME: HeaderName = HeaderName::from_static("x-restate-invocation-id");
@@ -165,6 +169,14 @@ where
             &service_invocation_span_context,
         );
 
+        let throttler = throttling::Throttler::limited(TokenBucket::from_parts(
+            RateLimit::per_second_and_burst(
+                NonZeroU32::new(1).unwrap(),
+                NonZeroU32::new(1).unwrap(),
+            ),
+            TokioClock::default(),
+        ));
+
         crate::shortcircuit!(
             self.write_start(
                 &mut http_stream_tx,
@@ -180,10 +192,17 @@ where
         let mut http_stream_rx =
             ResponseStreamState::initialize(&self.invocation_task.client, request);
 
+        let mut throttler = std::pin::pin!(throttler);
+
         // Execute the replay
         crate::shortcircuit!(
-            self.replay_loop(&mut http_stream_tx, &mut http_stream_rx, journal_stream)
-                .await
+            self.replay_loop(
+                &mut http_stream_tx,
+                &mut http_stream_rx,
+                journal_stream,
+                throttler.as_mut()
+            )
+            .await
         );
 
         // If we have the invoker_rx and the protocol type is bidi stream,
@@ -195,6 +214,7 @@ where
                     &service_invocation_span_context,
                     http_stream_tx,
                     &mut http_stream_rx,
+                    throttler.as_mut()
                 )
                 .await
             );
@@ -208,7 +228,11 @@ where
         // We don't have the invoker_rx, so we simply consume the response
         trace!("Sender side of the request has been dropped, now processing the response");
         let result = self
-            .response_stream_loop(&service_invocation_span_context, &mut http_stream_rx)
+            .response_stream_loop(
+                &service_invocation_span_context,
+                &mut http_stream_rx,
+                throttler.as_mut(),
+            )
             .await;
 
         // Sanity check of the stream decoder
@@ -303,6 +327,7 @@ where
         http_stream_tx: &mut InvokerRequestStreamSender,
         http_stream_rx: &mut ResponseStreamState,
         journal_stream: JournalStream,
+        mut throttler: Pin<&mut Throttler>,
     ) -> TerminalLoopState<()>
     where
         JournalStream: Stream<Item = JournalEntry> + Unpin,
@@ -313,9 +338,10 @@ where
 
         loop {
             tokio::select! {
-                got_headers_res = got_headers_future.as_mut(), if !got_headers_future.is_terminated() => {
+                got_headers_res = got_headers_future.as_mut(), if !got_headers_future.is_terminated() && throttler.is_ready() => {
                     // The reason we want to poll headers in this function is
                     // to exit early in case an error is returned during replays.
+                    throttler.as_mut().consume();
                     let headers = crate::shortcircuit!(got_headers_res);
                     crate::shortcircuit!(self.handle_response_headers(headers));
                 },
@@ -346,6 +372,7 @@ where
                         }
                     }
                 }
+                _ = throttler.as_mut().next(), if !throttler.is_ready() => {}
             }
         }
     }
@@ -356,6 +383,7 @@ where
         parent_span_context: &ServiceInvocationSpanContext,
         mut http_stream_tx: InvokerRequestStreamSender,
         http_stream_rx: &mut ResponseStreamState,
+        mut throttler: Pin<&mut Throttler>,
     ) -> TerminalLoopState<()> {
         loop {
             tokio::select! {
@@ -380,7 +408,8 @@ where
                         },
                     }
                 },
-                chunk = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)) => {
+                chunk = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)), if throttler.is_ready() => {
+                    throttler.as_mut().consume();
                     match crate::shortcircuit!(chunk) {
                         ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(parts)),
                         ResponseChunk::Data(buf) => crate::shortcircuit!(self.handle_read(parent_span_context, buf)),
@@ -390,6 +419,7 @@ where
                         }
                     }
                 },
+                _ = throttler.as_mut().next(), if !throttler.is_ready() => {}
                 _ = tokio::time::sleep(self.invocation_task.inactivity_timeout) => {
                     debug!("Inactivity detected, going to suspend invocation");
                     // Just return. This will drop the invoker_rx and http_stream_tx,
@@ -404,23 +434,46 @@ where
         &mut self,
         parent_span_context: &ServiceInvocationSpanContext,
         http_stream_rx: &mut ResponseStreamState,
+        mut throttler: Pin<&mut Throttler>,
     ) -> TerminalLoopState<()> {
+        let mut read_next_chunk = true;
         loop {
             tokio::select! {
-                chunk = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)) => {
+                chunk = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)), if read_next_chunk => {
+                    // don't read again until all buffered messages has been consumed
+                    // to force a back pressure on the read stream
+                    read_next_chunk = false;
                     match crate::shortcircuit!(chunk) {
                         ResponseChunk::Parts(parts) => crate::shortcircuit!(self.handle_response_headers(parts)),
-                        ResponseChunk::Data(buf) => crate::shortcircuit!(self.handle_read(parent_span_context, buf)),
+                        ResponseChunk::Data(buf) => self.decoder.push(buf),
                         ResponseChunk::End => {
                             // Response stream was closed without SuspensionMessage, EndMessage or ErrorMessage
                             return TerminalLoopState::Failed(InvokerError::SdkV2(SdkInvocationErrorV2::unknown()))
                         }
                     }
                 },
+                _ = throttler.as_mut().next(), if !throttler.is_ready() => {}
                 _ = tokio::time::sleep(self.invocation_task.abort_timeout) => {
                     warn!("Inactivity detected, going to close invocation");
                     return TerminalLoopState::Failed(InvokerError::AbortTimeoutFired(self.invocation_task.abort_timeout.into()))
                 },
+            }
+
+            if throttler.is_ready() {
+                throttler.as_mut().consume();
+                match crate::shortcircuit!(self.decoder.consume_next()) {
+                    Some((frame_header, frame)) => {
+                        crate::shortcircuit!(self.handle_message(
+                            parent_span_context,
+                            frame_header,
+                            frame
+                        ));
+                    }
+                    None => {
+                        // we are done consuming messages, read next chunk
+                        read_next_chunk = true;
+                    }
+                }
             }
         }
     }
@@ -581,9 +634,12 @@ where
     ) -> TerminalLoopState<()> {
         self.decoder.push(buf);
 
+        debug!("Consuming message");
         while let Some((frame_header, frame)) = crate::shortcircuit!(self.decoder.consume_next()) {
+            debug!("Received message: {:?}", frame);
             crate::shortcircuit!(self.handle_message(parent_span_context, frame_header, frame));
         }
+        debug!("Consumed message");
 
         TerminalLoopState::Continue(())
     }
