@@ -104,6 +104,7 @@ struct DefaultInvocationTaskRunner<EE, Schemas> {
     client: ServiceClient,
     entry_enricher: EE,
     schemas: Live<Schemas>,
+    action_token_bucket: Option<TokenBucket>,
 }
 
 impl<IR, EE, Schemas> InvocationTaskRunner<IR> for DefaultInvocationTaskRunner<EE, Schemas>
@@ -147,6 +148,7 @@ where
                     self.schemas.clone(),
                     invoker_tx,
                     invoker_rx,
+                    self.action_token_bucket.clone(),
                 )
                 .run(input_journal),
             )
@@ -180,6 +182,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
         client: ServiceClient,
         entry_enricher: EE,
         invocation_token_bucket: Option<TokenBucket>,
+        action_token_bucket: Option<TokenBucket>,
     ) -> Service<IR, EE, Schemas>
     where
         IR: InvocationReader + Clone + Send + Sync + 'static,
@@ -203,6 +206,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
                     client,
                     entry_enricher,
                     schemas: deployment_metadata_resolver,
+                    action_token_bucket,
                 },
                 invocation_tasks: Default::default(),
                 retry_timers: Default::default(),
@@ -220,6 +224,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
         entry_enricher: EE,
         schemas: Live<Schemas>,
         invocation_token_bucket: Option<TokenBucket>,
+        action_token_bucket: Option<TokenBucket>,
     ) -> Result<Service<IR, EE, Schemas>, BuildError>
     where
         IR: InvocationReader + Clone + Send + Sync + 'static,
@@ -236,6 +241,7 @@ impl<IR, EE, Schemas> Service<IR, EE, Schemas> {
             client,
             entry_enricher,
             invocation_token_bucket,
+            action_token_bucket,
         ))
     }
 }
@@ -1655,6 +1661,7 @@ mod tests {
             )
             .unwrap(),
             entry_enricher::test_util::MockEntryEnricher,
+            None,
             None,
         );
 
