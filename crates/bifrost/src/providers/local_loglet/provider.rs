@@ -12,7 +12,7 @@ use std::collections::{HashMap, hash_map};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 use tracing::debug;
 
 use restate_types::config::LocalLogletOptions;
@@ -47,23 +47,26 @@ impl LogletProviderFactory for Factory {
     async fn create(self: Box<Self>) -> Result<Arc<dyn LogletProvider>, OperationError> {
         metric_definitions::describe_metrics();
         let Factory { options } = *self;
-        let log_store = RocksDbLogStore::create(options.clone())
-            .await
-            .map_err(OperationError::other)?;
-        let log_writer = log_store.create_writer().start(options)?;
+
         debug!("Started a bifrost local loglet provider");
         Ok(Arc::new(LocalLogletProvider {
-            log_store,
+            options,
+            log_store_bundle: Mutex::new(None),
             active_loglets: Default::default(),
-            log_writer,
         }))
     }
 }
 
-pub(crate) struct LocalLogletProvider {
+#[derive(Clone)]
+struct RocksDbLogStoreBundle {
     log_store: RocksDbLogStore,
-    active_loglets: Mutex<HashMap<(LogId, SegmentIndex), Arc<LocalLoglet>>>,
     log_writer: RocksDbLogWriterHandle,
+}
+
+pub(crate) struct LocalLogletProvider {
+    options: BoxLiveLoad<LocalLogletOptions>,
+    log_store_bundle: Mutex<Option<RocksDbLogStoreBundle>>,
+    active_loglets: Mutex<HashMap<(LogId, SegmentIndex), Arc<LocalLoglet>>>,
 }
 
 #[async_trait]
@@ -74,17 +77,38 @@ impl LogletProvider for LocalLogletProvider {
         segment_index: SegmentIndex,
         params: &LogletParams,
     ) -> Result<Arc<dyn Loglet>, Error> {
-        let mut guard = self.active_loglets.lock();
+        let mut guard = self.active_loglets.lock().await;
         let loglet = match guard.entry((log_id, segment_index)) {
             hash_map::Entry::Vacant(entry) => {
+                let mut bundle_guard = self.log_store_bundle.lock().await;
+                let bundle = match &*bundle_guard {
+                    Some(bundle) => bundle.clone(),
+                    None => {
+                        debug!("Creating local loglet log store");
+                        let log_store = RocksDbLogStore::create(self.options.clone())
+                            .await
+                            .map_err(OperationError::other)?;
+
+                        let log_writer = log_store.create_writer().start(self.options.clone())?;
+
+                        let bundle = RocksDbLogStoreBundle {
+                            log_store,
+                            log_writer,
+                        };
+
+                        *bundle_guard = Some(bundle.clone());
+                        bundle
+                    }
+                };
+
                 // Create loglet
                 // NOTE: local-loglet expects params to be a `u64` string-encoded unique identifier under the hood.
                 let loglet = LocalLoglet::create(
                     params
                         .parse()
                         .expect("loglet params can be converted into u64"),
-                    self.log_store.clone(),
-                    self.log_writer.clone(),
+                    bundle.log_store,
+                    bundle.log_writer,
                 )?;
                 let loglet = entry.insert(Arc::new(loglet));
                 Arc::clone(loglet)
