@@ -584,7 +584,7 @@ impl PartitionProcessorManager {
                                     }
                                 }
                                 Err(err) => {
-                                    warn!(%partition_id, %err, "Partition processor exited unexpectedly");
+                                    error!(%partition_id, %err, "Partition processor exited unexpectedly");
                                     RestartDelay::Exponential {
                                         start_time,
                                         last_delay: delay,
@@ -1473,7 +1473,7 @@ mod tests {
     /// more details.
     #[test(restate_core::test)]
     async fn proper_partition_processor_lifecycle() -> googletest::Result<()> {
-        let mut nodes_config = NodesConfiguration::new(Version::MIN, "test-cluster".to_owned());
+        let mut nodes_config = NodesConfiguration::new_for_testing();
         let node_id = GenerationalNodeId::new(42, 42);
         let node_config = NodeConfig::builder()
             .name("42".to_owned())

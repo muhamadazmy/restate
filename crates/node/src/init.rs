@@ -16,7 +16,7 @@ use restate_types::config::Configuration;
 use restate_types::errors::MaybeRetryableError;
 use restate_types::metadata_store::keys::NODES_CONFIG_KEY;
 use restate_types::nodes_config::{
-    MetadataServerConfig, MetadataServerState, NodeConfig, NodesConfiguration,
+    ClusterFingerprint, MetadataServerConfig, MetadataServerState, NodeConfig, NodesConfiguration,
 };
 use restate_types::retries::RetryPolicy;
 use std::sync::Arc;
@@ -306,6 +306,12 @@ impl<'a> NodeInit<'a> {
                     };
 
                     nodes_config.upsert_node(my_node_config);
+                    // generate a new cluster fingerprint if the old configuration didn't have one.
+                    // This is an automatic migration step for clusters created before v1.5.0.
+                    if nodes_config.cluster_fingerprint().is_none() {
+                        nodes_config.set_cluster_fingerprint(ClusterFingerprint::generate());
+                    }
+
                     nodes_config.increment_version();
 
                     Ok(nodes_config)
@@ -324,7 +330,7 @@ mod tests {
     use googletest::matchers::{contains_substring, displays_as, err};
     use restate_core::TestCoreEnvBuilder;
     use restate_types::config::{Configuration, set_current_config};
-    use restate_types::nodes_config::{NodeConfig, NodesConfiguration};
+    use restate_types::nodes_config::{ClusterFingerprint, NodeConfig, NodesConfiguration};
     use restate_types::{GenerationalNodeId, PlainNodeId, Version};
 
     #[test_log::test(restate_core::test)]
@@ -343,7 +349,8 @@ mod tests {
             .address("http://localhost:1337".parse().unwrap())
             .roles(EnumSet::default())
             .build();
-        let mut nodes_configuration = NodesConfiguration::new(Version::MIN, cluster_name);
+        let mut nodes_configuration =
+            NodesConfiguration::new(Version::MIN, cluster_name, ClusterFingerprint::generate());
         nodes_configuration.upsert_node(node_config);
 
         let builder = TestCoreEnvBuilder::with_incoming_only_connector()
@@ -373,7 +380,11 @@ mod tests {
         config.common.set_node_name(&node_name);
         set_current_config(config);
 
-        let nodes_configuration = NodesConfiguration::new(Version::MIN, other_cluster_name);
+        let nodes_configuration = NodesConfiguration::new(
+            Version::MIN,
+            other_cluster_name,
+            ClusterFingerprint::generate(),
+        );
 
         let builder = TestCoreEnvBuilder::with_incoming_only_connector()
             .set_nodes_config(nodes_configuration);
