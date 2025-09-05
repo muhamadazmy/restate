@@ -488,6 +488,15 @@ impl InvocationId {
         buf[size_of::<PartitionKey>()..].copy_from_slice(&uuid);
         pk.len() + uuid.len()
     }
+
+    /// Generate random seed to feed RNG in SDKs.
+    pub fn to_random_seed(&self) -> u64 {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        self.to_bytes().hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 impl From<InvocationId> for Bytes {
@@ -714,37 +723,6 @@ impl From<(InvocationId, EntryIndex)> for JournalEntryId {
 }
 
 impl WithInvocationId for JournalEntryId {
-    fn invocation_id(&self) -> InvocationId {
-        self.invocation_id
-    }
-}
-
-#[derive(Eq, Hash, PartialEq, Clone, Copy, Debug)]
-pub struct JournalEventId {
-    invocation_id: InvocationId,
-    event_index: EntryIndex,
-}
-
-impl JournalEventId {
-    pub const fn from_parts(invocation_id: InvocationId, event_index: EntryIndex) -> Self {
-        Self {
-            invocation_id,
-            event_index,
-        }
-    }
-
-    pub fn event_index(&self) -> EntryIndex {
-        self.event_index
-    }
-}
-
-impl From<(InvocationId, EntryIndex)> for JournalEventId {
-    fn from(value: (InvocationId, EntryIndex)) -> Self {
-        Self::from_parts(value.0, value.1)
-    }
-}
-
-impl WithInvocationId for JournalEventId {
     fn invocation_id(&self) -> InvocationId {
         self.invocation_id
     }

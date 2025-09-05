@@ -53,7 +53,7 @@ impl<T: prost::Message + 'static> StorageEncode for ProtobufStorageWrapper<T> {
 }
 
 impl<T: prost::Message + Default> StorageDecode for ProtobufStorageWrapper<T> {
-    fn decode<B: bytes::Buf>(
+    fn decode<B: Buf>(
         buf: &mut B,
         kind: restate_types::storage::StorageCodecKind,
     ) -> Result<Self, StorageDecodeError>
@@ -140,7 +140,7 @@ pub mod v1 {
         use restate_types::logs::Lsn;
         use restate_types::service_protocol::ServiceProtocolVersion;
         use restate_types::time::MillisSinceEpoch;
-        use restate_types::{GenerationalNodeId, journal_events, journal_v2};
+        use restate_types::{GenerationalNodeId, journal_v2};
 
         use super::dedup_sequence_number::Variant;
         use super::enriched_entry_header::{
@@ -172,7 +172,6 @@ pub mod v1 {
             outbox_message, promise, response_result, source, span_relation,
             submit_notification_sink, timer, virtual_object_status,
         };
-        use super::{Event, event};
         use crate::invocation_status_table::{CompletionRangeEpochMap, JournalMetadata};
         use crate::protobuf_types::ConversionError;
 
@@ -420,11 +419,11 @@ pub mod v1 {
                     inbox_sequence_number,
                     journal_length,
                     commands,
-                    events,
                     deployment_id,
                     service_protocol_version,
                     current_invocation_epoch,
                     trim_points,
+                    random_seed,
                     waiting_for_completions,
                     waiting_for_signal_indexes,
                     waiting_for_signal_names,
@@ -482,6 +481,7 @@ pub mod v1 {
                                             .unwrap_or_default()
                                             .try_into()?,
                                         idempotency_key: idempotency_key.map(ByteString::from),
+                                        random_seed,
                                     },
                             },
                         ))
@@ -509,6 +509,7 @@ pub mod v1 {
                                             .unwrap_or_default()
                                             .try_into()?,
                                         idempotency_key: idempotency_key.map(ByteString::from),
+                                        random_seed,
                                     },
                             },
                         ))
@@ -523,7 +524,6 @@ pub mod v1 {
                                 journal_metadata: crate::invocation_status_table::JournalMetadata {
                                     length: journal_length,
                                     commands,
-                                    events,
                                     span_context: expect_or_fail!(span_context)?.try_into()?,
                                 },
                                 pinned_deployment: derive_pinned_deployment(
@@ -547,6 +547,7 @@ pub mod v1 {
                                             (trim_point.completion_id, trim_point.invocation_epoch)
                                         }),
                                     ),
+                                random_seed,
                             },
                         ))
                     }
@@ -560,7 +561,6 @@ pub mod v1 {
                                 journal_metadata: crate::invocation_status_table::JournalMetadata {
                                     length: journal_length,
                                     commands,
-                                    events,
                                     span_context: expect_or_fail!(span_context)?.try_into()?,
                                 },
                                 pinned_deployment: derive_pinned_deployment(
@@ -584,6 +584,7 @@ pub mod v1 {
                                             (trim_point.completion_id, trim_point.invocation_epoch)
                                         }),
                                     ),
+                                random_seed,
                             },
                             waiting_for_notifications: waiting_for_completions
                                 .into_iter()
@@ -613,7 +614,6 @@ pub mod v1 {
                                 journal_metadata: crate::invocation_status_table::JournalMetadata {
                                     length: journal_length,
                                     commands,
-                                    events,
                                     span_context: expect_or_fail!(span_context)?.try_into()?,
                                 },
                                 pinned_deployment: derive_pinned_deployment(
@@ -637,6 +637,7 @@ pub mod v1 {
                                             (trim_point.completion_id, trim_point.invocation_epoch)
                                         }),
                                     ),
+                                random_seed,
                             },
                         ))
                     }
@@ -659,13 +660,13 @@ pub mod v1 {
                                 journal_metadata: crate::invocation_status_table::JournalMetadata {
                                     length: journal_length,
                                     commands,
-                                    events,
                                     span_context: expect_or_fail!(span_context)?.try_into()?,
                                 },
                                 pinned_deployment: derive_pinned_deployment(
                                     deployment_id,
                                     service_protocol_version,
                                 )?,
+                                random_seed,
                             },
                         ))
                     }
@@ -695,6 +696,7 @@ pub mod v1 {
                                     completion_retention_duration,
                                     journal_retention_duration,
                                     idempotency_key,
+                                    random_seed,
                                 },
                         },
                     ) => InvocationStatusV2 {
@@ -730,7 +732,6 @@ pub mod v1 {
                         inbox_sequence_number: None,
                         journal_length: 0,
                         commands: 0,
-                        events: 0,
                         deployment_id: None,
                         service_protocol_version: None,
                         hotfix_apply_cancellation_after_deployment_is_pinned: false,
@@ -740,6 +741,7 @@ pub mod v1 {
                         waiting_for_signal_indexes: vec![],
                         waiting_for_signal_names: vec![],
                         result: None,
+                        random_seed,
                     },
                     crate::invocation_status_table::InvocationStatus::Inboxed(
                         crate::invocation_status_table::InboxedInvocation {
@@ -757,6 +759,7 @@ pub mod v1 {
                                     completion_retention_duration,
                                     journal_retention_duration,
                                     idempotency_key,
+                                    random_seed,
                                 },
                             inbox_sequence_number,
                         },
@@ -793,7 +796,6 @@ pub mod v1 {
                         inbox_sequence_number: Some(inbox_sequence_number),
                         journal_length: 0,
                         commands: 0,
-                        events: 0,
                         deployment_id: None,
                         service_protocol_version: None,
                         hotfix_apply_cancellation_after_deployment_is_pinned: false,
@@ -803,6 +805,7 @@ pub mod v1 {
                         waiting_for_signal_indexes: vec![],
                         waiting_for_signal_names: vec![],
                         result: None,
+                        random_seed,
                     },
                     crate::invocation_status_table::InvocationStatus::Invoked(
                         crate::invocation_status_table::InFlightInvocationMetadata {
@@ -820,6 +823,7 @@ pub mod v1 {
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             current_invocation_epoch,
                             completion_range_epoch_map,
+                            random_seed,
                         },
                     ) => {
                         let (deployment_id, service_protocol_version) = match pinned_deployment {
@@ -866,7 +870,6 @@ pub mod v1 {
                             inbox_sequence_number: None,
                             journal_length: journal_metadata.length,
                             commands: journal_metadata.commands,
-                            events: journal_metadata.events,
                             deployment_id,
                             service_protocol_version,
                             waiting_for_completions: vec![],
@@ -882,6 +885,7 @@ pub mod v1 {
                                     invocation_epoch,
                                 })
                                 .collect(),
+                            random_seed,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Suspended {
@@ -901,6 +905,7 @@ pub mod v1 {
                                 hotfix_apply_cancellation_after_deployment_is_pinned,
                                 current_invocation_epoch,
                                 completion_range_epoch_map,
+                                random_seed,
                             },
                         waiting_for_notifications,
                     } => {
@@ -965,7 +970,6 @@ pub mod v1 {
                             inbox_sequence_number: None,
                             journal_length: journal_metadata.length,
                             commands: journal_metadata.commands,
-                            events: journal_metadata.events,
                             deployment_id,
                             service_protocol_version,
                             waiting_for_completions,
@@ -981,6 +985,7 @@ pub mod v1 {
                                     invocation_epoch,
                                 })
                                 .collect(),
+                            random_seed,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Paused(
@@ -999,6 +1004,7 @@ pub mod v1 {
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             current_invocation_epoch,
                             completion_range_epoch_map,
+                            random_seed,
                         },
                     ) => {
                         let (deployment_id, service_protocol_version) = match pinned_deployment {
@@ -1045,7 +1051,6 @@ pub mod v1 {
                             inbox_sequence_number: None,
                             journal_length: journal_metadata.length,
                             commands: journal_metadata.commands,
-                            events: journal_metadata.events,
                             deployment_id,
                             service_protocol_version,
                             waiting_for_completions: vec![],
@@ -1061,6 +1066,7 @@ pub mod v1 {
                                     invocation_epoch,
                                 })
                                 .collect(),
+                            random_seed,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Completed(
@@ -1076,6 +1082,7 @@ pub mod v1 {
                             journal_retention_duration,
                             journal_metadata,
                             pinned_deployment,
+                            random_seed,
                         },
                     ) => {
                         let (deployment_id, service_protocol_version) = match pinned_deployment {
@@ -1119,7 +1126,6 @@ pub mod v1 {
                             inbox_sequence_number: None,
                             journal_length: journal_metadata.length,
                             commands: journal_metadata.commands,
-                            events: journal_metadata.events,
                             deployment_id,
                             service_protocol_version,
                             hotfix_apply_cancellation_after_deployment_is_pinned: false,
@@ -1129,6 +1135,7 @@ pub mod v1 {
                             waiting_for_signal_indexes: vec![],
                             waiting_for_signal_names: vec![],
                             result: Some(response_result.into()),
+                            random_seed,
                         }
                     }
                     crate::invocation_status_table::InvocationStatus::Free => {
@@ -1390,6 +1397,7 @@ pub mod v1 {
                     hotfix_apply_cancellation_after_deployment_is_pinned: false,
                     current_invocation_epoch: 0,
                     completion_range_epoch_map: Default::default(),
+                    random_seed: None,
                 })
             }
         }
@@ -1507,6 +1515,7 @@ pub mod v1 {
                         hotfix_apply_cancellation_after_deployment_is_pinned: false,
                         current_invocation_epoch: 0,
                         completion_range_epoch_map: Default::default(),
+                        random_seed: None,
                     },
                     waiting_for_completed_entries,
                 ))
@@ -1633,6 +1642,7 @@ pub mod v1 {
                         completion_retention_duration: completion_retention_time,
                         invocation_target,
                         journal_retention_duration: Default::default(),
+                        random_seed: None,
                     },
                 })
             }
@@ -1655,6 +1665,7 @@ pub mod v1 {
                             completion_retention_duration: completion_retention_time,
                             journal_retention_duration: _,
                             idempotency_key,
+                            random_seed: _,
                         },
                     inbox_sequence_number,
                 } = value;
@@ -1723,6 +1734,7 @@ pub mod v1 {
                     journal_retention_duration: Default::default(),
                     journal_metadata: JournalMetadata::empty(),
                     pinned_deployment: None,
+                    random_seed: None,
                 })
             }
         }
@@ -1744,6 +1756,7 @@ pub mod v1 {
                     journal_metadata: _,
                     // The old invocation status table doesn't support PinnedDeployment on Completed
                     pinned_deployment: _,
+                    random_seed: _,
                 } = value;
 
                 Completed {
@@ -1771,7 +1784,6 @@ pub mod v1 {
                 Ok(crate::invocation_status_table::JournalMetadata {
                     length,
                     commands: 0,
-                    events: 0,
                     span_context,
                 })
             }
@@ -3590,74 +3602,6 @@ pub mod v1 {
                     append_time,
                     call_or_send_command_metadata,
                     notification_id,
-                }
-            }
-        }
-
-        impl From<journal_events::EventType> for event::EventType {
-            fn from(value: journal_events::EventType) -> Self {
-                match value {
-                    journal_events::EventType::TransientError => Self::TransientError,
-                    journal_events::EventType::Paused => Self::Paused,
-                    journal_events::EventType::Unknown => Self::UnknownEvent,
-                }
-            }
-        }
-
-        impl From<event::EventType> for journal_events::EventType {
-            fn from(value: event::EventType) -> Self {
-                match value {
-                    event::EventType::TransientError => Self::TransientError,
-                    event::EventType::Paused => Self::Paused,
-                    event::EventType::UnknownEvent => Self::Unknown,
-                }
-            }
-        }
-
-        impl TryFrom<Event> for crate::journal_events::StoredEvent {
-            type Error = ConversionError;
-
-            fn try_from(value: Event) -> Result<Self, Self::Error> {
-                let Event {
-                    event_type,
-                    event_deduplication_hash,
-                    content,
-                    append_time,
-                    after_journal_entry_index,
-                } = value;
-
-                let event_type = journal_events::EventType::from(
-                    event::EventType::try_from(event_type).unwrap_or_default(),
-                );
-
-                let mut event = journal_events::raw::RawEvent::new(event_type, content);
-                if let Some(deduplication_hash) = event_deduplication_hash {
-                    event.set_deduplication_hash(deduplication_hash);
-                }
-
-                Ok(Self {
-                    after_journal_entry_index,
-                    append_time: MillisSinceEpoch::from(append_time),
-                    event,
-                })
-            }
-        }
-
-        impl From<crate::journal_events::StoredEvent> for Event {
-            fn from(
-                crate::journal_events::StoredEvent {
-                    after_journal_entry_index,
-                    append_time,
-                    event,
-                }: crate::journal_events::StoredEvent,
-            ) -> Self {
-                let (ty, deduplication_hash, value) = event.into_inner();
-                Self {
-                    event_type: event::EventType::from(ty).into(),
-                    event_deduplication_hash: deduplication_hash,
-                    content: value,
-                    append_time: append_time.into(),
-                    after_journal_entry_index,
                 }
             }
         }
