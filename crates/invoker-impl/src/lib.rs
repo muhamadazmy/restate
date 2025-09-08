@@ -107,6 +107,7 @@ struct DefaultInvocationTaskRunner<EE, Schemas> {
     client: ServiceClient,
     entry_enricher: EE,
     schemas: Live<Schemas>,
+    action_token_bucket: Option<TokenBucket>,
 }
 
 impl<IR, EE, Schemas> InvocationTaskRunner<IR> for DefaultInvocationTaskRunner<EE, Schemas>
@@ -151,6 +152,7 @@ where
                     invoker_tx,
                     invoker_rx,
                     opts.experimental_features_allow_protocol_v6(),
+                    self.action_token_bucket.clone(),
                 )
                 .run(input_journal),
             )
@@ -185,6 +187,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
         client: ServiceClient,
         entry_enricher: TEntryEnricher,
         invocation_token_bucket: Option<TokenBucket>,
+        action_token_bucket: Option<TokenBucket>,
     ) -> Service<StorageReader, TEntryEnricher, Schemas>
     where
         StorageReader: InvocationReader + Clone + Send + Sync + 'static,
@@ -208,6 +211,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
                     client,
                     entry_enricher,
                     schemas: Live::clone(&schemas),
+                    action_token_bucket,
                 },
                 schemas,
                 invocation_tasks: Default::default(),
@@ -226,6 +230,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
         entry_enricher: TEntryEnricher,
         schemas: Live<Schemas>,
         invocation_token_bucket: Option<TokenBucket>,
+        action_token_bucket: Option<TokenBucket>,
     ) -> Result<Service<StorageReader, TEntryEnricher, Schemas>, BuildError>
     where
         StorageReader: InvocationReader + Clone + Send + Sync + 'static,
@@ -242,6 +247,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
             client,
             entry_enricher,
             invocation_token_bucket,
+            action_token_bucket,
         ))
     }
 }
@@ -406,7 +412,6 @@ where
                 invocation_throttler.consume();
                 self.handle_invoke(options, invoke_input_command.partition, invoke_input_command.invocation_id, invoke_input_command.invocation_epoch, invoke_input_command.invocation_target, invoke_input_command.journal);
             },
-
             Some(invocation_task_msg) = self.invocation_tasks_rx.recv() => {
                 let InvocationTaskOutput {
                     invocation_id,
@@ -1774,6 +1779,7 @@ mod tests {
             )
             .unwrap(),
             entry_enricher::test_util::MockEntryEnricher,
+            None,
             None,
         );
 

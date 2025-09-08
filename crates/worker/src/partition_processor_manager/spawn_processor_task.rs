@@ -46,6 +46,7 @@ pub struct SpawnPartitionProcessorTask {
     partition_store_manager: PartitionStoreManager,
     fast_forward_lsn: Option<Lsn>,
     invocation_token_bucket: Option<TokenBucket>,
+    action_token_bucket: Option<TokenBucket>,
 }
 
 impl SpawnPartitionProcessorTask {
@@ -59,6 +60,7 @@ impl SpawnPartitionProcessorTask {
         partition_store_manager: PartitionStoreManager,
         fast_forward_lsn: Option<Lsn>,
         invocation_token_bucket: Option<TokenBucket>,
+        action_token_bucket: Option<TokenBucket>,
     ) -> Self {
         Self {
             task_name,
@@ -69,6 +71,7 @@ impl SpawnPartitionProcessorTask {
             partition_store_manager,
             fast_forward_lsn,
             invocation_token_bucket,
+            action_token_bucket,
         }
     }
 
@@ -96,6 +99,7 @@ impl SpawnPartitionProcessorTask {
             partition_store_manager,
             fast_forward_lsn,
             invocation_token_bucket,
+            action_token_bucket,
         } = self;
 
         let config = configuration.pinned();
@@ -110,6 +114,7 @@ impl SpawnPartitionProcessorTask {
             EntryEnricher::new(schema.clone()),
             schema,
             invocation_token_bucket,
+            action_token_bucket,
         )?;
 
         let status_reader = invoker.status_reader();

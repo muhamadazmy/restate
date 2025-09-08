@@ -138,6 +138,7 @@ pub struct PartitionProcessorManager {
 
     // throttling
     invocation_token_bucket: Option<TokenBucket>,
+    action_token_bucket: Option<TokenBucket>,
 }
 
 type SnapshotResult = Result<SnapshotCreated, SnapshotError>;
@@ -258,11 +259,26 @@ impl PartitionProcessorManager {
         let ppm_svc_rx = router_builder.register_service(24, BackPressureMode::PushBack);
         let pp_rpc_rx = router_builder.register_service(24, BackPressureMode::PushBack);
 
-        let invocation_token_bucket = updateable_config
-            .pinned()
+        let config = updateable_config.pinned();
+        let invocation_token_bucket =
+            config
+                .worker
+                .invoker
+                .invocation_throttling
+                .as_ref()
+                .map(|opts| {
+                    let bucket = TokenBucket::from_parts(
+                        gardal::Limit::per_second_and_burst(opts.rate, opts.burst),
+                        gardal::TokioClock::default(),
+                    );
+                    bucket.add_tokens(opts.burst.get());
+                    bucket
+                });
+
+        let action_token_bucket = config
             .worker
             .invoker
-            .invocation_throttling
+            .action_throttling
             .as_ref()
             .map(|opts| {
                 let bucket = TokenBucket::from_parts(
@@ -299,6 +315,7 @@ impl PartitionProcessorManager {
             partition_table: Metadata::with_current(|m| m.updateable_partition_table()),
             wait_for_partition_table_update: false,
             invocation_token_bucket,
+            action_token_bucket,
         }
     }
 
@@ -1293,6 +1310,7 @@ impl PartitionProcessorManager {
             self.partition_store_manager.clone(),
             self.fast_forward_on_startup.remove(&partition_id),
             self.invocation_token_bucket.clone(),
+            self.action_token_bucket.clone(),
         );
 
         self.asynchronous_operations
