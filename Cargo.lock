@@ -3289,6 +3289,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gardal"
+version = "0.0.1-alpha.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08b8247c95fe11f2dd5fdab7b096829e4662a0c2d8002f54dd392f9e49bf8791"
+dependencies = [
+ "futures",
+ "likely_stable",
+ "pin-project-lite",
+ "tokio",
+ "tokio-hrtime",
+]
+
+[[package]]
 name = "generator"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3670,7 +3683,7 @@ dependencies = [
  "hyper",
  "libc",
  "pin-project-lite",
- "socket2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -4391,7 +4404,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -4430,6 +4443,15 @@ dependencies = [
  "libc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "likely_stable"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d61f7017d8abea1fc23ff7f01a8147b2656dea3aeb24d519aab6e2177eaf671c"
+dependencies = [
+ "rustc_version",
 ]
 
 [[package]]
@@ -6064,7 +6086,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.0",
  "rustls",
- "socket2",
+ "socket2 0.5.10",
  "thiserror 2.0.12",
  "tokio",
  "tracing",
@@ -6099,7 +6121,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -6983,6 +7005,7 @@ dependencies = [
  "bytestring",
  "codederror",
  "futures",
+ "gardal",
  "googletest",
  "http 1.3.1",
  "http-body 1.0.1",
@@ -6991,6 +7014,7 @@ dependencies = [
  "itertools 0.14.0",
  "metrics",
  "opentelemetry",
+ "pin-project-lite",
  "restate-core",
  "restate-errors",
  "restate-futures-util",
@@ -7836,6 +7860,7 @@ dependencies = [
  "derive_more",
  "enumset",
  "futures",
+ "gardal",
  "googletest",
  "humantime",
  "itertools 0.14.0",
@@ -8784,6 +8809,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "socket2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "233504af464074f9d066d7b5416c5f9b894a5862a6506e306f7b816cdd6f1807"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "spin"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9259,9 +9294,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.46.1"
+version = "1.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc3a2344dafbe23a245241fe8b09735b521110d30fcefbbd5feb1797ca35d17"
+checksum = "89e49afdadebb872d3145a5638b59eb0691ea23e46ca484037cfab3b76b95038"
 dependencies = [
  "backtrace",
  "bytes",
@@ -9272,10 +9307,23 @@ dependencies = [
  "pin-project-lite",
  "signal-hook-registry",
  "slab",
- "socket2",
+ "socket2 0.6.0",
  "tokio-macros",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "tokio-hrtime"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72854b925496f2973244d604aff15b661da2a91833b497932d9d607e66f18fe9"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "pin-project-lite",
+ "tokio",
+ "windows",
 ]
 
 [[package]]
@@ -9402,7 +9450,7 @@ dependencies = [
  "prost",
  "rustls-native-certs",
  "rustls-pemfile",
- "socket2",
+ "socket2 0.5.10",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
