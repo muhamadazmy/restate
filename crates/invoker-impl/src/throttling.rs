@@ -56,6 +56,7 @@ pin_project_lite::pin_project! {
     }
 }
 
+#[cfg(test)]
 impl Throttler<TokioClock> {
     pub fn unlimited() -> Self {
         Self::new(None)
