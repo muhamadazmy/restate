@@ -30,11 +30,11 @@ bytes = { workspace = true }
 bytestring = { workspace = true }
 codederror = { workspace = true }
 futures = { workspace = true }
+gardal = { workspace = true , features = ["async", "tokio-hrtime"]}
 humantime = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
-gardal = { workspace = true , features = ["async", "tokio-hrtime"]}
 tokio-stream = { workspace = true }
 itertools = { workspace = true }
 metrics = { workspace = true }
