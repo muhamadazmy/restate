@@ -16,28 +16,8 @@ mod metric_definitions;
 mod quota;
 mod state_machine_manager;
 mod status_store;
+mod throttling;
 
-use input_command::{InputCommand, InvokeCommand};
-use invocation_state_machine::InvocationStateMachine;
-use invocation_task::InvocationTask;
-use invocation_task::{InvocationTaskOutput, InvocationTaskOutputInner};
-use metrics::counter;
-use restate_core::cancellation_watcher;
-use restate_errors::warn_it;
-use restate_invoker_api::{
-    Effect, EffectKind, EntryEnricher, InvocationErrorReport, InvocationStatusReport,
-    InvokeInputJournal,
-};
-use restate_queue::SegmentQueue;
-use restate_timer_queue::TimerQueue;
-use restate_types::config::{InvokerOptions, ServiceClientOptions};
-use restate_types::identifiers::PartitionLeaderEpoch;
-use restate_types::identifiers::{DeploymentId, InvocationId, PartitionKey, WithPartitionKey};
-use restate_types::journal::enriched::EnrichedRawEntry;
-use restate_types::journal::{Completion, EntryIndex};
-use restate_types::live::{Live, LiveLoad};
-use restate_types::schema::deployment::DeploymentResolver;
-use status_store::InvocationStatusStore;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::RangeInclusive;
@@ -45,30 +25,56 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::SystemTime;
 use std::{cmp, panic};
+
+use metrics::counter;
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinSet};
 use tracing::{debug, trace};
 use tracing::{error, instrument};
 
-use crate::error::SdkInvocationErrorV2;
-use crate::invocation_state_machine::OnTaskError;
-use crate::metric_definitions::{
-    INVOKER_ENQUEUE, INVOKER_INVOCATION_TASKS, TASK_OP_COMPLETED, TASK_OP_FAILED, TASK_OP_STARTED,
-    TASK_OP_SUSPENDED,
-};
-use error::InvokerError;
-pub use input_command::ChannelStatusReader;
-pub use input_command::InvokerHandle;
+use restate_core::cancellation_watcher;
+use restate_errors::warn_it;
 use restate_invoker_api::invocation_reader::InvocationReader;
+use restate_invoker_api::{
+    Effect, EffectKind, EntryEnricher, InvocationErrorReport, InvocationStatusReport,
+    InvokeInputJournal,
+};
+use restate_queue::SegmentQueue;
 use restate_service_client::{AssumeRoleCacheMode, ServiceClient};
+use restate_timer_queue::TimerQueue;
+use restate_types::config::{InvokerOptions, ServiceClientOptions};
 use restate_types::deployment::PinnedDeployment;
+use restate_types::identifiers::PartitionLeaderEpoch;
+use restate_types::identifiers::{DeploymentId, InvocationId, PartitionKey, WithPartitionKey};
 use restate_types::invocation::{InvocationEpoch, InvocationTarget};
+use restate_types::journal::enriched::EnrichedRawEntry;
+use restate_types::journal::{Completion, EntryIndex};
 use restate_types::journal_events::raw::RawEvent;
 use restate_types::journal_events::{Event, PausedEvent, TransientErrorEvent};
 use restate_types::journal_v2;
 use restate_types::journal_v2::raw::{RawCommand, RawEntry, RawNotification};
 use restate_types::journal_v2::{CommandIndex, EntryMetadata, NotificationId};
+use restate_types::live::{Live, LiveLoad};
+use restate_types::schema::deployment::DeploymentResolver;
 use restate_types::schema::invocation_target::InvocationTargetResolver;
+
+use crate::error::InvokerError;
+use crate::error::SdkInvocationErrorV2;
+use crate::input_command::{InputCommand, InvokeCommand};
+use crate::invocation_state_machine::InvocationStateMachine;
+use crate::invocation_state_machine::OnTaskError;
+use crate::invocation_task::InvocationTask;
+use crate::invocation_task::{InvocationTaskOutput, InvocationTaskOutputInner};
+use crate::metric_definitions::{
+    INVOKER_ENQUEUE, INVOKER_INVOCATION_TASKS, TASK_OP_COMPLETED, TASK_OP_FAILED, TASK_OP_STARTED,
+    TASK_OP_SUSPENDED,
+};
+use crate::status_store::InvocationStatusStore;
+use crate::throttling::Throttler;
+
+pub use input_command::ChannelStatusReader;
+pub use input_command::InvokerHandle;
+pub use throttling::TokenBucket;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Notification {
@@ -168,6 +174,7 @@ pub struct Service<StorageReader, EntryEnricher, Schemas> {
     // which is a rather internal thing we have only for mocking.
     inner:
         ServiceInner<DefaultInvocationTaskRunner<EntryEnricher, Schemas>, Schemas, StorageReader>,
+    invocation_token_bucket: Option<TokenBucket>,
 }
 
 impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnricher, Schemas> {
@@ -177,6 +184,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
         schemas: Live<Schemas>,
         client: ServiceClient,
         entry_enricher: TEntryEnricher,
+        invocation_token_bucket: Option<TokenBucket>,
     ) -> Service<StorageReader, TEntryEnricher, Schemas>
     where
         StorageReader: InvocationReader + Clone + Send + Sync + 'static,
@@ -208,6 +216,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
             },
+            invocation_token_bucket,
         }
     }
 
@@ -216,6 +225,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
         invoker_options: &InvokerOptions,
         entry_enricher: TEntryEnricher,
         schemas: Live<Schemas>,
+        invocation_token_bucket: Option<TokenBucket>,
     ) -> Result<Service<StorageReader, TEntryEnricher, Schemas>, BuildError>
     where
         StorageReader: InvocationReader + Clone + Send + Sync + 'static,
@@ -231,6 +241,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
             schemas,
             client,
             entry_enricher,
+            invocation_token_bucket,
         ))
     }
 }
@@ -262,11 +273,14 @@ where
         let Service {
             tmp_dir,
             inner: mut service,
+            invocation_token_bucket,
             ..
         } = self;
 
         let shutdown = cancellation_watcher();
         tokio::pin!(shutdown);
+
+        let mut invocation_throttler = std::pin::pin!(Throttler::new(invocation_token_bucket));
 
         let in_memory_limit = updateable_options
             .live_load()
@@ -279,7 +293,12 @@ where
         loop {
             let options = updateable_options.live_load();
             if !service
-                .step(options, &mut segmented_input_queue, shutdown.as_mut())
+                .step(
+                    options,
+                    &mut segmented_input_queue,
+                    invocation_throttler.as_mut(),
+                    shutdown.as_mut(),
+                )
                 .await
             {
                 break;
@@ -329,6 +348,7 @@ where
         &mut self,
         options: &InvokerOptions,
         segmented_input_queue: &mut SegmentQueue<Box<InvokeCommand>>,
+        mut invocation_throttler: Pin<&mut Throttler>,
         mut shutdown: Pin<&mut F>,
     ) -> bool
     where
@@ -379,8 +399,11 @@ where
                     }
                 }
             },
-
-            Some(invoke_input_command) = segmented_input_queue.dequeue(), if !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
+            _ = invocation_throttler.as_mut().next(), if !invocation_throttler.is_ready() => {
+                // nothing to do here, just driving the stream forward.
+            },
+            Some(invoke_input_command) = segmented_input_queue.dequeue(), if invocation_throttler.is_ready() && !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
+                invocation_throttler.consume();
                 self.handle_invoke(options, invoke_input_command.partition, invoke_input_command.invocation_id, invoke_input_command.invocation_epoch, invoke_input_command.invocation_target, invoke_input_command.journal);
             },
 
@@ -1751,6 +1774,7 @@ mod tests {
             )
             .unwrap(),
             entry_enricher::test_util::MockEntryEnricher,
+            None,
         );
 
         let mut handle = service.handle();
@@ -1815,6 +1839,8 @@ mod tests {
         let shutdown = cancel_token.cancelled();
         tokio::pin!(shutdown);
 
+        let mut invocation_throttler = std::pin::pin!(Throttler::unlimited());
+
         let invocation_id_1 = InvocationId::mock_random();
         let invocation_id_2 = InvocationId::mock_random();
 
@@ -1848,7 +1874,12 @@ mod tests {
         // Now step the state machine to start the invocation
         assert!(
             service_inner
-                .step(&invoker_options, &mut segment_queue, shutdown.as_mut())
+                .step(
+                    &invoker_options,
+                    &mut segment_queue,
+                    invocation_throttler.as_mut(),
+                    shutdown.as_mut()
+                )
                 .await
         );
 
@@ -1865,7 +1896,12 @@ mod tests {
         // Step again to remove sid_1 from task queue. This should not invoke sid_2!
         assert!(
             service_inner
-                .step(&invoker_options, &mut segment_queue, shutdown.as_mut())
+                .step(
+                    &invoker_options,
+                    &mut segment_queue,
+                    invocation_throttler.as_mut(),
+                    shutdown.as_mut()
+                )
                 .await
         );
         assert!(
@@ -1887,7 +1923,12 @@ mod tests {
         // Step now should invoke sid_2
         assert!(
             service_inner
-                .step(&invoker_options, &mut segment_queue, shutdown.as_mut())
+                .step(
+                    &invoker_options,
+                    &mut segment_queue,
+                    invocation_throttler.as_mut(),
+                    shutdown.as_mut(),
+                )
                 .await
         );
         assert!(

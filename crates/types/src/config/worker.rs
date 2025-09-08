@@ -8,7 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -310,6 +310,19 @@ pub struct InvokerOptions {
     #[cfg_attr(feature = "schemars", schemars(skip))]
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     experimental_features_allow_protocol_v6: bool,
+
+    /// # Invocation throttling
+    ///
+    /// Configures rate limiting for service invocations at the node level.
+    /// This throttling mechanism uses a token bucket algorithm to control the rate
+    /// at which invocations can be processed, helping to prevent resource exhaustion
+    /// and maintain system stability under high load.
+    ///
+    /// The throttling limit is shared across all partitions running on this node,
+    /// providing a global rate limit for the entire node rather than per-partition limits.
+    /// When set to `None`, no throttling is applied and invocations are processed
+    /// without rate limiting.
+    pub invocation_throttling: Option<ThrottlingOptions>,
 }
 
 impl InvokerOptions {
@@ -371,6 +384,7 @@ impl Default for InvokerOptions {
             disable_eager_state: false,
             experimental_features_propose_events: false,
             experimental_features_allow_protocol_v6: false,
+            invocation_throttling: Default::default(),
         }
     }
 }
@@ -592,5 +606,36 @@ impl SnapshotsOptions {
 
     pub fn snapshots_dir(&self, partition_id: PartitionId) -> PathBuf {
         super::data_dir("db-snapshots").join(partition_id.to_string())
+    }
+}
+
+/// # Throttling options
+///
+/// Throttling options per invoker.
+#[derive(Debug, Clone, Serialize, Deserialize, derive_builder::Builder)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(rename = "ThrottlingOptions", default))]
+#[builder(default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ThrottlingOptions {
+    /// # Burst capacity
+    ///
+    /// The maximum number of tokens the bucket can hold.
+    /// Default: 1M
+    pub burst: NonZeroU32,
+
+    /// # Replenishment rate
+    ///
+    /// The rate in seconds at which the tokens are replenished.
+    /// Default: 100k
+    pub rate: NonZeroU32,
+}
+
+impl Default for ThrottlingOptions {
+    fn default() -> Self {
+        Self {
+            burst: NonZeroU32::new(1000000).unwrap(),
+            rate: NonZeroU32::new(100000).unwrap(),
+        }
     }
 }
