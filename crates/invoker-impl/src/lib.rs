@@ -16,6 +16,7 @@ mod metric_definitions;
 mod quota;
 mod state_machine_manager;
 mod status_store;
+mod throttling;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -69,6 +70,7 @@ use crate::metric_definitions::{
     TASK_OP_SUSPENDED,
 };
 use crate::status_store::InvocationStatusStore;
+use crate::throttling::Throttler;
 
 pub use input_command::ChannelStatusReader;
 pub use input_command::InvokerHandle;
@@ -175,6 +177,7 @@ pub struct Service<StorageReader, EntryEnricher, Schemas> {
     // which is a rather internal thing we have only for mocking.
     inner:
         ServiceInner<DefaultInvocationTaskRunner<EntryEnricher, Schemas>, Schemas, StorageReader>,
+    invocation_token_bucket: Option<TokenBucket>,
 }
 
 impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnricher, Schemas> {
@@ -184,6 +187,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
         schemas: Live<Schemas>,
         client: ServiceClient,
         entry_enricher: TEntryEnricher,
+        invocation_token_bucket: Option<TokenBucket>,
         action_token_bucket: Option<TokenBucket>,
     ) -> Service<StorageReader, TEntryEnricher, Schemas>
     where
@@ -217,6 +221,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
             },
+            invocation_token_bucket,
         }
     }
 
@@ -225,6 +230,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
         invoker_options: &InvokerOptions,
         entry_enricher: TEntryEnricher,
         schemas: Live<Schemas>,
+        invocation_token_bucket: Option<TokenBucket>,
         action_token_bucket: Option<TokenBucket>,
     ) -> Result<Service<StorageReader, TEntryEnricher, Schemas>, BuildError>
     where
@@ -241,6 +247,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
             schemas,
             client,
             entry_enricher,
+            invocation_token_bucket,
             action_token_bucket,
         ))
     }
@@ -273,11 +280,14 @@ where
         let Service {
             tmp_dir,
             inner: mut service,
+            invocation_token_bucket,
             ..
         } = self;
 
         let shutdown = cancellation_watcher();
         tokio::pin!(shutdown);
+
+        let mut invocation_throttler = std::pin::pin!(Throttler::new(invocation_token_bucket));
 
         let in_memory_limit = updateable_options
             .live_load()
@@ -290,7 +300,12 @@ where
         loop {
             let options = updateable_options.live_load();
             if !service
-                .step(options, &mut segmented_input_queue, shutdown.as_mut())
+                .step(
+                    options,
+                    &mut segmented_input_queue,
+                    invocation_throttler.as_mut(),
+                    shutdown.as_mut(),
+                )
                 .await
             {
                 break;
@@ -340,6 +355,7 @@ where
         &mut self,
         options: &InvokerOptions,
         segmented_input_queue: &mut SegmentQueue<Box<InvokeCommand>>,
+        mut invocation_throttler: Pin<&mut Throttler>,
         mut shutdown: Pin<&mut F>,
     ) -> bool
     where
@@ -390,7 +406,11 @@ where
                     }
                 }
             },
-            Some(invoke_input_command) = segmented_input_queue.dequeue(), if !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
+            _ = invocation_throttler.as_mut().next(), if !invocation_throttler.is_ready() => {
+                // nothing to do here, just driving the stream forward.
+            },
+            Some(invoke_input_command) = segmented_input_queue.dequeue(), if invocation_throttler.is_ready() && !segmented_input_queue.is_empty() && self.quota.is_slot_available() => {
+                invocation_throttler.consume();
                 self.handle_invoke(options, invoke_input_command.partition, invoke_input_command.invocation_id, invoke_input_command.invocation_epoch, invoke_input_command.invocation_target, invoke_input_command.journal);
             },
             Some(invocation_task_msg) = self.invocation_tasks_rx.recv() => {
@@ -1498,6 +1518,7 @@ mod tests {
 
     use crate::error::{InvokerError, SdkInvocationErrorV2};
     use crate::quota::InvokerConcurrencyQuota;
+    use crate::throttling::Throttler;
     use restate_core::{TaskCenter, TaskKind};
     use restate_invoker_api::InvokerHandle;
     use restate_invoker_api::entry_enricher;
@@ -1761,6 +1782,7 @@ mod tests {
             .unwrap(),
             entry_enricher::test_util::MockEntryEnricher,
             None,
+            None,
         );
 
         let mut handle = service.handle();
@@ -1825,6 +1847,8 @@ mod tests {
         let shutdown = cancel_token.cancelled();
         tokio::pin!(shutdown);
 
+        let mut invocation_throttler = std::pin::pin!(Throttler::unlimited());
+
         let invocation_id_1 = InvocationId::mock_random();
         let invocation_id_2 = InvocationId::mock_random();
 
@@ -1858,7 +1882,12 @@ mod tests {
         // Now step the state machine to start the invocation
         assert!(
             service_inner
-                .step(&invoker_options, &mut segment_queue, shutdown.as_mut())
+                .step(
+                    &invoker_options,
+                    &mut segment_queue,
+                    invocation_throttler.as_mut(),
+                    shutdown.as_mut()
+                )
                 .await
         );
 
@@ -1875,7 +1904,12 @@ mod tests {
         // Step again to remove sid_1 from task queue. This should not invoke sid_2!
         assert!(
             service_inner
-                .step(&invoker_options, &mut segment_queue, shutdown.as_mut())
+                .step(
+                    &invoker_options,
+                    &mut segment_queue,
+                    invocation_throttler.as_mut(),
+                    shutdown.as_mut()
+                )
                 .await
         );
         assert!(
@@ -1897,7 +1931,12 @@ mod tests {
         // Step now should invoke sid_2
         assert!(
             service_inner
-                .step(&invoker_options, &mut segment_queue, shutdown.as_mut())
+                .step(
+                    &invoker_options,
+                    &mut segment_queue,
+                    invocation_throttler.as_mut(),
+                    shutdown.as_mut(),
+                )
                 .await
         );
         assert!(
