@@ -3253,13 +3253,12 @@ dependencies = [
 [[package]]
 name = "gardal"
 version = "0.0.1-alpha.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08b8247c95fe11f2dd5fdab7b096829e4662a0c2d8002f54dd392f9e49bf8791"
 dependencies = [
  "futures",
  "likely_stable",
  "pin-project-lite",
  "tokio",
+ "tokio-hrtime",
 ]
 
 [[package]]
@@ -7312,6 +7311,8 @@ version = "1.5.0-dev"
 dependencies = [
  "bincode",
  "criterion",
+ "futures",
+ "pin-project",
  "restate-fs-util",
  "restate-types",
  "restate-workspace-hack",
@@ -9248,6 +9249,19 @@ dependencies = [
  "tokio-macros",
  "tracing",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "tokio-hrtime"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72854b925496f2973244d604aff15b661da2a91833b497932d9d607e66f18fe9"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "pin-project-lite",
+ "tokio",
+ "windows",
 ]
 
 [[package]]
