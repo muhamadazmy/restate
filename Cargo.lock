@@ -7690,6 +7690,7 @@ dependencies = [
  "figment",
  "flexbuffers",
  "futures",
+ "gardal",
  "generic-array 1.2.0",
  "googletest",
  "hostname",

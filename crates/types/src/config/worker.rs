@@ -21,6 +21,7 @@ use super::{
     print_warning_deprecated_config_option,
 };
 use crate::identifiers::PartitionId;
+use crate::rate::Rate;
 use crate::retries::RetryPolicy;
 use restate_serde_util::NonZeroByteCount;
 
@@ -629,15 +630,20 @@ impl SnapshotsOptions {
 #[builder(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct ThrottlingOptions {
+    /// # Refill rate
+    ///
+    /// The rate at which the tokens are replenished.
+    ///
+    /// Syntax: `<rate>/<unit>` where `<unit>` is `s|sec|second`, `m|min|minute`, or `h|hr|hour`.
+    /// unit defaults to per second if not specified.
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub rate: Rate,
+
     /// # Burst capacity
     ///
     /// The maximum number of tokens the bucket can hold.
-    pub capacity: NonZeroU32,
-
-    /// # Refill rate
-    ///
-    /// The rate in seconds at which the tokens are replenished.
-    pub rate: NonZeroU32,
+    /// Default to the rate value if not specified.
+    pub capacity: Option<NonZeroU32>,
 }
 
 impl Default for ThrottlingOptions {
@@ -645,8 +651,26 @@ impl Default for ThrottlingOptions {
         // using some sane values just to have Default implementation for
         // schema generation
         Self {
-            capacity: NonZeroU32::new(1000000).unwrap(),
-            rate: NonZeroU32::new(100000).unwrap(),
+            rate: Rate::PerSecond(NonZeroU32::new(50_000).unwrap()),
+            capacity: None,
         }
+    }
+}
+
+impl From<ThrottlingOptions> for gardal::Limit {
+    fn from(options: ThrottlingOptions) -> Self {
+        use gardal::Limit;
+
+        let mut limit = match options.rate {
+            Rate::PerSecond(rate) => Limit::per_second(rate),
+            Rate::PerMinute(rate) => Limit::per_minute(rate),
+            Rate::PerHour(rate) => Limit::per_hour(rate),
+        };
+
+        if let Some(capacity) = options.capacity {
+            limit = limit.with_burst(capacity);
+        }
+
+        limit
     }
 }
