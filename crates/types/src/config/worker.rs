@@ -450,22 +450,6 @@ pub struct StorageOptions {
     /// partitions. The divisor is defined in `num-partitions-to-share-memory-budget`
     rocksdb_memory_ratio: f32,
 
-    /// # Persist LSN interval (deprecated)
-    ///
-    /// This configuration option is deprecated and ignored in Restate >= 1.3.3.
-    #[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
-    #[deprecated(since = "1.4.0", note = "no longer used, will be removed with >1.4.0")]
-    #[serde(skip_serializing)]
-    persist_lsn_interval: Option<humantime::Duration>,
-
-    /// # Persist LSN threshold (deprecated)
-    ///
-    /// This configuration option is deprecated and ignored in Restate >= 1.3.3.
-    #[deprecated(since = "1.4.0", note = "no longer used, will be removed with >1.4.0")]
-    #[serde(skip_serializing)]
-    pub persist_lsn_threshold: Option<u64>,
-
     /// Whether to perform commits in background IO thread pools eagerly or not
     #[cfg_attr(feature = "schemars", schemars(skip))]
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
@@ -498,16 +482,6 @@ impl StorageOptions {
                 )
                 .unwrap(),
             );
-        }
-    }
-
-    #[allow(deprecated)]
-    pub fn print_deprecation_warnings(&self) {
-        if self.persist_lsn_interval.is_some() {
-            print_warning_deprecated_config_option("storage.persist-lsn-interval", None);
-        }
-        if self.persist_lsn_threshold.is_some() {
-            print_warning_deprecated_config_option("storage.persist-lsn-threshold", None);
         }
     }
 
@@ -554,10 +528,6 @@ impl Default for StorageOptions {
             rocksdb_memory_budget: None,
             rocksdb_memory_ratio: 0.49,
             always_commit_in_background: false,
-
-            // todo: remove deprecated persist-lsn-* attributes in 1.4+
-            persist_lsn_interval: None,
-            persist_lsn_threshold: None,
         }
     }
 }
@@ -639,6 +609,7 @@ impl SnapshotsOptions {
 ///
 /// Throttling options per invoker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub struct ThrottlingOptions {
     /// # Refill rate
@@ -647,6 +618,7 @@ pub struct ThrottlingOptions {
     ///
     /// Syntax: `<rate>/<unit>` where `<unit>` is `s|sec|second`, `m|min|minute`, or `h|hr|hour`.
     /// unit defaults to per second if not specified.
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub rate: Rate,
 
     /// # Burst capacity
@@ -654,66 +626,6 @@ pub struct ThrottlingOptions {
     /// The maximum number of tokens the bucket can hold.
     /// Default to the rate value if not specified.
     pub capacity: Option<NonZeroU32>,
-}
-
-#[cfg(feature = "schemars")]
-impl schemars::JsonSchema for ThrottlingOptions {
-    fn schema_name() -> std::string::String {
-        "ThrottlingOptions".to_owned()
-    }
-
-    fn schema_id() -> std::borrow::Cow<'static, str> {
-        concat!(module_path!(), "::ThrottlingOptions").into()
-    }
-
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
-        use schemars::schema::*;
-
-        let schema_object = SchemaObject {
-            metadata: Some(Box::new(Metadata {
-                title: Some("ThrottlingOptions".to_string()),
-                description: Some("Throttling options per invoker".to_string()),
-                ..Default::default()
-            })),
-            instance_type: Some(InstanceType::Object.into()),
-            object: Some(Box::new(ObjectValidation {
-                properties: {
-                    let mut properties = schemars::Map::new();
-
-                    // Rate field - represented as a string with pattern
-                    let mut rate_schema: SchemaObject =
-                        generator.subschema_for::<String>().into_object();
-                    let rate_validation = rate_schema.string();
-                    rate_validation.pattern =
-                        Some(r"^\d+(\/(sec|min|hr|s|m|h|second|minute|hour))?$".to_string());
-                    let rate_metadata = rate_schema.metadata();
-                    rate_metadata.description = Some("The rate at which the tokens are replenished. Syntax: `<rate>/<unit>` where `<unit>` is `s|sec|second`, `m|min|minute`, or `h|hr|hour`. Unit defaults to per second if not specified.".to_string());
-                    properties.insert("rate".to_string(), Schema::Object(rate_schema));
-
-                    // Capacity field - optional non-zero u32
-                    let mut capacity_schema: SchemaObject =
-                        generator.subschema_for::<u32>().into_object();
-                    let capacity_validation = capacity_schema.number();
-                    capacity_validation.minimum = Some(1.0);
-                    let capacity_metadata = capacity_schema.metadata();
-                    capacity_metadata.description = Some("The maximum number of tokens the bucket can hold. Defaults to the rate value if not specified.".to_string());
-                    properties.insert("capacity".to_string(), Schema::Object(capacity_schema));
-
-                    properties
-                },
-                required: {
-                    let mut required = schemars::Set::new();
-                    required.insert("rate".to_string());
-                    required
-                },
-                additional_properties: Some(Box::new(Schema::Bool(false))),
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-
-        Schema::Object(schema_object)
-    }
 }
 
 impl From<ThrottlingOptions> for gardal::Limit {
