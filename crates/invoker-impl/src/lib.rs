@@ -29,6 +29,7 @@ use futures::StreamExt;
 use gardal::futures::ThrottledStream;
 use gardal::{PaddedAtomicSharedStorage, StreamExt as GardalStreamExt, TokioClock};
 use metrics::counter;
+use restate_time_util::DurationExt;
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinSet};
 use tracing::{debug, trace};
@@ -1251,14 +1252,14 @@ where
                         restate.invocation.target = %ism.invocation_target,
                         restate.invocation.error.stacktrace = %error_stacktrace,
                         "Invocation error, retrying in {}.",
-                        humantime::format_duration(next_retry_timer_duration));
+                        next_retry_timer_duration.friendly());
                 } else {
                     warn_it!(
                         error,
                         restate.invocation.id = %invocation_id,
                         restate.invocation.target = %ism.invocation_target,
                         "Invocation error, retrying in {}.",
-                        humantime::format_duration(next_retry_timer_duration));
+                        next_retry_timer_duration.friendly());
                 }
                 trace!("Invocation state: {:?}.", ism.invocation_state_debug());
                 let next_retry_at = SystemTime::now() + next_retry_timer_duration;
@@ -1521,14 +1522,13 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
-    use crate::error::{InvokerError, SdkInvocationErrorV2};
-    use crate::quota::InvokerConcurrencyQuota;
     use restate_core::{TaskCenter, TaskKind};
     use restate_invoker_api::InvokerHandle;
     use restate_invoker_api::entry_enricher;
     use restate_invoker_api::test_util::EmptyStorageReader;
     use restate_service_protocol_v4::entry_codec::ServiceProtocolV4Codec;
     use restate_test_util::{check, let_assert};
+    use restate_time_util::FriendlyDuration;
     use restate_types::config::InvokerOptionsBuilder;
     use restate_types::errors::{InvocationError, codes};
     use restate_types::identifiers::{LeaderEpoch, PartitionId, ServiceRevision};
@@ -1547,6 +1547,9 @@ mod tests {
     };
     use restate_types::schema::service::ServiceMetadata;
     use restate_types::service_protocol::ServiceProtocolVersion;
+
+    use crate::error::{InvokerError, SdkInvocationErrorV2};
+    use crate::quota::InvokerConcurrencyQuota;
 
     // -- Mocks
 
@@ -1764,8 +1767,8 @@ mod tests {
     #[test(restate_core::test)]
     async fn input_order_is_maintained() {
         let invoker_options = InvokerOptionsBuilder::default()
-            .inactivity_timeout(Duration::ZERO.into())
-            .abort_timeout(Duration::ZERO.into())
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
             .disable_eager_state(false)
             .message_size_warning(NonZeroUsize::new(1024).unwrap())
             .message_size_limit(None)
@@ -1838,8 +1841,8 @@ mod tests {
         let invoker_options = InvokerOptionsBuilder::default()
             // fixed amount of retries so that an invocation eventually completes with a failure
             .retry_policy(Some(RetryPolicy::fixed_delay(Duration::ZERO, Some(1))))
-            .inactivity_timeout(Duration::ZERO.into())
-            .abort_timeout(Duration::ZERO.into())
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
             .disable_eager_state(false)
             .message_size_warning(NonZeroUsize::new(1024).unwrap())
             .message_size_limit(None)
@@ -1953,8 +1956,8 @@ mod tests {
         let invoker_options = InvokerOptionsBuilder::default()
             // fixed amount of retries so that an invocation eventually completes with a failure
             .retry_policy(Some(RetryPolicy::fixed_delay(Duration::ZERO, Some(1))))
-            .inactivity_timeout(Duration::ZERO.into())
-            .abort_timeout(Duration::ZERO.into())
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
             .disable_eager_state(false)
             .message_size_warning(NonZeroUsize::new(1024).unwrap())
             .message_size_limit(None)
@@ -2224,8 +2227,8 @@ mod tests {
     async fn notification_triggers_retry() {
         let invoker_options = InvokerOptionsBuilder::default()
             .retry_policy(Some(RetryPolicy::fixed_delay(Duration::ZERO, Some(1))))
-            .inactivity_timeout(Duration::ZERO.into())
-            .abort_timeout(Duration::ZERO.into())
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
             .disable_eager_state(false)
             .message_size_warning(NonZeroUsize::new(1024).unwrap())
             .message_size_limit(None)
@@ -2396,8 +2399,8 @@ mod tests {
                 Duration::from_millis(1),
                 Some(3),
             )))
-            .inactivity_timeout(Duration::ZERO.into())
-            .abort_timeout(Duration::ZERO.into())
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
             .disable_eager_state(false)
             .experimental_features_propose_events(true)
             .build()
@@ -2513,11 +2516,53 @@ mod tests {
     }
 
     #[test(restate_core::test)]
+    async fn abort_error_counts_towards_retry_policy() {
+        // Enable proposing events and keep timers short for the test
+        let invocation_id = InvocationId::mock_random();
+
+        // Mock service and register partition
+        let (_, _status_tx, mut service_inner) =
+            ServiceInner::mock((), MockSchemas::default(), None);
+        let _rx = service_inner.register_mock_partition(EmptyStorageReader);
+
+        // Start invocation epoch 0
+        service_inner.handle_invoke(
+            &InvokerOptions::default(),
+            MOCK_PARTITION,
+            invocation_id,
+            0,
+            InvocationTarget::mock_virtual_object(),
+            InvokeInputJournal::NoCachedJournal,
+        );
+
+        // Abort error
+        service_inner
+            .handle_invocation_task_failed(
+                &InvokerOptions::default(),
+                MOCK_PARTITION,
+                invocation_id,
+                0,
+                InvokerError::AbortTimeoutFired(Duration::from_secs(10).into()),
+            )
+            .await;
+
+        let (_, ism) = service_inner
+            .invocation_state_machine_manager
+            .resolve_invocation(MOCK_PARTITION, &invocation_id)
+            .unwrap();
+        assert!(ism.is_waiting_retry());
+        assert_that!(
+            ism.start_message_retry_count_since_last_stored_command,
+            eq(1)
+        );
+    }
+
+    #[test(restate_core::test)]
     async fn pause_effect_emitted_when_pause_on_max_attempts_and_max_attempts_one() {
         // Configure invoker to propose events to flush transient error event (not strictly needed for pause)
         let invoker_options = InvokerOptionsBuilder::default()
-            .inactivity_timeout(Duration::ZERO.into())
-            .abort_timeout(Duration::ZERO.into())
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
             .build()
             .unwrap();
 
@@ -2634,8 +2679,8 @@ mod tests {
         }
 
         let invoker_options = InvokerOptionsBuilder::default()
-            .inactivity_timeout(Duration::ZERO.into())
-            .abort_timeout(Duration::ZERO.into())
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
             .build()
             .unwrap();
 
