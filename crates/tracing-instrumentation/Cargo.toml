@@ -33,6 +33,8 @@ restate-types = { workspace = true }
 
 arc-swap = { workspace = true }
 console-subscriber = { version = "0.4.1", features = ["parking_lot"], optional = true }
+dashmap = { workspace = true }
+derive_more = {  workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true, optional = true }
@@ -42,14 +44,14 @@ nu-ansi-term = "0.50.1"
 opentelemetry = { workspace = true }
 opentelemetry-contrib = { workspace = true, features = ["jaeger_json_exporter", "rt-tokio"] }
 opentelemetry-http = { workspace = true, features = ["reqwest"] }
-opentelemetry-otlp = { workspace = true, features = ["http-json", "http-proto", "reqwest-client", "tls", "tls-roots"] }
-opentelemetry-semantic-conventions = { workspace = true }
-opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { workspace = true, features = ["http-json", "http-proto", "reqwest-client", "tls", "tls-roots", "grpc-tonic"] }
+opentelemetry-semantic-conventions = { workspace = true, features = ["semconv_experimental"] }
+opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime"] }
 reqwest = { workspace = true }
 schemars = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, optional = true }
-tonic = { workspace = true }
+tonic = { workspace = true , features = ["tls-native-roots"]}
 tracing = { workspace = true }
 tracing-appender = { version = "0.2.3", features = ["parking_lot"] }
 tracing-core = { version = "0.1" }
