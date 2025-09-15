@@ -412,7 +412,7 @@ impl Drop for TracingGuard {
             }
 
             #[cfg(not(feature = "rt-tokio"))]
-            opentelemetry::global::shutdown_tracer_provider();
+            self.shutdown_inner();
         }
     }
 }
