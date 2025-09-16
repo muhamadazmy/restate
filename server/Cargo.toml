@@ -28,7 +28,6 @@ options_schema = [
     "restate-types/schemars",
 ]
 memory-loglet = ["restate-node/memory-loglet"]
-crate_per_service = ["restate-tracing-instrumentation/service_per_crate"]
 no-trace-logging = ["tracing/max_level_trace", "tracing/release_max_level_debug"]
 metadata-api = ["restate-admin/metadata-api"]
 
@@ -84,7 +83,7 @@ googletest = { workspace = true }
 hyper-util = { workspace = true }
 tempfile = { workspace = true }
 test-log = { workspace = true }
-tonic = { workspace = true, features = ["transport", "prost"] }
+tonic = { workspace = true, features = ["transport"] }
 tower = { workspace = true }
 tracing-subscriber = { workspace = true }
 rand = { workspace = true }
