@@ -22,7 +22,6 @@ use crate::net::metadata::{MetadataContainer, MetadataKind};
 use crate::replication::ReplicationProperty;
 use crate::{Version, Versioned, flexbuffers_storage_encode_decode};
 
-const DB_NAME: &str = "db";
 const PARTITION_CF_PREFIX: &str = "data-";
 
 type SmartString = smartstring::SmartString<smartstring::LazyCompact>;
@@ -217,9 +216,21 @@ impl FindPartition for PartitionTable {
 #[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct DbName(SmartString);
 
-impl Default for DbName {
-    fn default() -> Self {
-        DbName(DB_NAME.into())
+impl From<String> for DbName {
+    fn from(val: String) -> Self {
+        Self(SmartString::from(val))
+    }
+}
+
+impl From<&str> for DbName {
+    fn from(val: &str) -> Self {
+        Self(SmartString::from(val))
+    }
+}
+
+impl From<DbName> for SmartString {
+    fn from(val: DbName) -> Self {
+        val.0
     }
 }
 
@@ -237,6 +248,11 @@ pub struct CfName(SmartString);
 impl CfName {
     pub fn for_partition(partition_id: PartitionId) -> Self {
         Self(format!("{PARTITION_CF_PREFIX}{partition_id}").into())
+    }
+
+    #[inline]
+    pub fn into_inner(self) -> SmartString {
+        self.0
     }
 }
 
@@ -272,13 +288,23 @@ impl Partition {
         }
     }
 
+    pub const fn id(&self) -> PartitionId {
+        self.partition_id
+    }
+
     pub fn log_id(&self) -> LogId {
         self.log_id
             .unwrap_or_else(|| LogId::default_for_partition(self.partition_id))
     }
 
     pub fn db_name(&self) -> DbName {
-        self.db_name.clone().unwrap_or_default()
+        #[cfg(feature = "multi-db")]
+        return self
+            .db_name
+            .clone()
+            .unwrap_or_else(|| DbName::from(format!("db-{}", self.partition_id)));
+        #[cfg(not(feature = "multi-db"))]
+        return self.db_name.clone().unwrap_or_else(|| DbName::from("db"));
     }
 
     pub fn cf_name(&self) -> CfName {

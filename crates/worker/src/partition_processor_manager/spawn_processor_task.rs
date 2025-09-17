@@ -43,7 +43,7 @@ pub struct SpawnPartitionProcessorTask {
     configuration: Live<Configuration>,
     bifrost: Bifrost,
     replica_set_states: PartitionReplicaSetStates,
-    partition_store_manager: PartitionStoreManager,
+    partition_store_manager: Arc<PartitionStoreManager>,
     fast_forward_lsn: Option<Lsn>,
     invocation_token_bucket: Option<TokenBucket>,
     action_token_bucket: Option<TokenBucket>,
@@ -57,7 +57,7 @@ impl SpawnPartitionProcessorTask {
         configuration: Live<Configuration>,
         bifrost: Bifrost,
         replica_set_states: PartitionReplicaSetStates,
-        partition_store_manager: PartitionStoreManager,
+        partition_store_manager: Arc<PartitionStoreManager>,
         fast_forward_lsn: Option<Lsn>,
         invocation_token_bucket: Option<TokenBucket>,
         action_token_bucket: Option<TokenBucket>,
@@ -160,8 +160,10 @@ impl SpawnPartitionProcessorTask {
                         return Ok(());
                     };
 
+                    let partition_store = partition_store?;
+
                     let pp = pp_builder
-                        .build(bifrost, partition_store?, replica_set_states)
+                        .build(bifrost, partition_store, replica_set_states)
                         .await
                         .map_err(ProcessorError::from)?;
 
