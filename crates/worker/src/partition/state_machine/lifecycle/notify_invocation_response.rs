@@ -12,7 +12,9 @@ use crate::debug_if_leader;
 use crate::partition::state_machine::invocation_status_ext::InvocationStatusExt;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext, entries};
 use restate_storage_api::fsm_table::FsmTable;
-use restate_storage_api::invocation_status_table::{InvocationStatus, InvocationStatusTable};
+use restate_storage_api::invocation_status_table::{
+    InvocationStatus, ReadInvocationStatusTable, WriteInvocationStatusTable,
+};
 use restate_storage_api::journal_table as journal_table_v1;
 use restate_storage_api::journal_table_v2;
 use restate_storage_api::outbox_table::OutboxTable;
@@ -41,10 +43,12 @@ pub struct OnNotifyInvocationResponse {
 impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
     for OnNotifyInvocationResponse
 where
-    S: journal_table_v1::JournalTable
+    S: journal_table_v1::WriteJournalTable
+        + journal_table_v1::ReadJournalTable
         + journal_table_v2::JournalTable
-        + InvocationStatusTable
         + TimerTable
+        + ReadInvocationStatusTable
+        + WriteInvocationStatusTable
         + FsmTable
         + PromiseTable
         + StateTable
@@ -58,11 +62,9 @@ where
             caller_completion_id,
             result,
         } = self;
-        let invocation_status = ctx.get_invocation_status(&invocation_id).await?;
 
         // Verify that we need to ingest this
-        if !invocation_status
-            .should_accept_completion(this_completion_invocation_epoch, caller_completion_id)
+        if !status.should_accept_completion(this_completion_invocation_epoch, caller_completion_id)
         {
             debug_if_leader!(
                 ctx.is_leader,

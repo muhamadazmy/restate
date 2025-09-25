@@ -14,9 +14,7 @@ use restate_invoker_api::JournalMetadata;
 use restate_invoker_api::invocation_reader::{
     EagerState, InvocationReader, InvocationReaderTransaction,
 };
-use restate_storage_api::invocation_status_table::{
-    InvocationStatus, ReadOnlyInvocationStatusTable,
-};
+use restate_storage_api::invocation_status_table::{InvocationStatus, ReadInvocationStatusTable};
 use restate_storage_api::state_table::ReadOnlyStateTable;
 use restate_storage_api::{IsolationLevel, journal_table as journal_table_v1, journal_table_v2};
 use restate_types::identifiers::InvocationId;
@@ -127,7 +125,7 @@ where
                         invoked_status.timestamps.modification_time(),
                         random_seed,
                     ),
-                    journal_table_v1::ReadOnlyJournalTable::get_journal(
+                    journal_table_v1::ReadJournalTable::get_journal(
                         &mut self.txn,
                         invocation_id,
                         invoked_status.journal_metadata.length,

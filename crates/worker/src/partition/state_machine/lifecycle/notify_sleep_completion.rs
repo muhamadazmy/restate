@@ -12,7 +12,9 @@ use crate::debug_if_leader;
 use crate::partition::state_machine::invocation_status_ext::InvocationStatusExt;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext, entries};
 use restate_storage_api::fsm_table::FsmTable;
-use restate_storage_api::invocation_status_table::{InvocationStatus, InvocationStatusTable};
+use restate_storage_api::invocation_status_table::{
+    InvocationStatus, ReadInvocationStatusTable, WriteInvocationStatusTable,
+};
 use restate_storage_api::journal_table as journal_table_v1;
 use restate_storage_api::journal_table_v2;
 use restate_storage_api::outbox_table::OutboxTable;
@@ -33,9 +35,11 @@ pub struct OnNotifySleepCompletionCommand {
 impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
     for OnNotifySleepCompletionCommand
 where
-    S: journal_table_v1::JournalTable
+    S: journal_table_v1::WriteJournalTable
+        + journal_table_v1::ReadJournalTable
         + journal_table_v2::JournalTable
-        + InvocationStatusTable
+        + ReadInvocationStatusTable
+        + WriteInvocationStatusTable
         + TimerTable
         + FsmTable
         + PromiseTable

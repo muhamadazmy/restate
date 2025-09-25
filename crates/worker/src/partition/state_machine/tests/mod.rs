@@ -37,10 +37,10 @@ use restate_service_protocol::codec::ProtobufRawEntryCodec;
 use restate_storage_api::Transaction;
 use restate_storage_api::inbox_table::ReadOnlyInboxTable;
 use restate_storage_api::invocation_status_table::{
-    InFlightInvocationMetadata, InvocationStatus, InvocationStatusTable,
-    ReadOnlyInvocationStatusTable,
+    InFlightInvocationMetadata, InvocationStatus, ReadInvocationStatusTable,
+    WriteInvocationStatusTable,
 };
-use restate_storage_api::journal_table::{JournalEntry, ReadOnlyJournalTable};
+use restate_storage_api::journal_table::{JournalEntry, ReadJournalTable};
 use restate_storage_api::outbox_table::OutboxTable;
 use restate_storage_api::service_status_table::{
     ReadOnlyVirtualObjectStatusTable, VirtualObjectStatus, VirtualObjectStatusTable,
@@ -272,9 +272,7 @@ impl TestEnv {
         let mut tx = self.storage().transaction();
         let mut status = tx.get_invocation_status(&invocation_id).await.unwrap();
         f(&mut status);
-        tx.put_invocation_status(&invocation_id, &status)
-            .await
-            .unwrap();
+        tx.put_invocation_status(&invocation_id, &status).unwrap();
         tx.commit().await.unwrap();
     }
 
@@ -779,15 +777,12 @@ async fn get_invocation_id_entry() {
     // Add call and one way call journal entry
     let mut tx = test_env.storage.transaction();
     tx.put_journal_entry(&invocation_id, 1, &background_invoke_entry(callee_1))
-        .await
         .unwrap();
     tx.put_journal_entry(&invocation_id, 2, &incomplete_invoke_entry(callee_2))
-        .await
         .unwrap();
     let mut invocation_status = tx.get_invocation_status(&invocation_id).await.unwrap();
     invocation_status.get_journal_metadata_mut().unwrap().length = 3;
     tx.put_invocation_status(&invocation_id, &invocation_status)
-        .await
         .unwrap();
     tx.commit().await.unwrap();
 
@@ -1012,8 +1007,7 @@ async fn send_ingress_response_to_multiple_targets() -> TestResult {
             request_id: request_id_3,
         },
     );
-    txn.put_invocation_status(&invocation_id, &invocation_status)
-        .await?;
+    txn.put_invocation_status(&invocation_id, &invocation_status)?;
     txn.commit().await.unwrap();
 
     // Now let's send the output entry

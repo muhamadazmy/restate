@@ -14,7 +14,7 @@ use assert2::assert;
 use assert2::let_assert;
 use googletest::any;
 use prost::Message;
-use restate_storage_api::journal_table::JournalTable;
+use restate_storage_api::journal_table::WriteJournalTable;
 use restate_storage_api::timer_table::{Timer, TimerKey, TimerKeyKind, TimerTable};
 use restate_types::deployment::PinnedDeployment;
 use restate_types::identifiers::EntryIndex;
@@ -213,24 +213,20 @@ async fn kill_call_tree() -> anyhow::Result<()> {
         &invocation_id,
         1,
         &fixtures::incomplete_invoke_entry(call_invocation_id),
-    )
-    .await?;
+    )?;
     tx.put_journal_entry(
         &invocation_id,
         2,
         &fixtures::background_invoke_entry(background_call_invocation_id),
-    )
-    .await?;
+    )?;
     tx.put_journal_entry(
         &invocation_id,
         3,
         &fixtures::completed_invoke_entry(finished_call_invocation_id),
-    )
-    .await?;
+    )?;
     let mut invocation_status = tx.get_invocation_status(&invocation_id).await?;
     invocation_status.get_journal_metadata_mut().unwrap().length = 4;
-    tx.put_invocation_status(&invocation_id, &invocation_status)
-        .await?;
+    tx.put_invocation_status(&invocation_id, &invocation_status)?;
     tx.commit().await?;
 
     // Now let's send the termination command
@@ -347,15 +343,13 @@ async fn cancel_invoked_invocation() -> Result<(), Error> {
         })
         .unwrap();
     for (idx, entry) in journal.into_iter().enumerate() {
-        tx.put_journal_entry(&invocation_id, (idx + 1) as u32, &entry)
-            .await?;
+        tx.put_journal_entry(&invocation_id, (idx + 1) as u32, &entry)?;
     }
     // Update journal length
     let mut invocation_status = tx.get_invocation_status(&invocation_id).await?;
     invocation_status.get_journal_metadata_mut().unwrap().length =
         (journal_length + 1) as EntryIndex;
-    tx.put_invocation_status(&invocation_id, &invocation_status)
-        .await?;
+    tx.put_invocation_status(&invocation_id, &invocation_status)?;
     // Add timer
     tx.put_timer(
         &TimerKey {
@@ -473,8 +467,7 @@ async fn cancel_suspended_invocation() -> Result<(), Error> {
         })
         .unwrap();
     for (idx, entry) in journal.into_iter().enumerate() {
-        tx.put_journal_entry(&invocation_id, (idx + 1) as u32, &entry)
-            .await?;
+        tx.put_journal_entry(&invocation_id, (idx + 1) as u32, &entry)?;
     }
     // Update journal length and suspend invocation
     let invocation_status = tx.get_invocation_status(&invocation_id).await?;
@@ -494,8 +487,7 @@ async fn cancel_suspended_invocation() -> Result<(), Error> {
                 NotificationId::for_completion(9),
             ]),
         },
-    )
-    .await?;
+    )?;
     // Add timer
     tx.put_timer(
         &TimerKey {
@@ -594,19 +586,16 @@ async fn cancel_invocation_entry_referring_to_previous_entry() {
         1,
         &fixtures::background_invoke_entry(callee_1),
     )
-    .await
     .unwrap();
     tx.put_journal_entry(
         &invocation_id,
         2,
         &fixtures::incomplete_invoke_entry(callee_2),
     )
-    .await
     .unwrap();
     let mut invocation_status = tx.get_invocation_status(&invocation_id).await.unwrap();
     invocation_status.get_journal_metadata_mut().unwrap().length = 3;
     tx.put_invocation_status(&invocation_id, &invocation_status)
-        .await
         .unwrap();
     tx.commit().await.unwrap();
 

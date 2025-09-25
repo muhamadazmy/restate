@@ -14,7 +14,9 @@ use crate::debug_if_leader;
 use crate::partition::state_machine::{CommandHandler, Error, StateMachineApplyContext};
 use restate_storage_api::fsm_table::FsmTable;
 use restate_storage_api::inbox_table::InboxTable;
-use restate_storage_api::invocation_status_table::{InvocationStatus, InvocationStatusTable};
+use restate_storage_api::invocation_status_table::{
+    InvocationStatus, ReadInvocationStatusTable, WriteInvocationStatusTable,
+};
 use restate_storage_api::journal_events::JournalEventsTable;
 use restate_storage_api::outbox_table::OutboxTable;
 use restate_storage_api::promise_table::PromiseTable;
@@ -36,9 +38,11 @@ pub struct OnPinnedDeploymentCommand {
 impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
     for OnPinnedDeploymentCommand
 where
-    S: journal_table_v1::JournalTable
+    S: journal_table_v1::WriteJournalTable
+        + journal_table_v1::ReadJournalTable
         + journal_table_v2::JournalTable
-        + InvocationStatusTable
+        + ReadInvocationStatusTable
+        + WriteInvocationStatusTable
         + OutboxTable
         + StateTable
         + FsmTable
@@ -85,7 +89,6 @@ where
                 &self.invocation_id,
                 &InvocationStatus::Invoked(in_flight_invocation_metadata),
             )
-            .await
             .map_err(Error::Storage)?;
 
         if should_apply_cancellation_hotfix {

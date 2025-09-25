@@ -17,11 +17,11 @@ publish = false
 ### BEGIN HAKARI SECTION
 [dependencies]
 ahash = { version = "0.8", features = ["serde"] }
-arrow = { version = "55", features = ["chrono-tz", "prettyprint"] }
-arrow-array = { version = "55", default-features = false, features = ["chrono-tz"] }
-arrow-cast = { version = "55", default-features = false, features = ["prettyprint"] }
-arrow-ipc = { version = "55", features = ["lz4", "zstd"] }
-arrow-schema = { version = "55", default-features = false, features = ["canonical_extension_types"] }
+arrow = { version = "56", features = ["chrono-tz", "prettyprint"] }
+arrow-array = { version = "56", default-features = false, features = ["chrono-tz"] }
+arrow-cast = { version = "56", default-features = false, features = ["prettyprint"] }
+arrow-ipc = { version = "56", features = ["lz4"] }
+arrow-schema = { version = "56", default-features = false, features = ["canonical_extension_types"] }
 aws-credential-types = { version = "1", default-features = false, features = ["test-util"] }
 aws-runtime = { version = "1", default-features = false, features = ["event-stream"] }
 aws-sdk-sts = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
@@ -44,8 +44,8 @@ clap_builder = { version = "4", default-features = false, features = ["color", "
 comfy-table = { version = "7" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 crossbeam-epoch = { version = "0.9" }
-datafusion-common = { version = "49", default-features = false, features = ["object_store", "recursive_protection"] }
-datafusion-expr = { version = "49", default-features = false, features = ["recursive_protection"] }
+datafusion-common = { version = "50", default-features = false, features = ["object_store", "recursive_protection"] }
+datafusion-expr = { version = "50", default-features = false, features = ["recursive_protection"] }
 digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1" }
 enum-map = { version = "2", default-features = false, features = ["serde"] }
@@ -72,7 +72,7 @@ hyper-util = { version = "0.1", features = ["full"] }
 idna = { version = "1" }
 indexmap-dff4ba8e3ae991db = { package = "indexmap", version = "1", default-features = false, features = ["serde-1"] }
 indexmap-f595c2ba2a3f28df = { package = "indexmap", version = "2", features = ["serde"] }
-itertools = { version = "0.14" }
+itertools-582f2526e08bb6a0 = { package = "itertools", version = "0.14" }
 lexical-parse-float = { version = "1", features = ["format"] }
 lexical-parse-integer = { version = "1", default-features = false, features = ["format", "std"] }
 lexical-util = { version = "1", default-features = false, features = ["format", "parse-floats", "parse-integers", "std", "write-floats", "write-integers"] }
@@ -91,8 +91,9 @@ opentelemetry_sdk = { version = "0.30", features = ["experimental_trace_batch_sp
 phf_shared = { version = "0.11" }
 pprof = { version = "0.15", features = ["criterion", "flamegraph", "frame-pointer"] }
 proc-macro2 = { version = "1" }
-prost = { version = "0.13", features = ["prost-derive"] }
-prost-types = { version = "0.13" }
+prost-582f2526e08bb6a0 = { package = "prost", version = "0.14" }
+prost-594e8ee84c453af0 = { package = "prost", version = "0.13", features = ["prost-derive"] }
+prost-types = { version = "0.14" }
 protobuf = { version = "2", default-features = false, features = ["with-bytes"] }
 quanta = { version = "0.12" }
 quote = { version = "1" }
@@ -109,10 +110,11 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["aws-
 schemars = { version = "0.8", features = ["bytes", "enumset", "preserve_order"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", default-features = false, features = ["alloc", "rc", "result", "std"] }
 serde_json = { version = "1", features = ["alloc", "raw_value", "unbounded_depth"] }
 serde_with = { version = "3", features = ["hex", "json"] }
-smallvec = { version = "1", default-features = false, features = ["const_new", "serde"] }
-sqlparser = { version = "0.55", default-features = false, features = ["recursive-protection", "visitor"] }
+smallvec = { version = "1", default-features = false, features = ["const_new", "serde", "union"] }
+sqlparser = { version = "0.58", default-features = false, features = ["recursive-protection", "visitor"] }
 stable_deref_trait = { version = "1" }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = { version = "1", default-features = false, features = ["futures"] }
@@ -122,7 +124,7 @@ tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = { version = "0.7", features = ["codec", "io-util", "net", "rt"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
 toml_edit = { version = "0.22", features = ["serde"] }
-tonic = { version = "0.13", default-features = false, features = ["codegen", "gzip", "prost", "router", "tls-native-roots", "tls-ring", "transport", "zstd"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen", "gzip", "router", "transport", "zstd"] }
 tower-9fbad63c4bcf4a8f = { package = "tower", version = "0.4", features = ["balance", "buffer", "limit", "util"] }
 tower-d8f496e17d97b5cb = { package = "tower", version = "0.5", default-features = false, features = ["balance", "buffer", "limit", "load-shed", "log", "retry", "timeout"] }
 tower-http = { version = "0.6", features = ["cors", "follow-redirect", "map-response-body", "normalize-path", "trace"] }
@@ -132,7 +134,6 @@ tracing-log = { version = "0.2" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "parking_lot"] }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
 ulid = { version = "1", features = ["serde"] }
-url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["js", "serde", "v4", "v7"] }
 zerocopy = { version = "0.7", features = ["derive", "simd"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
@@ -142,11 +143,11 @@ zstd-sys = { version = "2", features = ["experimental", "std"] }
 
 [build-dependencies]
 ahash = { version = "0.8", features = ["serde"] }
-arrow = { version = "55", features = ["chrono-tz", "prettyprint"] }
-arrow-array = { version = "55", default-features = false, features = ["chrono-tz"] }
-arrow-cast = { version = "55", default-features = false, features = ["prettyprint"] }
-arrow-ipc = { version = "55", features = ["lz4", "zstd"] }
-arrow-schema = { version = "55", default-features = false, features = ["canonical_extension_types"] }
+arrow = { version = "56", features = ["chrono-tz", "prettyprint"] }
+arrow-array = { version = "56", default-features = false, features = ["chrono-tz"] }
+arrow-cast = { version = "56", default-features = false, features = ["prettyprint"] }
+arrow-ipc = { version = "56", features = ["lz4"] }
+arrow-schema = { version = "56", default-features = false, features = ["canonical_extension_types"] }
 aws-credential-types = { version = "1", default-features = false, features = ["test-util"] }
 aws-runtime = { version = "1", default-features = false, features = ["event-stream"] }
 aws-sdk-sts = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
@@ -170,8 +171,8 @@ clap_builder = { version = "4", default-features = false, features = ["color", "
 comfy-table = { version = "7" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 crossbeam-epoch = { version = "0.9" }
-datafusion-common = { version = "49", default-features = false, features = ["object_store", "recursive_protection"] }
-datafusion-expr = { version = "49", default-features = false, features = ["recursive_protection"] }
+datafusion-common = { version = "50", default-features = false, features = ["object_store", "recursive_protection"] }
+datafusion-expr = { version = "50", default-features = false, features = ["recursive_protection"] }
 digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1" }
 enum-map = { version = "2", default-features = false, features = ["serde"] }
@@ -199,7 +200,8 @@ hyper-util = { version = "0.1", features = ["full"] }
 idna = { version = "1" }
 indexmap-dff4ba8e3ae991db = { package = "indexmap", version = "1", default-features = false, features = ["serde-1"] }
 indexmap-f595c2ba2a3f28df = { package = "indexmap", version = "2", features = ["serde"] }
-itertools = { version = "0.14" }
+itertools-582f2526e08bb6a0 = { package = "itertools", version = "0.14" }
+itertools-594e8ee84c453af0 = { package = "itertools", version = "0.13" }
 lexical-parse-float = { version = "1", features = ["format"] }
 lexical-parse-integer = { version = "1", default-features = false, features = ["format", "std"] }
 lexical-util = { version = "1", default-features = false, features = ["format", "parse-floats", "parse-integers", "std", "write-floats", "write-integers"] }
@@ -218,8 +220,10 @@ opentelemetry_sdk = { version = "0.30", features = ["experimental_trace_batch_sp
 phf_shared = { version = "0.11" }
 pprof = { version = "0.15", features = ["criterion", "flamegraph", "frame-pointer"] }
 proc-macro2 = { version = "1" }
-prost = { version = "0.13", features = ["prost-derive"] }
-prost-types = { version = "0.13" }
+prost-582f2526e08bb6a0 = { package = "prost", version = "0.14" }
+prost-594e8ee84c453af0 = { package = "prost", version = "0.13", features = ["prost-derive"] }
+prost-build = { version = "0.14", features = ["cleanup-markdown"] }
+prost-types = { version = "0.14" }
 protobuf = { version = "2", default-features = false, features = ["with-bytes"] }
 quanta = { version = "0.12" }
 quote = { version = "1" }
@@ -236,10 +240,11 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["aws-
 schemars = { version = "0.8", features = ["bytes", "enumset", "preserve_order"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
+serde_core = { version = "1", default-features = false, features = ["alloc", "rc", "result", "std"] }
 serde_json = { version = "1", features = ["alloc", "raw_value", "unbounded_depth"] }
 serde_with = { version = "3", features = ["hex", "json"] }
-smallvec = { version = "1", default-features = false, features = ["const_new", "serde"] }
-sqlparser = { version = "0.55", default-features = false, features = ["recursive-protection", "visitor"] }
+smallvec = { version = "1", default-features = false, features = ["const_new", "serde", "union"] }
+sqlparser = { version = "0.58", default-features = false, features = ["recursive-protection", "visitor"] }
 stable_deref_trait = { version = "1" }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = { version = "1", default-features = false, features = ["futures"] }
@@ -250,7 +255,7 @@ tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = { version = "0.7", features = ["codec", "io-util", "net", "rt"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
 toml_edit = { version = "0.22", features = ["serde"] }
-tonic = { version = "0.13", default-features = false, features = ["codegen", "gzip", "prost", "router", "tls-native-roots", "tls-ring", "transport", "zstd"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen", "gzip", "router", "transport", "zstd"] }
 tower-9fbad63c4bcf4a8f = { package = "tower", version = "0.4", features = ["balance", "buffer", "limit", "util"] }
 tower-d8f496e17d97b5cb = { package = "tower", version = "0.5", default-features = false, features = ["balance", "buffer", "limit", "load-shed", "log", "retry", "timeout"] }
 tower-http = { version = "0.6", features = ["cors", "follow-redirect", "map-response-body", "normalize-path", "trace"] }
@@ -260,7 +265,6 @@ tracing-log = { version = "0.2" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "parking_lot"] }
 typenum = { version = "1", default-features = false, features = ["const-generics"] }
 ulid = { version = "1", features = ["serde"] }
-url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["js", "serde", "v4", "v7"] }
 zerocopy = { version = "0.7", features = ["derive", "simd"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
@@ -275,7 +279,7 @@ libc = { version = "0.2", default-features = false, features = ["use_std"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.29", features = ["fs", "signal"] }
 num = { version = "0.4" }
-prost = { version = "0.13", default-features = false, features = ["no-recursion-limit"] }
+prost-594e8ee84c453af0 = { package = "prost", version = "0.13", default-features = false, features = ["no-recursion-limit"] }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["stdio", "termios"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 
@@ -286,7 +290,7 @@ libc = { version = "0.2", default-features = false, features = ["use_std"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.29", features = ["fs", "signal"] }
 num = { version = "0.4" }
-prost = { version = "0.13", default-features = false, features = ["no-recursion-limit"] }
+prost-594e8ee84c453af0 = { package = "prost", version = "0.13", default-features = false, features = ["no-recursion-limit"] }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["stdio", "termios"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 
@@ -296,7 +300,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["webpki
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
 nix = { version = "0.29", features = ["fs", "signal"] }
 num = { version = "0.4" }
-prost = { version = "0.13", default-features = false, features = ["no-recursion-limit"] }
+prost-594e8ee84c453af0 = { package = "prost", version = "0.13", default-features = false, features = ["no-recursion-limit"] }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["stdio", "termios"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 
@@ -306,7 +310,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["webpki
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
 nix = { version = "0.29", features = ["fs", "signal"] }
 num = { version = "0.4" }
-prost = { version = "0.13", default-features = false, features = ["no-recursion-limit"] }
+prost-594e8ee84c453af0 = { package = "prost", version = "0.13", default-features = false, features = ["no-recursion-limit"] }
 rustix-d585fab2519d2d1 = { package = "rustix", version = "0.38", features = ["stdio", "termios"] }
 rustix-dff4ba8e3ae991db = { package = "rustix", version = "1", features = ["fs", "stdio", "termios"] }
 

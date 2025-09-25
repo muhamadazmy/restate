@@ -80,12 +80,14 @@ pub trait Storage {
 
 pub trait Transaction:
     state_table::StateTable
-    + invocation_status_table::InvocationStatusTable
+    + invocation_status_table::ReadInvocationStatusTable
+    + invocation_status_table::WriteInvocationStatusTable
     + service_status_table::VirtualObjectStatusTable
     + inbox_table::InboxTable
     + outbox_table::OutboxTable
     + deduplication_table::DeduplicationTable
-    + journal_table::JournalTable
+    + journal_table::WriteJournalTable
+    + journal_table::ReadJournalTable
     + journal_table_v2::JournalTable
     + fsm_table::FsmTable
     + timer_table::TimerTable
