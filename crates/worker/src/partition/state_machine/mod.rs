@@ -49,7 +49,9 @@ use restate_storage_api::journal_table::ReadJournalTable;
 use restate_storage_api::journal_table::{JournalEntry, WriteJournalTable};
 use restate_storage_api::journal_table_v2;
 use restate_storage_api::outbox_table::{OutboxMessage, WriteOutboxTable};
-use restate_storage_api::promise_table::{Promise, PromiseState, PromiseTable};
+use restate_storage_api::promise_table::{
+    Promise, PromiseState, ReadPromiseTable, WritePromiseTable,
+};
 use restate_storage_api::service_status_table::{
     ReadOnlyVirtualObjectStatusTable, VirtualObjectStatus, VirtualObjectStatusTable,
 };
@@ -418,7 +420,8 @@ impl<S> StateMachineApplyContext<'_, S> {
     async fn on_apply(&mut self, command: Command) -> Result<(), Error>
     where
         S: IdempotencyTable
-            + PromiseTable
+            + ReadPromiseTable
+            + WritePromiseTable
             + ReadJournalTable
             + WriteJournalTable
             + ReadInvocationStatusTable
@@ -1165,7 +1168,8 @@ impl<S> StateMachineApplyContext<'_, S> {
             + journal_table_v2::WriteJournalTable
             + journal_table_v2::ReadJournalTable
             + TimerTable
-            + PromiseTable
+            + ReadPromiseTable
+            + WritePromiseTable
             + JournalEventsTable,
     {
         match termination_flavor {
@@ -1265,7 +1269,8 @@ impl<S> StateMachineApplyContext<'_, S> {
             + journal_table_v2::WriteJournalTable
             + journal_table_v2::ReadJournalTable
             + JournalEventsTable
-            + PromiseTable
+            + ReadPromiseTable
+            + WritePromiseTable
             + TimerTable,
     {
         let mut status = self.get_invocation_status(&invocation_id).await?;
@@ -1844,7 +1849,8 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadJournalTable
             + WriteJournalTable
             + TimerTable
-            + PromiseTable
+            + ReadPromiseTable
+            + WritePromiseTable
             + StateTable
             + journal_table_v2::WriteJournalTable
             + journal_table_v2::ReadJournalTable
@@ -1963,7 +1969,8 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadJournalTable
             + WriteJournalTable
             + StateTable
-            + PromiseTable
+            + ReadPromiseTable
+            + WritePromiseTable
             + WriteOutboxTable
             + FsmTable
             + TimerTable
@@ -1992,7 +1999,8 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadJournalTable
             + WriteJournalTable
             + StateTable
-            + PromiseTable
+            + ReadPromiseTable
+            + WritePromiseTable
             + WriteOutboxTable
             + FsmTable
             + TimerTable
@@ -2428,7 +2436,8 @@ impl<S> StateMachineApplyContext<'_, S> {
     ) -> Result<(), Error>
     where
         S: StateTable
-            + PromiseTable
+            + ReadPromiseTable
+            + WritePromiseTable
             + WriteOutboxTable
             + FsmTable
             + TimerTable
@@ -2646,8 +2655,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                                     Promise {
                                         state: PromiseState::NotCompleted(v),
                                     },
-                                )
-                                .await?;
+                                )?;
                             }
                             None => {
                                 self.do_put_promise(
@@ -2662,8 +2670,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                                             ),
                                         ]),
                                     },
-                                )
-                                .await?;
+                                )?;
                             }
                         }
                     } else {
@@ -2745,8 +2752,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                                     Promise {
                                         state: PromiseState::Completed(completion.into()),
                                     },
-                                )
-                                .await?;
+                                )?;
                                 CompletionResult::Empty
                             }
                             Some(Promise {
@@ -2770,8 +2776,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                                     Promise {
                                         state: PromiseState::Completed(completion.into()),
                                     },
-                                )
-                                .await?;
+                                )?;
                                 CompletionResult::Empty
                             }
                             Some(Promise {
@@ -4383,26 +4388,25 @@ impl<S> StateMachineApplyContext<'_, S> {
         Ok(())
     }
 
-    async fn do_put_promise(
+    fn do_put_promise(
         &mut self,
         service_id: ServiceId,
         key: ByteString,
         promise: Promise,
     ) -> Result<(), Error>
     where
-        S: PromiseTable,
+        S: WritePromiseTable,
     {
         debug_if_leader!(self.is_leader, rpc.service = %service_id.service_name, "Effect: Put promise {} in non completed state", key);
 
         self.storage
             .put_promise(&service_id, &key, &promise)
-            .await
             .map_err(Error::Storage)
     }
 
     async fn do_clear_all_promises(&mut self, service_id: ServiceId) -> Result<(), Error>
     where
-        S: PromiseTable,
+        S: WritePromiseTable,
     {
         debug_if_leader!(
             self.is_leader,
@@ -4412,7 +4416,6 @@ impl<S> StateMachineApplyContext<'_, S> {
 
         self.storage
             .delete_all_promises(&service_id)
-            .await
             .map_err(Error::Storage)
     }
 
