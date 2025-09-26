@@ -57,7 +57,7 @@ use restate_storage_api::service_status_table::{
 };
 use restate_storage_api::state_table::{ReadStateTable, WriteStateTable};
 use restate_storage_api::timer_table::TimerKey;
-use restate_storage_api::timer_table::{Timer, TimerTable};
+use restate_storage_api::timer_table::{Timer, WriteTimerTable};
 use restate_tracing_instrumentation as instrumentation;
 use restate_types::errors::{
     ALREADY_COMPLETED_INVOCATION_ERROR, CANCELED_INVOCATION_ERROR, GenericError,
@@ -313,7 +313,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         span_context: ServiceInvocationSpanContext,
     ) -> Result<(), Error>
     where
-        S: TimerTable,
+        S: WriteTimerTable,
     {
         match timer_value.value() {
             Timer::CompleteJournalEntry(_, entry_index, _) => {
@@ -428,7 +428,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteInvocationStatusTable
             + WriteOutboxTable
             + FsmTable
-            + TimerTable
+            + WriteTimerTable
             + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
             + InboxTable
@@ -623,7 +623,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteInvocationStatusTable
             + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
-            + TimerTable
+            + WriteTimerTable
             + InboxTable
             + FsmTable
             + WriteJournalTable,
@@ -681,7 +681,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + FsmTable
             + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
-            + TimerTable
+            + WriteTimerTable
             + InboxTable
             + FsmTable
             + WriteJournalTable,
@@ -895,7 +895,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         metadata: PreFlightInvocationMetadata,
     ) -> Result<Option<PreFlightInvocationMetadata>, Error>
     where
-        S: TimerTable + WriteInvocationStatusTable,
+        S: WriteTimerTable + WriteInvocationStatusTable,
     {
         if let Some(execution_time) = metadata.execution_time {
             let span_context = metadata.span_context().clone();
@@ -1182,7 +1182,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteOutboxTable
             + journal_table_v2::WriteJournalTable
             + journal_table_v2::ReadJournalTable
-            + TimerTable
+            + WriteTimerTable
             + ReadPromiseTable
             + WritePromiseTable
             + JournalEventsTable,
@@ -1212,7 +1212,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadJournalTable
             + WriteJournalTable
             + WriteOutboxTable
-            + TimerTable
+            + WriteTimerTable
             + FsmTable
             + journal_table_v2::WriteJournalTable
             + journal_table_v2::ReadJournalTable
@@ -1288,7 +1288,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + JournalEventsTable
             + ReadPromiseTable
             + WritePromiseTable
-            + TimerTable,
+            + WriteTimerTable,
     {
         let mut status = self.get_invocation_status(&invocation_id).await?;
 
@@ -1512,7 +1512,7 @@ impl<S> StateMachineApplyContext<'_, S> {
     ) -> Result<(), Error>
     where
         S: WriteInvocationStatusTable
-            + TimerTable
+            + WriteTimerTable
             + WriteOutboxTable
             + FsmTable
             + WriteJournalTable
@@ -1733,7 +1733,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         journal_length: EntryIndex,
     ) -> Result<bool, Error>
     where
-        S: ReadJournalTable + WriteJournalTable + WriteOutboxTable + FsmTable + TimerTable,
+        S: ReadJournalTable + WriteJournalTable + WriteOutboxTable + FsmTable + WriteTimerTable,
     {
         let journal_entries_to_cancel: Vec<(EntryIndex, EnrichedRawEntry)> = self
             .storage
@@ -1863,12 +1863,11 @@ impl<S> StateMachineApplyContext<'_, S> {
             + FsmTable
             + ReadVirtualObjectStatusTable
             + WriteVirtualObjectStatusTable
-            + TimerTable
+            + WriteTimerTable
             + InboxTable
             + FsmTable
             + ReadJournalTable
             + WriteJournalTable
-            + TimerTable
             + ReadPromiseTable
             + WritePromiseTable
             + ReadStateTable
@@ -1996,7 +1995,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WritePromiseTable
             + WriteOutboxTable
             + FsmTable
-            + TimerTable
+            + WriteTimerTable
             + InboxTable
             + WriteVirtualObjectStatusTable
             + journal_table_v2::WriteJournalTable
@@ -2027,7 +2026,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WritePromiseTable
             + WriteOutboxTable
             + FsmTable
-            + TimerTable
+            + WriteTimerTable
             + InboxTable
             + WriteVirtualObjectStatusTable
             + journal_table_v2::WriteJournalTable
@@ -2465,7 +2464,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WritePromiseTable
             + WriteOutboxTable
             + FsmTable
-            + TimerTable
+            + WriteTimerTable
             + WriteJournalTable
             + ReadJournalTable
             + WriteInvocationStatusTable,
@@ -3334,7 +3333,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         S: ReadJournalTable
             + WriteJournalTable
             + WriteInvocationStatusTable
-            + TimerTable
+            + WriteTimerTable
             + FsmTable
             + WriteOutboxTable,
     {
@@ -4122,7 +4121,7 @@ impl<S> StateMachineApplyContext<'_, S> {
 
     async fn do_delete_timer(&mut self, timer_key: TimerKey) -> Result<(), Error>
     where
-        S: TimerTable,
+        S: WriteTimerTable,
     {
         debug_if_leader!(
             self.is_leader,

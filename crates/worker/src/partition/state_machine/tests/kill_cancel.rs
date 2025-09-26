@@ -15,7 +15,9 @@ use assert2::let_assert;
 use googletest::any;
 use prost::Message;
 use restate_storage_api::journal_table::WriteJournalTable;
-use restate_storage_api::timer_table::{Timer, TimerKey, TimerKeyKind, TimerTable};
+use restate_storage_api::timer_table::{
+    ReadTimerTable, Timer, TimerKey, TimerKeyKind, WriteTimerTable,
+};
 use restate_types::deployment::PinnedDeployment;
 use restate_types::identifiers::EntryIndex;
 use restate_types::invocation::{IngressInvocationResponseSink, TerminationFlavor};
