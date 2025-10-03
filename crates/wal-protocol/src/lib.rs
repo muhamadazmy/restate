@@ -18,6 +18,7 @@ use restate_types::invocation::{
 use restate_types::logs;
 use restate_types::logs::{HasRecordKeys, Keys, MatchKeyQuery};
 use restate_types::message::MessageIndex;
+use restate_types::schema::Schema;
 use restate_types::state_mut::ExternalStateMutation;
 
 use crate::control::{AnnounceLeader, VersionBarrier};
@@ -29,7 +30,7 @@ pub mod control;
 pub mod timer;
 
 /// The primary envelope for all messages in the system.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Envelope {
     pub header: Header,
@@ -125,7 +126,7 @@ pub enum Destination {
 }
 
 /// State machine input commands
-#[derive(Debug, Clone, PartialEq, Eq, strum::EnumDiscriminants, strum::VariantNames)]
+#[derive(Debug, Clone, strum::EnumDiscriminants, strum::VariantNames)]
 #[strum_discriminants(derive(strum::IntoStaticStr))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Command {
@@ -183,6 +184,9 @@ pub enum Command {
     NotifyGetInvocationOutputResponse(GetInvocationOutputResponse),
     /// Notify a signal.
     NotifySignal(NotifySignalRequest),
+
+    /// Upsert schema for consistent schema across replicas
+    UpsertSchema(Schema),
 }
 
 impl Command {
@@ -233,6 +237,7 @@ impl HasRecordKeys for Envelope {
             Command::InvocationResponse(response) => Keys::Single(response.partition_key()),
             Command::NotifySignal(sig) => Keys::Single(sig.partition_key()),
             Command::NotifyGetInvocationOutputResponse(res) => Keys::Single(res.partition_key()),
+            Command::UpsertSchema(_) => Keys::Single(self.partition_key()),
         }
     }
 }
@@ -337,6 +342,7 @@ mod envelope {
         UpdatePartitionDurability = 17,         // bilrost
         ResumeInvocation = 18,                  // flexbuffers
         RestartAsNewInvocation = 19,            // flexbuffers
+        UpsertSchema = 20,                      // flexbuffers
     }
 
     #[derive(bilrost::Message)]
@@ -524,6 +530,10 @@ mod envelope {
                 let value = protobuf::outbox_message::NotifySignal::from(value.clone());
                 (CommandKind::NotifySignal, Field::encode_protobuf(&value))
             }
+            Command::UpsertSchema(value) => (
+                CommandKind::UpsertSchema,
+                Field::encode_serde(StorageCodecKind::FlexbuffersSerde, value),
+            ),
         };
 
         let dto = Envelope {
@@ -630,6 +640,10 @@ mod envelope {
                     envelope.command.decode_protobuf()?;
 
                 Command::NotifySignal(value.try_into()?)
+            }
+            CommandKind::UpsertSchema => {
+                codec_or_error!(envelope.command, StorageCodecKind::FlexbuffersSerde);
+                Command::UpsertSchema(envelope.command.decode_serde()?)
             }
         };
 
