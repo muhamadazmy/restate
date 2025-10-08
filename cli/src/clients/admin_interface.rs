@@ -11,6 +11,7 @@
 use super::AdminClient;
 use super::admin_client::Envelope;
 use http::{Uri, Version};
+use std::collections::HashMap;
 
 use restate_admin_rest_model::deployments::*;
 use restate_admin_rest_model::invocations::RestartAsNewInvocationResponse;
@@ -182,6 +183,7 @@ pub enum Deployment {
         created_at: humantime::Timestamp,
         min_protocol_version: i32,
         max_protocol_version: i32,
+        metadata: HashMap<String, String>,
     },
     Lambda {
         arn: LambdaARN,
@@ -190,10 +192,18 @@ pub enum Deployment {
         created_at: humantime::Timestamp,
         min_protocol_version: i32,
         max_protocol_version: i32,
+        metadata: HashMap<String, String>,
     },
 }
 
 impl Deployment {
+    pub fn created_at(&self) -> humantime::Timestamp {
+        match self {
+            Self::Http { created_at, .. } => *created_at,
+            Self::Lambda { created_at, .. } => *created_at,
+        }
+    }
+
     pub fn from_deployment_response(
         deployment_response: DeploymentResponse,
     ) -> (DeploymentId, Self, Vec<ServiceNameRevPair>) {
@@ -208,6 +218,7 @@ impl Deployment {
                 min_protocol_version,
                 max_protocol_version,
                 services,
+                metadata,
                 ..
             } => (
                 id,
@@ -219,6 +230,7 @@ impl Deployment {
                     created_at,
                     min_protocol_version,
                     max_protocol_version,
+                    metadata,
                 },
                 services,
             ),
@@ -231,6 +243,7 @@ impl Deployment {
                 min_protocol_version,
                 max_protocol_version,
                 services,
+                metadata,
                 ..
             } => (
                 id,
@@ -241,6 +254,7 @@ impl Deployment {
                     created_at,
                     min_protocol_version,
                     max_protocol_version,
+                    metadata,
                 },
                 services,
             ),
@@ -261,6 +275,7 @@ impl Deployment {
                 min_protocol_version,
                 max_protocol_version,
                 services,
+                metadata,
                 ..
             } => (
                 id,
@@ -272,6 +287,7 @@ impl Deployment {
                     created_at,
                     min_protocol_version,
                     max_protocol_version,
+                    metadata,
                 },
                 services,
             ),
@@ -284,6 +300,7 @@ impl Deployment {
                 min_protocol_version,
                 max_protocol_version,
                 services,
+                metadata,
                 ..
             } => (
                 id,
@@ -294,6 +311,7 @@ impl Deployment {
                     created_at,
                     min_protocol_version,
                     max_protocol_version,
+                    metadata,
                 },
                 services,
             ),
