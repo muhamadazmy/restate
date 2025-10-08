@@ -197,6 +197,13 @@ pub enum Deployment {
 }
 
 impl Deployment {
+    pub fn created_at(&self) -> humantime::Timestamp {
+        match self {
+            Self::Http { created_at, .. } => *created_at,
+            Self::Lambda { created_at, .. } => *created_at,
+        }
+    }
+
     pub fn from_deployment_response(
         deployment_response: DeploymentResponse,
     ) -> (DeploymentId, Self, Vec<ServiceNameRevPair>) {
