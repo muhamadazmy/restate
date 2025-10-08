@@ -56,7 +56,7 @@ fn put_journal_entry<S: StorageAccess>(
 ) -> Result<()> {
     let key = write_journal_entry_key(invocation_id, journal_index);
 
-    storage.put_kv(key, journal_entry)
+    storage.put_kv_proto(key, journal_entry)
 }
 
 fn get_journal_entry<S: StorageAccess>(

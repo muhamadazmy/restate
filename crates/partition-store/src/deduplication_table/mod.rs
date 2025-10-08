@@ -66,6 +66,6 @@ impl WriteDeduplicationTable for PartitionStoreTransaction<'_> {
             .partition_id(self.partition_id().into())
             .producer_id(producer_id);
 
-        self.put_kv(key, dedup_sequence_number)
+        self.put_kv_proto(key, dedup_sequence_number)
     }
 }

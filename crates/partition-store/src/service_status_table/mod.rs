@@ -54,7 +54,7 @@ fn put_virtual_object_status<S: StorageAccess>(
     if *status == VirtualObjectStatus::Unlocked {
         storage.delete_key(&key)
     } else {
-        storage.put_kv(key, status)
+        storage.put_kv_proto(key, status)
     }
 }
 

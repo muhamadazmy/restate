@@ -62,7 +62,7 @@ fn put_promise<S: StorageAccess>(
     key: &ByteString,
     metadata: &Promise,
 ) -> Result<()> {
-    storage.put_kv(create_key(service_id, key), metadata)
+    storage.put_kv_proto(create_key(service_id, key), metadata)
 }
 
 fn delete_all_promises<S: StorageAccess>(storage: &mut S, service_id: &ServiceId) -> Result<()> {

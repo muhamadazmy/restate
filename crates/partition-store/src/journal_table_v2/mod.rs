@@ -81,7 +81,7 @@ fn put_journal_entry<S: StorageAccess>(
     related_completion_ids: &[CompletionId],
 ) -> Result<()> {
     if let RawEntry::Notification(notification) = &journal_entry.inner {
-        storage.put_kv(
+        storage.put_kv_proto(
             JournalNotificationIdToNotificationIndexKey::default()
                 .partition_key(invocation_id.partition_key())
                 .invocation_uuid(invocation_id.invocation_uuid())
@@ -90,7 +90,7 @@ fn put_journal_entry<S: StorageAccess>(
         )?;
     } else if let RawEntry::Command(_) = &journal_entry.inner {
         for completion_id in related_completion_ids {
-            storage.put_kv(
+            storage.put_kv_proto(
                 JournalCompletionIdToCommandIndexKey::default()
                     .partition_key(invocation_id.partition_key())
                     .invocation_uuid(invocation_id.invocation_uuid())
@@ -100,7 +100,7 @@ fn put_journal_entry<S: StorageAccess>(
         }
     }
 
-    storage.put_kv(
+    storage.put_kv_proto(
         write_journal_entry_key(invocation_id, journal_index),
         &StoredEntry(journal_entry.clone()),
     )

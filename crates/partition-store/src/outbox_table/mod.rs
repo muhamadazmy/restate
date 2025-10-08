@@ -39,7 +39,7 @@ fn add_message<S: StorageAccess>(
         .partition_id(partition_id.into())
         .message_index(message_index);
 
-    storage.put_kv(key, outbox_message)
+    storage.put_kv_proto(key, outbox_message)
 }
 
 fn get_outbox_head_seq_number<S: StorageAccess>(
