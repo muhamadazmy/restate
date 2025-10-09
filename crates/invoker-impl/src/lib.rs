@@ -69,8 +69,8 @@ use crate::invocation_state_machine::OnTaskError;
 use crate::invocation_task::InvocationTask;
 use crate::invocation_task::{InvocationTaskOutput, InvocationTaskOutputInner};
 use crate::metric_definitions::{
-    INVOKER_ENQUEUE, INVOKER_INVOCATION_TASKS, TASK_OP_COMPLETED, TASK_OP_FAILED, TASK_OP_STARTED,
-    TASK_OP_SUSPENDED,
+    INVOKER_ENQUEUE, INVOKER_INVOCATION_TASKS, PARTITION_ID_LOOKUP, TASK_OP_COMPLETED,
+    TASK_OP_FAILED, TASK_OP_STARTED, TASK_OP_SUSPENDED,
 };
 use crate::status_store::InvocationStatusStore;
 
@@ -386,7 +386,7 @@ where
                 match input_message {
                     // --- Spillable queue loading/offloading
                     InputCommand::Invoke(invoke_command) => {
-                        counter!(INVOKER_ENQUEUE).increment(1);
+                        counter!(INVOKER_ENQUEUE, "partition_id" => invoke_command.partition.0.to_string()).increment(1);
                         segmented_input_queue.inner_pin_mut().enqueue(invoke_command).await;
                     },
                     // --- Other commands (they don't go through the segment queue)
@@ -996,7 +996,7 @@ where
             .remove_invocation_with_epoch(partition, &invocation_id, invocation_epoch)
         {
             debug_assert_eq!(invocation_epoch, ism.invocation_epoch);
-            counter!(INVOKER_INVOCATION_TASKS, "status" => TASK_OP_COMPLETED).increment(1);
+            counter!(INVOKER_INVOCATION_TASKS, "status" => TASK_OP_COMPLETED, "partition_id" => PARTITION_ID_LOOKUP.get(partition.0)).increment(1);
             trace!(
                 restate.invocation.target = %ism.invocation_target,
                 "Invocation task closed correctly");
@@ -1036,7 +1036,7 @@ where
             .remove_invocation_with_epoch(partition, &invocation_id, invocation_epoch)
         {
             debug_assert_eq!(invocation_epoch, ism.invocation_epoch);
-            counter!(INVOKER_INVOCATION_TASKS, "status" => TASK_OP_SUSPENDED).increment(1);
+            counter!(INVOKER_INVOCATION_TASKS, "status" => TASK_OP_SUSPENDED, "partition_id" => PARTITION_ID_LOOKUP.get(partition.0)).increment(1);
             trace!(
                 restate.invocation.target = %ism.invocation_target,
                 "Suspending invocation");
@@ -1078,7 +1078,9 @@ where
             .remove_invocation_with_epoch(partition, &invocation_id, invocation_epoch)
         {
             debug_assert_eq!(invocation_epoch, ism.invocation_epoch);
-            counter!(INVOKER_INVOCATION_TASKS, "status" => TASK_OP_SUSPENDED).increment(1);
+            counter!(INVOKER_INVOCATION_TASKS, "status" => TASK_OP_SUSPENDED, "partition_id" => PARTITION_ID_LOOKUP.get(partition.0))
+                .increment(1);
+
             trace!(
                 restate.invocation.target = %ism.invocation_target,
                 "Suspending invocation"
@@ -1237,7 +1239,8 @@ where
             OnTaskError::ScheduleRetry(next_retry_timer_duration) => {
                 counter!(INVOKER_INVOCATION_TASKS,
                     "status" => TASK_OP_FAILED,
-                    "transient" => "true"
+                    "transient" => "true",
+                    "partition_id" => PARTITION_ID_LOOKUP.get(partition.0)
                 )
                 .increment(1);
                 if let Some(error_stacktrace) = error.error_stacktrace() {
@@ -1327,7 +1330,8 @@ where
             OnTaskError::Pause => {
                 counter!(INVOKER_INVOCATION_TASKS,
                     "status" => TASK_OP_FAILED,
-                    "transient" => "false"
+                    "transient" => "false",
+                    "partition_id" => PARTITION_ID_LOOKUP.get(partition.0)
                 )
                 .increment(1);
                 warn_it!(
@@ -1388,7 +1392,8 @@ where
             OnTaskError::Kill => {
                 counter!(INVOKER_INVOCATION_TASKS,
                     "status" => TASK_OP_FAILED,
-                    "transient" => "false"
+                    "transient" => "false",
+                    "partition_id" => PARTITION_ID_LOOKUP.get(partition.0)
                 )
                 .increment(1);
                 warn_it!(
@@ -1446,7 +1451,7 @@ where
             "Invocation task started state. Invocation state: {:?}",
             ism.invocation_state_debug()
         );
-        counter!(INVOKER_INVOCATION_TASKS, "status" => TASK_OP_STARTED).increment(1);
+        counter!(INVOKER_INVOCATION_TASKS, "status" => TASK_OP_STARTED, "partition_id" => PARTITION_ID_LOOKUP.get(partition.0)).increment(1);
         self.invocation_state_machine_manager
             .register_invocation(partition, invocation_id, ism);
     }
