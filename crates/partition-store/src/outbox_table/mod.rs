@@ -103,7 +103,7 @@ fn get_outbox_message<S: StorageAccess>(
         .partition_id(partition_id.into())
         .message_index(sequence_number);
 
-    storage.get_value(outbox_key)
+    storage.get_value_proto(outbox_key)
 }
 
 fn truncate_outbox<S: StorageAccess>(

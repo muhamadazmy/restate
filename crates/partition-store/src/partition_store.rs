@@ -1111,7 +1111,7 @@ pub(crate) trait StorageAccess {
     }
 
     #[inline]
-    fn get_value<K, V>(&mut self, key: K) -> Result<Option<V>>
+    fn get_value_proto<K, V>(&mut self, key: K) -> Result<Option<V>>
     where
         K: TableKey,
         V: PartitionStoreProtobufValue,

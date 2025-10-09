@@ -86,7 +86,7 @@ fn get_invocation_status<S: StorageAccess>(
     let _x = RocksDbPerfGuard::new("get-invocation-status");
 
     storage
-        .get_value::<_, InvocationStatus>(create_invocation_status_key(invocation_id))
+        .get_value_proto::<_, InvocationStatus>(create_invocation_status_key(invocation_id))
         .map(|value| {
             if let Some(invocation_status) = value {
                 invocation_status

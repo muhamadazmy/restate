@@ -53,7 +53,7 @@ fn get_promise<S: StorageAccess>(
     key: &ByteString,
 ) -> Result<Option<Promise>> {
     let _x = RocksDbPerfGuard::new("get-promise");
-    storage.get_value(create_key(service_id, key))
+    storage.get_value_proto(create_key(service_id, key))
 }
 
 fn put_promise<S: StorageAccess>(

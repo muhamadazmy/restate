@@ -57,7 +57,7 @@ fn get_idempotency_metadata<S: StorageAccess>(
     storage: &mut S,
     idempotency_id: &IdempotencyId,
 ) -> Result<Option<IdempotencyMetadata>> {
-    storage.get_value(create_key(idempotency_id))
+    storage.get_value_proto(create_key(idempotency_id))
 }
 
 fn put_idempotency_metadata<S: StorageAccess>(

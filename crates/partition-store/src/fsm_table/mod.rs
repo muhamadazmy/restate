@@ -55,7 +55,7 @@ where
     let key = PartitionStateMachineKey::default()
         .partition_id(partition_id.into())
         .state_id(state_id);
-    storage.get_value(key)
+    storage.get_value_proto(key)
 }
 
 /// Forces a read from persistent storage, bypassing memtables and block cache.

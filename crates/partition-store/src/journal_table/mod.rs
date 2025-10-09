@@ -66,7 +66,7 @@ fn get_journal_entry<S: StorageAccess>(
 ) -> Result<Option<JournalEntry>> {
     let key = write_journal_entry_key(invocation_id, journal_index);
 
-    storage.get_value(key)
+    storage.get_value_proto(key)
 }
 
 fn get_journal<S: StorageAccess>(

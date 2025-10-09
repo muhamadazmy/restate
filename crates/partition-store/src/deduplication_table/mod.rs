@@ -35,7 +35,7 @@ fn get_dedup_sequence_number<S: StorageAccess>(
         .partition_id(partition_id.into())
         .producer_id(producer_id.clone());
 
-    storage.get_value(key)
+    storage.get_value_proto(key)
 }
 
 impl ReadDeduplicationTable for PartitionStore {

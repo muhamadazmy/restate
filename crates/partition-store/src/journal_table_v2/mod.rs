@@ -112,7 +112,7 @@ fn get_journal_entry<S: StorageAccess>(
     journal_index: u32,
 ) -> Result<Option<StoredRawEntry>> {
     let key = write_journal_entry_key(invocation_id, journal_index);
-    let opt: Option<StoredEntry> = storage.get_value(key)?;
+    let opt: Option<StoredEntry> = storage.get_value_proto(key)?;
     Ok(opt.map(|e| e.0))
 }
 
@@ -251,7 +251,7 @@ fn get_command_by_completion_id<S: StorageAccess>(
         .partition_key(invocation_id.partition_key())
         .invocation_uuid(invocation_id.invocation_uuid())
         .completion_id(completion_id);
-    let opt: Option<JournalEntryIndex> = storage.get_value(completion_id_to_command_index)?;
+    let opt: Option<JournalEntryIndex> = storage.get_value_proto(completion_id_to_command_index)?;
     if opt.is_none() {
         return Ok(None);
     }
@@ -259,7 +259,7 @@ fn get_command_by_completion_id<S: StorageAccess>(
     // Now access the entry
     let journal_index = opt.unwrap().0;
     let key = write_journal_entry_key(&invocation_id, journal_index);
-    let opt: Option<StoredEntry> = storage.get_value(key)?;
+    let opt: Option<StoredEntry> = storage.get_value_proto(key)?;
     if opt.is_none() {
         return Ok(None);
     }
@@ -287,7 +287,9 @@ fn has_completion<S: StorageAccess>(
         .partition_key(invocation_id.partition_key())
         .invocation_uuid(invocation_id.invocation_uuid())
         .notification_id(NotificationId::CompletionId(completion_id));
-    Ok(storage.get_value::<_, JournalEntryIndex>(key)?.is_some())
+    Ok(storage
+        .get_value_proto::<_, JournalEntryIndex>(key)?
+        .is_some())
 }
 
 impl ReadJournalTable for PartitionStore {
