@@ -8,9 +8,60 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::sync::LazyLock;
+
+use dashmap::{DashMap, Entry};
 /// Optional to have but adds description/help message to the metrics emitted to
 /// the metrics' sink.
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
+
+/// Lazily initialized cache that maps "partition" ids to their string representation for metric labels,
+/// avoiding fresh string allocations whenever a partition id is used as a metric dimension.
+pub(crate) static ID_LOOKUP: LazyLock<IdLookup> = LazyLock::new(IdLookup::new);
+
+pub(crate) struct IdLookup {
+    index: Vec<String>,
+    extra: DashMap<u16, String>,
+}
+
+impl IdLookup {
+    const SIZE: u16 = 2048;
+
+    fn new() -> Self {
+        let mut index = Vec::with_capacity(Self::SIZE as usize);
+        for i in 0..Self::SIZE {
+            index.push(i.to_string());
+        }
+
+        Self {
+            index,
+            extra: DashMap::new(),
+        }
+    }
+
+    #[inline]
+    pub fn get(&'static self, id: impl Into<u16>) -> &'static str {
+        let id = id.into();
+        if id < Self::SIZE {
+            // fast access
+            return self.index[id as usize].as_str();
+        }
+
+        // somehow we are running more that SIZE partitions
+        // it's a slower path but still better than doing a .to_string()
+        // on each metric
+        let entry = self.extra.entry(id);
+        match entry {
+            Entry::Occupied(entry) => unsafe {
+                std::mem::transmute::<&str, &'static str>(entry.get())
+            },
+            Entry::Vacant(entry) => {
+                let r = entry.insert(id.to_string());
+                unsafe { std::mem::transmute::<&str, &'static str>(r.as_str()) }
+            }
+        }
+    }
+}
 
 pub const INVOKER_ENQUEUE: &str = "restate.invoker.enqueue.total";
 pub const INVOKER_INVOCATION_TASKS: &str = "restate.invoker.invocation_tasks.total";
