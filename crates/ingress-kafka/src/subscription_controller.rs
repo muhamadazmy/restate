@@ -10,7 +10,7 @@
 
 use super::consumer_task::MessageSender;
 use super::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::dispatcher::KafkaIngressDispatcher;
 use crate::subscription_controller::task_orchestrator::TaskOrchestrator;
@@ -169,20 +169,30 @@ impl Service {
         subscriptions: Vec<Subscription>,
         task_orchestrator: &mut TaskOrchestrator,
     ) -> anyhow::Result<()> {
-        let mut running_subscriptions: HashSet<_> =
+        let subscriptions: HashMap<_, _> = subscriptions
+            .into_iter()
+            .map(|sub| (sub.id(), sub))
+            .collect();
+
+        let running_subscriptions: HashSet<_> =
             task_orchestrator.running_subscriptions().cloned().collect();
 
-        for subscription in subscriptions {
-            if !running_subscriptions.contains(&subscription.id()) {
-                self.handle_start_subscription(options, subscription, task_orchestrator)?;
-            } else {
-                running_subscriptions.remove(&subscription.id());
+        // Stop subscriptions that disappeared before starting new ones.
+        // During an ID migration we might briefly observe both the legacy and deterministic IDs;
+        // stopping first keeps us from running both versions at the same time.
+
+        for subscription_id in &running_subscriptions {
+            if !subscriptions.contains_key(subscription_id) {
+                self.handle_stop_subscription(*subscription_id, task_orchestrator);
             }
         }
 
-        for subscription_id in running_subscriptions {
-            self.handle_stop_subscription(subscription_id, task_orchestrator);
+        for (subscription_id, subscription) in subscriptions {
+            if !running_subscriptions.contains(&subscription_id) {
+                self.handle_start_subscription(options, subscription, task_orchestrator)?;
+            }
         }
+
         Ok(())
     }
 }
