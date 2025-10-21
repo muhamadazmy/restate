@@ -172,6 +172,11 @@ impl Service {
         let mut running_subscriptions: HashSet<_> =
             task_orchestrator.running_subscriptions().cloned().collect();
 
+        // todo(azmy): During migrating subscription ids to use
+        // deterministic subscription-id it's probably better to
+        // make sure to stop all "stopped" subscriptions first
+        // then start the new ones.
+
         for subscription in subscriptions {
             if !running_subscriptions.contains(&subscription.id()) {
                 self.handle_start_subscription(options, subscription, task_orchestrator)?;
@@ -183,6 +188,7 @@ impl Service {
         for subscription_id in running_subscriptions {
             self.handle_stop_subscription(subscription_id, task_orchestrator);
         }
+
         Ok(())
     }
 }

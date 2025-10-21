@@ -13,7 +13,9 @@ use std::fmt;
 
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::warn;
 
+use crate::config::KafkaClusterOptions;
 use crate::identifiers::SubscriptionId;
 use crate::invocation::{VirtualObjectHandlerType, WorkflowHandlerType};
 
@@ -92,31 +94,88 @@ impl PartialEq<&str> for Sink {
     }
 }
 
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ValidationError {
+    #[error("missing required option '{name}'")]
+    Missing { name: &'static str },
+    #[error("invalid option '{name}'. Reason: {reason}")]
+    Invalid {
+        name: &'static str,
+        reason: &'static str,
+    },
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Subscription {
-    id: SubscriptionId,
     source: Source,
     sink: Sink,
     metadata: HashMap<String, String>,
 }
 
 impl Subscription {
-    pub fn new(
-        id: SubscriptionId,
-        source: Source,
-        sink: Sink,
-        metadata: HashMap<String, String>,
-    ) -> Self {
+    fn new(source: Source, sink: Sink, metadata: HashMap<String, String>) -> Self {
         Self {
-            id,
             source,
             sink,
             metadata,
         }
     }
 
+    /// Creates a new subscription from cluster config
+    pub fn from_cluster(
+        cluster: &KafkaClusterOptions,
+        source: Source,
+        sink: Sink,
+        metadata: HashMap<String, String>,
+    ) -> Result<Self, ValidationError> {
+        // Retrieve the cluster option and merge them with subscription metadata
+        let mut cluster_options = cluster.additional_options.clone();
+
+        // override cluster options with subscription metadata
+        for (key, value) in metadata {
+            cluster_options.insert(key, value);
+        }
+
+        if cluster_options.contains_key("enable.auto.commit") {
+            warn!(
+                "The configuration option enable.auto.commit should not be set and it will be ignored."
+            );
+        }
+
+        if cluster_options.contains_key("enable.auto.offset.store") {
+            warn!(
+                "The configuration option enable.auto.offset.store should not be set and it will be ignored."
+            );
+        }
+
+        if !cluster_options.contains_key("group.id") {
+            return Err(ValidationError::Missing { name: "group.id" });
+        }
+
+        // Set client.id if unset
+        if !cluster_options.contains_key("client.id") {
+            cluster_options.insert("client.id".to_string(), "restate".to_string());
+        }
+
+        Ok(Self::new(source, sink, cluster_options))
+    }
+
+    pub fn group_id(&self) -> Option<&str> {
+        self.metadata.get("group.id").map(|s| s.as_str())
+    }
+
+    /// Get the subscription deterministic id
+    /// The id is deterministic over the kafka consumer group.id and topic
+    ///
+    /// Panics if group.id is not set.
     pub fn id(&self) -> SubscriptionId {
-        self.id
+        let group_id = self.group_id().expect("kafka group.id is set");
+        let Source::Kafka { topic, .. } = &self.source;
+        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+        hasher.update(group_id.as_bytes());
+        hasher.update(topic.as_bytes());
+
+        SubscriptionId::from(hasher.digest128())
     }
 
     pub fn source(&self) -> &Source {
@@ -245,16 +304,12 @@ mod serde_hacks {
 
 #[cfg(feature = "test-util")]
 pub mod mocks {
-    use std::str::FromStr;
 
     use super::*;
 
     impl Subscription {
         pub fn mock() -> Self {
-            let id = SubscriptionId::from_str("sub_15VqmTOnXH3Vv2pl5HOG7Ua")
-                .expect("stable valid subscription id");
             Subscription {
-                id,
                 source: Source::Kafka {
                     cluster: "my-cluster".to_string(),
                     topic: "my-topic".to_string(),
