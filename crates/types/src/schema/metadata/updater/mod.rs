@@ -10,7 +10,7 @@
 
 use super::{ActiveServiceRevision, DeliveryOptions, Deployment, Handler, Schema, ServiceRevision};
 
-use crate::config::{Configuration, IngressOptions};
+use crate::config::Configuration;
 use crate::deployment::{DeploymentAddress, Headers};
 use crate::endpoint_manifest::HandlerType;
 use crate::errors::GenericError;
@@ -164,6 +164,9 @@ pub(in crate::schema) enum SubscriptionError {
     InvalidServiceSinkAuthority(Uri),
     #[error("invalid sink URI '{0}': cannot find service/handler specified in the sink URI.")]
     SinkServiceNotFound(Uri),
+
+    #[error("unknown kafka cluster '{0}' in source URI")]
+    UnknownCluster(String),
 
     #[error(transparent)]
     #[code(unknown)]
@@ -852,18 +855,10 @@ impl SchemaUpdater {
 
     pub(in crate::schema) fn add_subscription(
         &mut self,
-        id: Option<SubscriptionId>,
         source: Uri,
         sink: Uri,
         metadata: Option<HashMap<String, String>>,
     ) -> Result<SubscriptionId, SchemaError> {
-        // generate id if not provided
-        let id = id.unwrap_or_default();
-
-        if self.schema.subscriptions.contains_key(&id) {
-            return Err(SchemaError::Subscription(SubscriptionError::Override(id)));
-        }
-
         // TODO This logic to parse source and sink should be moved elsewhere to abstract over the known source/sink providers
         //  Maybe together with the validator?
 
@@ -954,15 +949,21 @@ impl SchemaUpdater {
             }
         };
 
-        let subscription = Configuration::pinned()
-            .ingress
-            .validate_subscription(Subscription::new(
-                id,
-                source,
-                sink,
-                metadata.unwrap_or_default(),
-            ))
-            .map_err(|e| SchemaError::Subscription(SubscriptionError::Validation(e.into())))?;
+        let Source::Kafka { cluster, .. } = &source;
+        let config = Configuration::pinned();
+        let cluster_options = config.ingress.get_kafka_cluster(cluster).ok_or_else(|| {
+            SchemaError::Subscription(SubscriptionError::UnknownCluster(cluster.clone()))
+        })?;
+
+        let subscription =
+            Subscription::from_cluster(cluster_options, source, sink, metadata.unwrap_or_default())
+                .map_err(|e| SchemaError::Subscription(SubscriptionError::Validation(e.into())))?;
+
+        let id = subscription.id();
+
+        if self.schema.subscriptions.contains_key(&id) {
+            return Err(SchemaError::Subscription(SubscriptionError::Override(id)));
+        }
 
         self.schema.subscriptions.insert(id, subscription);
         self.mark_updated();
@@ -1264,66 +1265,6 @@ fn validate_service_name(name: &str) -> Result<(), ServiceError> {
         Err(ServiceError::ReservedName(name.to_string()))
     } else {
         Ok(())
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("invalid option '{name}'. Reason: {reason}")]
-pub struct ValidationError {
-    name: &'static str,
-    reason: &'static str,
-}
-
-impl IngressOptions {
-    fn validate_subscription(
-        &self,
-        mut subscription: Subscription,
-    ) -> Result<Subscription, ValidationError> {
-        // Retrieve the cluster option and merge them with subscription metadata
-        let Source::Kafka { cluster, .. } = subscription.source();
-        let cluster_options = &self.get_kafka_cluster(cluster).ok_or(ValidationError {
-            name: "source",
-            reason: "specified cluster in the source URI does not exist. Make sure it is defined in the KafkaOptions",
-        })?.additional_options;
-
-        if cluster_options.contains_key("enable.auto.commit")
-            || subscription.metadata().contains_key("enable.auto.commit")
-        {
-            warn!(
-                "The configuration option enable.auto.commit should not be set and it will be ignored."
-            );
-        }
-        if cluster_options.contains_key("enable.auto.offset.store")
-            || subscription
-                .metadata()
-                .contains_key("enable.auto.offset.store")
-        {
-            warn!(
-                "The configuration option enable.auto.offset.store should not be set and it will be ignored."
-            );
-        }
-
-        // Set the group.id if unset
-        if !(cluster_options.contains_key("group.id")
-            || subscription.metadata().contains_key("group.id"))
-        {
-            let group_id = subscription.id().to_string();
-
-            subscription
-                .metadata_mut()
-                .insert("group.id".to_string(), group_id);
-        }
-
-        // Set client.id if unset
-        if !(cluster_options.contains_key("client.id")
-            || subscription.metadata().contains_key("client.id"))
-        {
-            subscription
-                .metadata_mut()
-                .insert("client.id".to_string(), "restate".to_string());
-        }
-
-        Ok(subscription)
     }
 }
 

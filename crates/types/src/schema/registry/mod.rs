@@ -598,7 +598,7 @@ impl<Metadata: MetadataService, Discovery, Telemetry>
             .metadata_service
             .update(|schema| {
                 SchemaUpdater::update_and_return(schema, |updater| {
-                    updater.add_subscription(None, source.clone(), sink.clone(), options.clone())
+                    updater.add_subscription(source.clone(), sink.clone(), options.clone())
                 })
                 .map_err(Into::into)
             })

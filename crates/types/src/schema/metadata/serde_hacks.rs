@@ -12,6 +12,7 @@ use super::*;
 
 use crate::identifiers::DeploymentId;
 use crate::invocation::{VirtualObjectHandlerType, WorkflowHandlerType};
+use crate::schema::subscriptions::Source;
 use restate_time_util::FriendlyDuration;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -415,6 +416,10 @@ impl From<Schema> for super::Schema {
             subscriptions,
         }: Schema,
     ) -> Self {
+        // make sure that subscriptions ids are updated to the new deterministic ids
+        // and that they include the proper group.id if not already there
+        let subscriptions = update_subscriptions(subscriptions);
+
         if let Some(deployments_v2) = deployments_v2 {
             Self {
                 version,
@@ -447,6 +452,39 @@ impl From<Schema> for super::Schema {
             )
         }
     }
+}
+
+/// makes sure all subscriptions has their group.id set
+/// and update their ids to the new deterministic value
+fn update_subscriptions(
+    subscriptions: HashMap<SubscriptionId, Subscription>,
+) -> HashMap<SubscriptionId, Subscription> {
+    let config = Configuration::pinned();
+    let mut updated = HashMap::default();
+    for mut subscription in subscriptions.into_values() {
+        let Source::Kafka { cluster, .. } = subscription.source();
+        // group id must be set on the subscription.
+        // otherwise the value *MUST* be set on the cluster
+        // config.
+        if subscription.group_id().is_none() {
+            let config = config
+                .ingress
+                .get_kafka_cluster(cluster)
+                .expect("cluster config to be found");
+            let group_id = config
+                .additional_options
+                .get("group.id")
+                .expect("cluster group.id to be set");
+            subscription
+                .metadata_mut()
+                .insert("group.id".into(), group_id.clone());
+        }
+
+        let id = subscription.id();
+        updated.insert(id, subscription);
+    }
+
+    updated
 }
 
 mod conversions {
