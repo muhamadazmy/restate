@@ -956,12 +956,7 @@ impl SchemaUpdater {
 
         let subscription = Configuration::pinned()
             .ingress
-            .validate_subscription(Subscription::new(
-                id,
-                source,
-                sink,
-                metadata.unwrap_or_default(),
-            ))
+            .create_kafka_subscription(id, source, sink, metadata.unwrap_or_default())
             .map_err(|e| SchemaError::Subscription(SubscriptionError::Validation(e.into())))?;
 
         self.schema.subscriptions.insert(id, subscription);
@@ -1275,55 +1270,47 @@ pub struct ValidationError {
 }
 
 impl IngressOptions {
-    fn validate_subscription(
+    fn create_kafka_subscription(
         &self,
-        mut subscription: Subscription,
+        id: SubscriptionId,
+        source: Source,
+        sink: Sink,
+        metadata: HashMap<String, String>,
     ) -> Result<Subscription, ValidationError> {
         // Retrieve the cluster option and merge them with subscription metadata
-        let Source::Kafka { cluster, .. } = subscription.source();
-        let cluster_options = &self.get_kafka_cluster(cluster).ok_or(ValidationError {
+        let Source::Kafka { cluster, .. } = &source;
+        let mut subscription_options = self.get_kafka_cluster(cluster).ok_or(ValidationError {
             name: "source",
             reason: "specified cluster in the source URI does not exist. Make sure it is defined in the KafkaOptions",
-        })?.additional_options;
+        })?.additional_options.clone();
 
-        if cluster_options.contains_key("enable.auto.commit")
-            || subscription.metadata().contains_key("enable.auto.commit")
-        {
+        for (key, value) in metadata {
+            subscription_options.insert(key, value);
+        }
+
+        if subscription_options.contains_key("enable.auto.commit") {
             warn!(
                 "The configuration option enable.auto.commit should not be set and it will be ignored."
             );
         }
-        if cluster_options.contains_key("enable.auto.offset.store")
-            || subscription
-                .metadata()
-                .contains_key("enable.auto.offset.store")
-        {
+
+        if subscription_options.contains_key("enable.auto.offset.store") {
             warn!(
                 "The configuration option enable.auto.offset.store should not be set and it will be ignored."
             );
         }
 
         // Set the group.id if unset
-        if !(cluster_options.contains_key("group.id")
-            || subscription.metadata().contains_key("group.id"))
-        {
-            let group_id = subscription.id().to_string();
-
-            subscription
-                .metadata_mut()
-                .insert("group.id".to_string(), group_id);
+        if !subscription_options.contains_key("group.id") {
+            subscription_options.insert("group.id".to_string(), id.to_string());
         }
 
         // Set client.id if unset
-        if !(cluster_options.contains_key("client.id")
-            || subscription.metadata().contains_key("client.id"))
-        {
-            subscription
-                .metadata_mut()
-                .insert("client.id".to_string(), "restate".to_string());
+        if !subscription_options.contains_key("client.id") {
+            subscription_options.insert("client.id".to_string(), "restate".to_string());
         }
 
-        Ok(subscription)
+        Ok(Subscription::new(id, source, sink, subscription_options))
     }
 }
 

@@ -12,6 +12,7 @@ use super::*;
 
 use crate::identifiers::DeploymentId;
 use crate::invocation::{VirtualObjectHandlerType, WorkflowHandlerType};
+use crate::schema::subscriptions::Source;
 use restate_time_util::FriendlyDuration;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -412,9 +413,10 @@ impl From<Schema> for super::Schema {
             deployments,
             deployments_v2,
             version,
-            subscriptions,
+            mut subscriptions,
         }: Schema,
     ) -> Self {
+        update_subscriptions(&mut subscriptions);
         if let Some(deployments_v2) = deployments_v2 {
             Self {
                 version,
@@ -445,6 +447,27 @@ impl From<Schema> for super::Schema {
             panic!(
                 "Unexpected situation where neither v1 data structure nor v2 data structure is used!"
             )
+        }
+    }
+}
+
+fn update_subscriptions(subscriptions: &mut HashMap<SubscriptionId, Subscription>) {
+    let config = Configuration::pinned();
+    for subscription in subscriptions.values_mut() {
+        let Source::Kafka { cluster, .. } = subscription.source();
+        let Some(cluster) = config.ingress.get_kafka_cluster(cluster) else {
+            // the cluster is gone from the config!
+            continue;
+        };
+
+        // update subscription metadata with cluster options
+        // if not set
+        for (key, value) in cluster.additional_options.iter() {
+            if !subscription.metadata().contains_key(key) {
+                subscription
+                    .metadata_mut()
+                    .insert(key.clone(), value.clone());
+            }
         }
     }
 }
