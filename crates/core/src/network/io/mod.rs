@@ -12,6 +12,7 @@ mod egress_sender;
 mod egress_stream;
 mod reactor;
 mod rpc_tracker;
+mod stream_tracker;
 
 use std::sync::Arc;
 
@@ -31,6 +32,8 @@ pub struct Shared {
     tx: Option<UnboundedEgressSender>,
     drop_egress: Option<DropEgressStream>,
     reply_tracker: Arc<rpc_tracker::ReplyTracker>,
+    remote_initiated_streams: Arc<stream_tracker::StreamTracker>,
+    local_initiated_streams: Arc<stream_tracker::StreamTracker>,
 }
 
 impl Shared {
