@@ -26,6 +26,7 @@ use super::{
     PerfStatsLevel, RocksDbOptions,
 };
 use crate::PlainNodeId;
+use crate::config::dynamodb_store::DynamoDbOptions;
 use crate::locality::NodeLocation;
 use crate::net::address::{AdvertisedAddress, ListenerPort};
 use crate::net::address::{BindAddress, FabricPort, TokioConsolePort};
@@ -808,6 +809,19 @@ pub enum MetadataClientKind {
         #[serde(default = "MetadataClientKind::default_object_store_retry_policy")]
         object_store_retry_policy: RetryPolicy,
     },
+
+    #[display("dynamo-db")]
+    DynamoDb {
+        /// # DynamoDB table name
+        ///
+        /// This is the table that will be used to persist cluster metadata.
+        /// This can be the table name or the table `ARN`.
+        #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+        table: String,
+
+        #[serde(flatten)]
+        dynamo_db: DynamoDbOptions,
+    },
 }
 
 impl MetadataClientKind {
@@ -845,6 +859,11 @@ enum MetadataClientKindShadow {
         #[serde(default = "MetadataClientKind::default_object_store_retry_policy")]
         object_store_retry_policy: RetryPolicy,
     },
+    DynamoDb {
+        table: String,
+        #[serde(flatten)]
+        dynamo_db: DynamoDbOptions,
+    },
     // Fallback to support not having to specify the type field
     #[serde(untagged)]
     Fallback {
@@ -868,6 +887,9 @@ impl TryFrom<MetadataClientKindShadow> for MetadataClientKind {
                 object_store_retry_policy,
             },
             MetadataClientKindShadow::Etcd { addresses } => Self::Etcd { addresses },
+            MetadataClientKindShadow::DynamoDb { table, dynamo_db } => {
+                Self::DynamoDb { table, dynamo_db }
+            }
             MetadataClientKindShadow::Replicated { address, addresses }
             | MetadataClientKindShadow::Fallback { address, addresses } => Self::Replicated {
                 addresses: match address {
