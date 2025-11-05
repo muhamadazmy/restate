@@ -18,7 +18,6 @@ use crate::identifiers::{DeploymentId, SubscriptionId};
 use crate::invocation::{
     InvocationTargetType, ServiceType, VirtualObjectHandlerType, WorkflowHandlerType,
 };
-use crate::live::Pinned;
 use crate::schema::deployment::DeploymentType;
 use crate::schema::invocation_target::{
     BadInputContentType, DEFAULT_IDEMPOTENCY_RETENTION, DEFAULT_WORKFLOW_COMPLETION_RETENTION,
@@ -132,11 +131,6 @@ pub(in crate::schema) enum ServiceError {
     #[error("modifying retention time for service type {0} is unsupported")]
     #[code(unknown)]
     CannotModifyRetentionTime(ServiceType),
-    #[error(
-        "{0} configures the retry policy 'on max attempts' behavior to Pause, but the Pause behavior is not explicitly enabled in the restate-server configuration. To enable it, set the field 'default_retry_policy' in the restate-server configuration file."
-    )]
-    #[code(unknown)]
-    PauseBehaviorDisabled(String),
 }
 
 #[derive(Debug, thiserror::Error, codederror::CodedError)]
@@ -612,29 +606,13 @@ impl SchemaUpdater {
             retry_policy_on_max_attempts
         );
 
-        let configuration = Configuration::pinned();
-        if !configuration.is_pause_behavior_enabled()
-            && retry_policy_on_max_attempts
-                .is_some_and(|on_max_attempts| on_max_attempts == OnMaxAttempts::Pause)
-        {
-            return Err(SchemaError::Service(ServiceError::PauseBehaviorDisabled(
-                service_name.clone(),
-            )));
-        }
-
         let handlers = service
             .handlers
             .into_iter()
             .map(|h| {
                 Ok((
                     h.name.to_string(),
-                    Handler::from_schema(
-                        service_name.as_ref(),
-                        service_type,
-                        public,
-                        &configuration,
-                        h,
-                    )?,
+                    Handler::from_schema(service_name.as_ref(), service_type, public, h)?,
                 ))
             })
             .collect::<Result<HashMap<_, _>, SchemaError>>()?;
@@ -956,12 +934,7 @@ impl SchemaUpdater {
 
         let subscription = Configuration::pinned()
             .ingress
-            .validate_subscription(Subscription::new(
-                id,
-                source,
-                sink,
-                metadata.unwrap_or_default(),
-            ))
+            .create_kafka_subscription(id, source, sink, metadata.unwrap_or_default())
             .map_err(|e| SchemaError::Subscription(SubscriptionError::Validation(e.into())))?;
 
         self.schema.subscriptions.insert(id, subscription);
@@ -1060,7 +1033,6 @@ impl Handler {
         service_name: &str,
         service_type: ServiceType,
         is_service_public: bool,
-        configuration: &Pinned<Configuration>,
         handler: endpoint_manifest::Handler,
     ) -> Result<Self, ServiceError> {
         let ty = match (service_type, handler.ty) {
@@ -1119,15 +1091,6 @@ impl Handler {
             endpoint_manifest::RetryPolicyOnMaxAttempts::Pause => OnMaxAttempts::Pause,
             endpoint_manifest::RetryPolicyOnMaxAttempts::Kill => OnMaxAttempts::Kill,
         });
-
-        if !configuration.is_pause_behavior_enabled()
-            && retry_policy_on_max_attempts
-                .is_some_and(|on_max_attempts| matches!(on_max_attempts, OnMaxAttempts::Pause))
-        {
-            return Err(ServiceError::PauseBehaviorDisabled(
-                service_name.to_string(),
-            ));
-        }
 
         if !is_service_public && handler.ingress_private == Some(false) {
             return Err(ServiceError::BadHandlerVisibility {
@@ -1275,55 +1238,49 @@ pub struct ValidationError {
 }
 
 impl IngressOptions {
-    fn validate_subscription(
+    fn create_kafka_subscription(
         &self,
-        mut subscription: Subscription,
+        id: SubscriptionId,
+        source: Source,
+        sink: Sink,
+        mut metadata: HashMap<String, String>,
     ) -> Result<Subscription, ValidationError> {
         // Retrieve the cluster option and merge them with subscription metadata
-        let Source::Kafka { cluster, .. } = subscription.source();
+        let Source::Kafka { cluster, .. } = &source;
         let cluster_options = &self.get_kafka_cluster(cluster).ok_or(ValidationError {
             name: "source",
             reason: "specified cluster in the source URI does not exist. Make sure it is defined in the KafkaOptions",
         })?.additional_options;
 
         if cluster_options.contains_key("enable.auto.commit")
-            || subscription.metadata().contains_key("enable.auto.commit")
+            || metadata.contains_key("enable.auto.commit")
         {
             warn!(
                 "The configuration option enable.auto.commit should not be set and it will be ignored."
             );
         }
         if cluster_options.contains_key("enable.auto.offset.store")
-            || subscription
-                .metadata()
-                .contains_key("enable.auto.offset.store")
+            || metadata.contains_key("enable.auto.offset.store")
         {
             warn!(
                 "The configuration option enable.auto.offset.store should not be set and it will be ignored."
             );
         }
 
-        // Set the group.id if unset
-        if !(cluster_options.contains_key("group.id")
-            || subscription.metadata().contains_key("group.id"))
-        {
-            let group_id = subscription.id().to_string();
+        let group_id = metadata
+            .get("group.id")
+            .or_else(|| cluster_options.get("group.id"))
+            .cloned()
+            .unwrap_or_else(|| id.to_string());
 
-            subscription
-                .metadata_mut()
-                .insert("group.id".to_string(), group_id);
-        }
+        metadata.insert("group.id".into(), group_id);
 
         // Set client.id if unset
-        if !(cluster_options.contains_key("client.id")
-            || subscription.metadata().contains_key("client.id"))
-        {
-            subscription
-                .metadata_mut()
-                .insert("client.id".to_string(), "restate".to_string());
+        if !(cluster_options.contains_key("client.id") || metadata.contains_key("client.id")) {
+            metadata.insert("client.id".to_string(), "restate".to_string());
         }
 
-        Ok(subscription)
+        Ok(Subscription::new(id, source, sink, metadata))
     }
 }
 
@@ -1338,12 +1295,6 @@ struct UnsupportedExternalRefRetriever;
 impl jsonschema::Retrieve for UnsupportedExternalRefRetriever {
     fn retrieve(&self, uri: &jsonschema::Uri<&str>) -> Result<Value, Box<dyn Error + Send + Sync>> {
         Err(UnsupportedExternalRefRetrieveError(uri.to_string()).into())
-    }
-}
-
-impl Configuration {
-    fn is_pause_behavior_enabled(&self) -> bool {
-        self.invocation.default_retry_policy.is_some()
     }
 }
 

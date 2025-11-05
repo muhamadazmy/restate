@@ -50,7 +50,7 @@ use restate_types::journal_v2::{
     CommandIndex, CommandType, Entry, EntryType, NotificationId, RunCompletion, RunResult, SignalId,
 };
 use restate_types::schema::deployment::{Deployment, DeploymentType, ProtocolType};
-use restate_types::schema::invocation_target::InvocationTargetResolver;
+use restate_types::schema::invocation_target::{DeploymentStatus, InvocationTargetResolver};
 use restate_types::service_protocol::ServiceProtocolVersion;
 
 use crate::Notification;
@@ -491,7 +491,7 @@ where
                 self.write_raw(
                     http_stream_tx,
                     cmd.command_type().into(),
-                    cmd.serialized_content(),
+                    cmd.into_serialized_content(),
                 )
                 .await?;
                 self.command_index += 1;
@@ -500,7 +500,7 @@ where
                 self.write_raw(
                     http_stream_tx,
                     notif.ty().into(),
-                    notif.serialized_content(),
+                    notif.into_serialized_content(),
                 )
                 .await?;
             }
@@ -1026,6 +1026,13 @@ fn resolve_call_request(
                 request.handler_name.to_string(),
             )
         })?;
+
+    if let DeploymentStatus::Deprecated(dp_id) = meta.deployment_status {
+        return Err(CommandPreconditionError::DeploymentDeprecated(
+            request.service_name.to_string(),
+            dp_id,
+        ));
+    }
 
     if !request.key.is_empty() && !meta.target_ty.is_keyed() {
         return Err(CommandPreconditionError::UnexpectedKey(

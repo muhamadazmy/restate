@@ -26,6 +26,7 @@ use super::{
     PerfStatsLevel, RocksDbOptions,
 };
 use crate::PlainNodeId;
+use crate::config::dynamodb_store::DynamoDbOptions;
 use crate::locality::NodeLocation;
 use crate::net::address::{AdvertisedAddress, ListenerPort};
 use crate::net::address::{BindAddress, FabricPort, TokioConsolePort};
@@ -206,7 +207,7 @@ pub struct CommonOptions {
     ///
     /// [PREVIEW FEATURE]
     /// Setting the location allows Restate to form a tree-like cluster topology.
-    /// The value is written in the format of "<region>[.zone]" to assign this node
+    /// The value is written in the format of "region[.zone]" to assign this node
     /// to a specific region, or to a zone within a region.
     ///
     /// The value of region and zone is arbitrary but whitespace and `.` are disallowed.
@@ -219,7 +220,7 @@ pub struct CommonOptions {
     /// When this value is not set, the node is considered to be in the _default_ location.
     /// The _default_ location means that the node is not assigned to any specific region or zone.
     ///
-    /// ## Examples
+    /// Examples
     /// - `us-west` -- the node is in the `us-west` region.
     /// - `us-west.a1` -- the node is in the `us-west` region and in the `a1` zone.
     /// - `` -- [default] the node is in the default location
@@ -351,6 +352,15 @@ pub struct CommonOptions {
     /// low-priority or latency-insensitive storage tasks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_low_priority_bg_threads: Option<NonZeroUsize>,
+
+    /// # Total memory limit for this process
+    ///
+    /// This is intended to be determined automatically on Linux based on the cgroup limit,
+    /// and is used to emit warning logs if other memory limits are set too close to it.
+    #[serde_as(as = "Option<NonZeroByteCount>")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub process_total_memory_size: Option<NonZeroUsize>,
 
     /// # Total memory limit for rocksdb caches and memtables.
     ///
@@ -497,6 +507,24 @@ impl CommonOptions {
         self.base_dir.as_ref()
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn process_total_memory_size(&self) -> Option<NonZeroUsize> {
+        self.process_total_memory_size.or_else(|| {
+            [
+                "/sys/fs/cgroup/memory.max", // cgroup v2, takes precedence
+                "/sys/fs/cgroup/memory/memory.limit_in_bytes", // cgroup v1
+            ]
+            .iter()
+            .find_map(|path| std::fs::read_to_string(path).ok())
+            .and_then(|contents| contents.trim().parse().ok())
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn process_total_memory_size(&self) -> Option<NonZeroUsize> {
+        self.process_total_memory_size
+    }
+
     pub fn rocksdb_actual_total_memtables_size(&self) -> usize {
         let sanitized = self.rocksdb_total_memtables_ratio.clamp(0.0, 1.0) as f64;
         let total_mem = self.rocksdb_total_memory_size.get() as f64;
@@ -597,8 +625,9 @@ impl Default for CommonOptions {
             default_thread_pool_size: None,
             storage_high_priority_bg_threads: None,
             storage_low_priority_bg_threads: None,
-            rocksdb_total_memtables_ratio: 0.5, // (50% of rocksdb-total-memory-size)
+            process_total_memory_size: None,
             rocksdb_total_memory_size: NonZeroUsize::new(6 * 1024 * 1024 * 1024).unwrap(), // 6GiB
+            rocksdb_total_memtables_ratio: 0.5, // (50% of rocksdb-total-memory-size)
             rocksdb_bg_threads: None,
             rocksdb_high_priority_bg_threads: NonZeroU32::new(2).unwrap(),
             rocksdb_perf_level: PerfStatsLevel::EnableCount,
@@ -780,6 +809,19 @@ pub enum MetadataClientKind {
         #[serde(default = "MetadataClientKind::default_object_store_retry_policy")]
         object_store_retry_policy: RetryPolicy,
     },
+
+    #[display("dynamo-db")]
+    DynamoDb {
+        /// # DynamoDB table name
+        ///
+        /// This is the table that will be used to persist cluster metadata.
+        /// This can be the table name or the table `ARN`.
+        #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+        table: String,
+
+        #[serde(flatten)]
+        dynamo_db: DynamoDbOptions,
+    },
 }
 
 impl MetadataClientKind {
@@ -817,6 +859,11 @@ enum MetadataClientKindShadow {
         #[serde(default = "MetadataClientKind::default_object_store_retry_policy")]
         object_store_retry_policy: RetryPolicy,
     },
+    DynamoDb {
+        table: String,
+        #[serde(flatten)]
+        dynamo_db: DynamoDbOptions,
+    },
     // Fallback to support not having to specify the type field
     #[serde(untagged)]
     Fallback {
@@ -840,6 +887,9 @@ impl TryFrom<MetadataClientKindShadow> for MetadataClientKind {
                 object_store_retry_policy,
             },
             MetadataClientKindShadow::Etcd { addresses } => Self::Etcd { addresses },
+            MetadataClientKindShadow::DynamoDb { table, dynamo_db } => {
+                Self::DynamoDb { table, dynamo_db }
+            }
             MetadataClientKindShadow::Replicated { address, addresses }
             | MetadataClientKindShadow::Fallback { address, addresses } => Self::Replicated {
                 addresses: match address {

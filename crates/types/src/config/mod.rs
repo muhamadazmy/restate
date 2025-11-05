@@ -17,6 +17,7 @@ mod bifrost;
 #[cfg(feature = "clap")]
 mod cli_option_overrides;
 mod common;
+mod dynamodb_store;
 mod gossip;
 mod http;
 mod ingress;
@@ -36,6 +37,7 @@ pub use bifrost::*;
 #[cfg(feature = "clap")]
 pub use cli_option_overrides::*;
 pub use common::*;
+pub use dynamodb_store::*;
 pub use gossip::*;
 pub use http::*;
 pub use ingress::*;
@@ -248,7 +250,6 @@ impl Configuration {
     }
 
     pub fn apply_cascading_values(mut self) -> Self {
-        self.worker.invoker.print_deprecation_warnings();
         self.worker.storage.apply_common(&self.common);
         self.bifrost.apply_common(&self.common);
         self.metadata_server.apply_common(&self.common);
