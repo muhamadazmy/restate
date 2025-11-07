@@ -4100,6 +4100,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ingress-core"
+version = "1.6.0-dev"
+dependencies = [
+ "arc-swap",
+ "dashmap",
+ "futures",
+ "pin-project-lite",
+ "restate-core",
+ "restate-types",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "inlinable_string"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
