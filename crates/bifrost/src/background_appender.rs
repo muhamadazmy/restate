@@ -130,8 +130,8 @@ where
                     batch.push(record);
                     notif_buffer.push(tx);
                 }
-                AppendOperation::Canary(notify) => {
-                    notify.notify_one();
+                AppendOperation::Canary(tx) => {
+                    notif_buffer.push(tx);
                 }
                 AppendOperation::MarkAsPreferred => {
                     appender.mark_as_preferred();
@@ -357,19 +357,18 @@ impl<T: StorageEncode> LogSender<T> {
     ///
     /// Not cancellation safe. Every call will attempt to acquire capacity on the channel and send
     /// a new message to the appender.
-    pub async fn notify_committed(&self) -> Result<(), EnqueueError<()>> {
+    pub async fn notify_committed(&self) -> Result<CommitToken, EnqueueError<()>> {
         let Ok(permit) = self.tx.reserve().await else {
             // channel is closed, this should happen the appender is draining or has been darained
             // already
             return Err(EnqueueError::Closed(()));
         };
 
-        let notify = Arc::new(Notify::new());
-        let canary = AppendOperation::Canary(notify.clone());
+        let (tx, rx) = oneshot::channel();
+        let canary = AppendOperation::Canary(tx);
         permit.send(canary);
 
-        notify.notified().await;
-        Ok(())
+        Ok(CommitToken { rx })
     }
 
     /// Marks this node as a preferred writer for the underlying log
@@ -422,7 +421,7 @@ enum AppendOperation {
     EnqueueWithNotification(Record, oneshot::Sender<()>),
     // A message denoting a request to be notified when it's processed by the appender.
     // It's used to check if previously enqueued appends have been committed or not
-    Canary(Arc<Notify>),
+    Canary(oneshot::Sender<()>),
     /// Let's bifrost know that this node is the preferred writer of this log
     MarkAsPreferred,
     /// Let's bifrost know that this node might not be the preferred writer of this log
