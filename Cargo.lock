@@ -7193,6 +7193,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "derive_more",
+ "futures",
  "metrics",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -7200,6 +7201,7 @@ dependencies = [
  "rdkafka",
  "restate-bifrost",
  "restate-core",
+ "restate-ingress-core",
  "restate-serde-util",
  "restate-storage-api",
  "restate-timer-queue",
@@ -7212,6 +7214,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-opentelemetry",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -8172,6 +8175,7 @@ dependencies = [
  "restate-bifrost",
  "restate-core",
  "restate-errors",
+ "restate-ingress-core",
  "restate-ingress-http",
  "restate-ingress-kafka",
  "restate-invoker-api",
