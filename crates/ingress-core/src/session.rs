@@ -330,6 +330,7 @@ where
                 Some(result) = head => {
                     match result {
                         Ok(_response) => {
+                            // todo: handle response types
                             let batch = self.inflight.pop_front().expect("not empty");
                             batch.committed();
                         }
