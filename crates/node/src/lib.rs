@@ -133,7 +133,7 @@ pub struct Node {
     metadata_server_role: Option<BoxedMetadataServer>,
     failure_detector: FailureDetector<Networking<GrpcConnector>>,
     admin_role: Option<AdminRole<GrpcConnector>>,
-    worker_role: Option<WorkerRole>,
+    worker_role: Option<WorkerRole<GrpcConnector>>,
     ingress_role: Option<IngressRole<GrpcConnector>>,
     log_server: Option<LogServerService>,
     networking: Networking<GrpcConnector>,
