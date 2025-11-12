@@ -36,12 +36,15 @@ pub enum WorkerRoleBuildError {
     ),
 }
 
-pub struct WorkerRole {
-    worker: Worker,
+pub struct WorkerRole<T> {
+    worker: Worker<T>,
 }
 
-impl WorkerRole {
-    pub async fn create<T: TransportConnect>(
+impl<T> WorkerRole<T>
+where
+    T: TransportConnect,
+{
+    pub async fn create(
         health_status: HealthStatus<WorkerStatus>,
         replica_set_states: PartitionReplicaSetStates,
         router_builder: &mut MessageRouterBuilder,
