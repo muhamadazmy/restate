@@ -8349,6 +8349,7 @@ dependencies = [
  "typenum",
  "ulid",
  "uuid",
+ "xxhash-rust",
  "zerocopy 0.7.35",
  "zeroize",
  "zstd 0.13.2",
