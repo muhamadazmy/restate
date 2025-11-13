@@ -91,16 +91,19 @@ pub enum BuildError {
     SnapshotRepository(#[from] anyhow::Error),
 }
 
-pub struct Worker {
+pub struct Worker<T> {
     storage_query_context: QueryContext,
     datafusion_remote_scanner: RemoteQueryScannerServer,
-    ingress_kafka: IngressKafkaService,
+    ingress_kafka: IngressKafkaService<T>,
     subscription_controller_handle: SubscriptionControllerHandle,
     partition_processor_manager: PartitionProcessorManager,
 }
 
-impl Worker {
-    pub async fn create<T: TransportConnect>(
+impl<T> Worker<T>
+where
+    T: TransportConnect,
+{
+    pub async fn create(
         health_status: HealthStatus<WorkerStatus>,
         replica_set_states: PartitionReplicaSetStates,
         partition_store_manager: Arc<PartitionStoreManager>,
@@ -121,7 +124,15 @@ impl Worker {
         let schema = metadata.updateable_schema();
 
         // ingress_kafka
-        let ingress_kafka = IngressKafkaService::new(bifrost.clone(), schema.clone());
+        let ingress_inner = restate_ingress_client::IngressClient::new(
+            networking.clone(),
+            Metadata::with_current(|m| m.updateable_partition_table()),
+            partition_routing.clone(),
+            1024,
+            None,
+        );
+
+        let ingress_kafka = IngressKafkaService::new(ingress_inner, schema.clone());
         let subscription_controller_handle =
             SubscriptionControllerHandle::new(ingress_kafka.create_command_sender());
 
