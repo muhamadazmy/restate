@@ -6727,6 +6727,7 @@ dependencies = [
  "restate-bifrost",
  "restate-core",
  "restate-errors",
+ "restate-ingress-client",
  "restate-metadata-store",
  "restate-service-client",
  "restate-service-protocol",
