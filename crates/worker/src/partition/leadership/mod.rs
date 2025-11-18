@@ -26,9 +26,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, instrument, warn};
 
 use restate_bifrost::Bifrost;
-use restate_core::network::{Oneshot, Reciprocal};
+use restate_core::network::{Oneshot, Reciprocal, TransportConnect};
 use restate_core::{ShutdownError, TaskCenter, TaskKind, my_node_id};
 use restate_errors::NotRunningError;
+use restate_ingress_client::IngressClient;
 use restate_invoker_api::InvokeInputJournal;
 use restate_partition_store::PartitionStore;
 use restate_storage_api::deduplication_table::EpochSequenceNumber;
@@ -151,25 +152,28 @@ impl State {
     }
 }
 
-pub(crate) struct LeadershipState<I> {
+pub(crate) struct LeadershipState<T, I> {
     state: State,
     last_seen_leader_epoch: Option<LeaderEpoch>,
 
     partition: Arc<Partition>,
     invoker_tx: I,
+    ingress: IngressClient<T>,
     bifrost: Bifrost,
     #[allow(unused)]
     trim_queue: TrimQueue,
 }
 
-impl<I> LeadershipState<I>
+impl<T, I> LeadershipState<T, I>
 where
     I: restate_invoker_api::InvokerHandle<InvokerStorageReader<PartitionStore>>,
+    T: TransportConnect,
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         partition: Arc<Partition>,
         invoker_tx: I,
+        ingress: IngressClient<T>,
         bifrost: Bifrost,
         last_seen_leader_epoch: Option<LeaderEpoch>,
         trim_queue: TrimQueue,
@@ -178,6 +182,7 @@ where
             state: State::Follower,
             partition,
             invoker_tx,
+            ingress,
             bifrost,
             last_seen_leader_epoch,
             trim_queue,
@@ -374,7 +379,7 @@ where
                 OutboxReader::from(partition_store.clone()),
                 shuffle_tx,
                 config.worker.internal_queue_length(),
-                self.bifrost.clone(),
+                self.ingress.clone(),
             );
 
             let shuffle_hint_tx = shuffle.create_hint_sender();
@@ -562,7 +567,7 @@ where
     }
 }
 
-impl<I> LeadershipState<I> {
+impl<T, I> LeadershipState<T, I> {
     pub async fn handle_rpc_proposal_command(
         &mut self,
         request_id: PartitionProcessorRpcRequestId,
@@ -682,7 +687,9 @@ mod tests {
     use crate::partition::leadership::{LeadershipState, State};
     use assert2::let_assert;
     use restate_bifrost::Bifrost;
+    use restate_core::partitions::PartitionRouting;
     use restate_core::{TaskCenter, TestCoreEnv};
+    use restate_ingress_client::IngressClient;
     use restate_invoker_api::test_util::MockInvokerHandle;
     use restate_partition_store::PartitionStoreManager;
     use restate_rocksdb::RocksDbManager;
@@ -714,10 +721,19 @@ mod tests {
 
         let partition_store_manager = PartitionStoreManager::create().await?;
 
+        let ingress = IngressClient::new(
+            env.networking.clone(),
+            env.metadata.updateable_partition_table(),
+            PartitionRouting::new(replica_set_states.clone(), TaskCenter::current()),
+            1000,
+            None,
+        );
+
         let invoker_tx = MockInvokerHandle::default();
         let mut state = LeadershipState::new(
             Arc::new(PARTITION),
             invoker_tx,
+            ingress,
             bifrost.clone(),
             None,
             TrimQueue::default(),
