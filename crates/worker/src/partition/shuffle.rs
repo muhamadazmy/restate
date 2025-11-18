@@ -258,10 +258,11 @@ where
 }
 
 mod state_machine {
-    use pin_project::pin_project;
     use std::cmp::Ordering;
     use std::future::Future;
     use std::pin::Pin;
+
+    use pin_project::pin_project;
     use tokio_util::sync::ReusableBoxFuture;
     use tracing::trace;
 
