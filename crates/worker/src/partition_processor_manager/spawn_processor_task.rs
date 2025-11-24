@@ -16,7 +16,9 @@ use tracing::info;
 use tracing::{instrument, warn};
 
 use restate_bifrost::Bifrost;
+use restate_core::network::TransportConnect;
 use restate_core::{Metadata, RuntimeTaskHandle, TaskCenter, TaskKind, cancellation_token};
+use restate_ingress_client::IngressClient;
 use restate_invoker_api::capacity::InvokerCapacity;
 use restate_invoker_impl::Service as InvokerService;
 use restate_partition_store::{PartitionStore, PartitionStoreManager};
@@ -37,7 +39,7 @@ use crate::partition::invoker_storage_reader::InvokerStorageReader;
 use crate::partition::{ProcessorError, TargetLeaderState};
 use crate::partition_processor_manager::processor_state::StartedProcessor;
 
-pub struct SpawnPartitionProcessorTask {
+pub struct SpawnPartitionProcessorTask<T> {
     task_name: SharedString,
     partition: Partition,
     configuration: Live<Configuration>,
@@ -46,9 +48,13 @@ pub struct SpawnPartitionProcessorTask {
     partition_store_manager: Arc<PartitionStoreManager>,
     fast_forward_lsn: Option<Lsn>,
     invoker_capacity: InvokerCapacity,
+    ingress: IngressClient<T>,
 }
 
-impl SpawnPartitionProcessorTask {
+impl<T> SpawnPartitionProcessorTask<T>
+where
+    T: TransportConnect,
+{
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         task_name: SharedString,
@@ -59,6 +65,7 @@ impl SpawnPartitionProcessorTask {
         partition_store_manager: Arc<PartitionStoreManager>,
         fast_forward_lsn: Option<Lsn>,
         invoker_capacity: InvokerCapacity,
+        ingress: IngressClient<T>,
     ) -> Self {
         Self {
             task_name,
@@ -69,6 +76,7 @@ impl SpawnPartitionProcessorTask {
             partition_store_manager,
             fast_forward_lsn,
             invoker_capacity,
+            ingress,
         }
     }
 
@@ -96,6 +104,7 @@ impl SpawnPartitionProcessorTask {
             partition_store_manager,
             fast_forward_lsn,
             invoker_capacity,
+            ingress,
         } = self;
 
         let config = configuration.pinned();
@@ -166,7 +175,7 @@ impl SpawnPartitionProcessorTask {
                     let partition_store = partition_store?;
 
                     let pp = pp_builder
-                        .build(bifrost, partition_store, replica_set_states)
+                        .build(bifrost, ingress, partition_store, replica_set_states)
                         .await
                         .map_err(ProcessorError::from)?;
 
