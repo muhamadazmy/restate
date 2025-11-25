@@ -83,6 +83,10 @@ struct RestateArguments {
 
     #[clap(flatten)]
     opts_overrides: CommonOptionCliOverride,
+
+    #[clap(long)]
+    /// Run in metadata migration mode.
+    metadata_migration_mode: bool,
 }
 
 const EXIT_CODE_FAILURE: i32 = 1;
@@ -116,6 +120,7 @@ fn main() {
         .load_env(true)
         .path(config_path.clone())
         .cli_override(cli_args.opts_overrides.clone())
+        .metadata_migration_mode(cli_args.metadata_migration_mode)
         .build()
         .unwrap();
 
