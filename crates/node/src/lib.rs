@@ -15,6 +15,7 @@ mod metric_definitions;
 mod network_server;
 mod roles;
 
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -31,6 +32,7 @@ use restate_core::partitions::PartitionRouting;
 use restate_core::{Metadata, MetadataKind, MetadataWriter, TaskKind};
 use restate_core::{MetadataBuilder, MetadataManager, TaskCenter, spawn_metadata_manager};
 use restate_futures_util::overdue::OverdueLoggingExt;
+use restate_ingress_client::IngressClient;
 use restate_log_server::LogServerService;
 use restate_metadata_server::{
     BoxedMetadataServer, MetadataServer, MetadataStoreClient, ReadModifyWriteError,
@@ -133,7 +135,7 @@ pub struct Node {
     metadata_server_role: Option<BoxedMetadataServer>,
     failure_detector: FailureDetector<Networking<GrpcConnector>>,
     admin_role: Option<AdminRole<GrpcConnector>>,
-    worker_role: Option<WorkerRole>,
+    worker_role: Option<WorkerRole<GrpcConnector>>,
     ingress_role: Option<IngressRole<GrpcConnector>>,
     log_server: Option<LogServerService>,
     networking: Networking<GrpcConnector>,
@@ -256,6 +258,14 @@ impl Node {
             None
         };
 
+        let ingress_client = IngressClient::new(
+            networking.clone(),
+            Metadata::with_current(|m| m.updateable_partition_table()),
+            PartitionRouting::new(replica_set_states.clone(), TaskCenter::current()),
+            NonZeroUsize::new(5 * 1204 * 1204).unwrap(), //5MB
+            None,
+        );
+
         let worker_role = if config.has_role(Role::Worker) {
             Some(
                 WorkerRole::create(
@@ -265,6 +275,7 @@ impl Node {
                     partition_store_manager.clone(),
                     networking.clone(),
                     bifrost_svc.handle(),
+                    ingress_client,
                     metadata_manager.writer(),
                 )
                 .await?,
