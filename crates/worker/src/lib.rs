@@ -19,7 +19,9 @@ mod partition_processor_manager;
 mod subscription_controller;
 mod subscription_integration;
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use codederror::CodedError;
 use tracing::info;
@@ -35,6 +37,7 @@ use restate_core::worker_api::ProcessorsManagerHandle;
 use restate_core::{Metadata, TaskKind};
 use restate_core::{MetadataWriter, TaskCenter};
 use restate_ingress_client::IngressClient;
+use restate_ingress_client::SessionOptions;
 use restate_ingress_kafka::Service as IngressKafkaService;
 use restate_invoker_impl::InvokerHandle as InvokerChannelServiceHandle;
 use restate_partition_store::snapshots::SnapshotRepository;
@@ -97,7 +100,7 @@ pub struct Worker<T> {
     datafusion_remote_scanner: RemoteQueryScannerServer,
     ingress_kafka: IngressKafkaService<T>,
     subscription_controller_handle: SubscriptionControllerHandle,
-    partition_processor_manager: PartitionProcessorManager,
+    partition_processor_manager: PartitionProcessorManager<T>,
 }
 
 impl<T> Worker<T>
@@ -141,6 +144,20 @@ where
             )));
         }
 
+        // This instance of ingress client is dedicated for the PPM.
+        // so it has separate budget AND batch_timeout (set to zero)
+        // to optimize for latency.
+        let ppm_ingress = IngressClient::new(
+            networking.clone(),
+            Metadata::with_current(|m| m.updateable_partition_table()),
+            partition_routing.clone(),
+            NonZeroUsize::new(5 * 1024 * 1024).unwrap(), // 5MB
+            Some(SessionOptions {
+                batch_timeout: Duration::ZERO,
+                ..Default::default()
+            }),
+        );
+
         let partition_processor_manager = PartitionProcessorManager::new(
             health_status,
             Configuration::live(),
@@ -155,6 +172,7 @@ where
             )
             .await
             .map_err(BuildError::SnapshotRepository)?,
+            ppm_ingress,
         );
 
         let remote_scanner_manager = RemoteScannerManager::new(
