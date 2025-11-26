@@ -83,6 +83,10 @@ struct RestateArguments {
 
     #[clap(flatten)]
     opts_overrides: CommonOptionCliOverride,
+
+    #[clap(long)]
+    /// Run in metadata migration mode.
+    metadata_migration_mode: bool,
 }
 
 const EXIT_CODE_FAILURE: i32 = 1;
@@ -116,6 +120,7 @@ fn main() {
         .load_env(true)
         .path(config_path.clone())
         .cli_override(cli_args.opts_overrides.clone())
+        .metadata_migration_mode(cli_args.metadata_migration_mode)
         .build()
         .unwrap();
 
@@ -183,6 +188,10 @@ fn main() {
                 );
                 let _ = writeln!(&mut stdout, "{:^40}", "https://restate.dev/");
                 let _ = writeln!(&mut stdout);
+            }
+
+            if cli_args.metadata_migration_mode {
+                warn!("RUNNING IN METADATA MIGRATION MODE");
             }
 
             // Attempts to bind on all configured ports as early as possible so we can detect
