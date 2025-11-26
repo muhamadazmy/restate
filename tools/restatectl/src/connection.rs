@@ -632,8 +632,12 @@ impl NodesErrors {
         self.node_status.push((node, simple_status));
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.node_status.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&AdvertisedAddress<FabricPort>, &SimpleStatus)> {
+        self.node_status.iter().map(|a| (&a.0, &a.1))
     }
 }
 
