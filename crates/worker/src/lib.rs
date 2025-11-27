@@ -97,7 +97,7 @@ pub struct Worker<T> {
     datafusion_remote_scanner: RemoteQueryScannerServer,
     ingress_kafka: IngressKafkaService<T>,
     subscription_controller_handle: SubscriptionControllerHandle,
-    partition_processor_manager: PartitionProcessorManager,
+    partition_processor_manager: PartitionProcessorManager<T>,
 }
 
 impl<T> Worker<T>
@@ -155,6 +155,7 @@ where
             )
             .await
             .map_err(BuildError::SnapshotRepository)?,
+            ingestion_client,
         );
 
         let remote_scanner_manager = RemoteScannerManager::new(
