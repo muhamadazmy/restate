@@ -38,7 +38,6 @@ use restate_types::net::ingest::IngestRecord;
 use restate_types::net::partition_processor::{
     PartitionProcessorRpcError, PartitionProcessorRpcResponse,
 };
-use restate_types::time::MillisSinceEpoch;
 use restate_types::{SemanticRestateVersion, Version, Versioned};
 use restate_vqueues::VQueueEvent;
 use restate_vqueues::{SchedulerService, VQueuesMeta, scheduler};
