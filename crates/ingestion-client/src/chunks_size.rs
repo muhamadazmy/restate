@@ -67,6 +67,7 @@ where
                     let item_size = (me.size_fn)(&item);
 
                     if me.items.is_empty() || *me.size + item_size <= *me.cap {
+                        *me.size += item_size;
                         me.items.push(item);
                     } else {
                         // not empty and adding the item will go over the cap
