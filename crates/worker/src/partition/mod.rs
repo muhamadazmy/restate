@@ -48,7 +48,10 @@ use restate_types::config::Configuration;
 use restate_types::identifiers::LeaderEpoch;
 use restate_types::logs::{KeyFilter, Lsn, Record, SequenceNumber};
 use restate_types::net::RpcRequest;
-use restate_types::net::ingest::{ReceivedIngestRequest, ResponseStatus};
+use restate_types::net::ingest::{
+    DedupSequenceNrQueryRequest, DedupSequenceNrQueryResponse, ReceivedIngestRequest,
+    ResponseStatus,
+};
 use restate_types::net::partition_processor::{
     PartitionLeaderService, PartitionProcessorRpcError, PartitionProcessorRpcRequest,
     PartitionProcessorRpcResponse,
@@ -639,8 +642,55 @@ where
             ServiceMessage::Rpc(msg) if msg.msg_type() == ReceivedIngestRequest::TYPE => {
                 self.on_pp_ingest_request(msg.into_typed()).await;
             }
+            ServiceMessage::Rpc(msg) if msg.msg_type() == DedupSequenceNrQueryRequest::TYPE => {
+                self.on_dedup_sn_query(msg.into_typed()).await;
+            }
             msg => {
                 msg.fail(Verdict::MessageUnrecognized);
+            }
+        }
+    }
+
+    /// Used mainly by kafka-ingress to query old style dedup information
+    /// during the migration to the number producer id.
+    async fn on_dedup_sn_query(&mut self, msg: Incoming<Rpc<DedupSequenceNrQueryRequest>>) {
+        if !self.leadership_state.is_leader() {
+            msg.into_reciprocal().send(DedupSequenceNrQueryResponse {
+                status: ResponseStatus::NotLeader {
+                    of: self.partition_store.partition_id(),
+                },
+                sequence_number: None,
+            });
+            return;
+        }
+
+        let (tx, body) = msg.split();
+        match self
+            .partition_store
+            .get_dedup_sequence_number(&ProducerId::Other(body.producer_id.into()))
+            .await
+        {
+            Ok(result) => {
+                let sequence_number = result.and_then(|v| {
+                    if let DedupSequenceNumber::Sn(sn) = v {
+                        Some(sn)
+                    } else {
+                        None
+                    }
+                });
+
+                tx.send(DedupSequenceNrQueryResponse {
+                    status: ResponseStatus::Ack,
+                    sequence_number,
+                });
+            }
+            Err(err) => {
+                tx.send(DedupSequenceNrQueryResponse {
+                    status: ResponseStatus::Internal {
+                        msg: err.to_string(),
+                    },
+                    sequence_number: None,
+                });
             }
         }
     }
