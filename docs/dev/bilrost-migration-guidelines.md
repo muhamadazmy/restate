@@ -108,6 +108,9 @@ This works completely different from above. It’s mainly because fat enums tran
 - You also need to have an `EmptyState` an empty variant that carries no data, otherwise you need your field to also become `Option` (that’s where the similarity with numeric enums ends)
 - Your enum must derive `bilrost::Oneof`
 - Each variant must carry **EXACTLY** one value. Only **ONE** empty enum variant can show up at the top of the enum to work as the “empty state” AND it must be `untagged`
+- If a variant contains more than one value, it must have the `message` attribute
+- An enum that derives `bilrost::Oneof` can also derive `bilrost::Message`. In that case, it can be used as 
+  an property in a `Message` struct without the `oneof(..)` attribute. This is very handy for reusability
 
 ```rust
 // Derives Oneof
@@ -130,6 +133,11 @@ enum MyFatEnum {
     #[bilrost(4)]
     ThirdVariant {
         name: String,
+    },
+    #[bilrost(tag=5, message)]
+    FourthVariant {
+        name: String,
+        age: u32
     },
     /// This one will not work
     // FourthVariant(u64, u64)
