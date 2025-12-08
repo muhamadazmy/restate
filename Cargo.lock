@@ -8349,6 +8349,7 @@ dependencies = [
  "derive_more",
  "futures",
  "hashbrown 0.16.0",
+ "metrics",
  "pin-project",
  "restate-futures-util",
  "restate-rocksdb",
@@ -8387,8 +8388,8 @@ dependencies = [
 
 [[package]]
 name = "restate-web-ui"
-version = "0.1.16"
-source = "git+https://github.com/restatedev/restate-web-ui-crate?tag=v0.1.16#97129d72303cfa42524fa906a4b3c4169c5bac82"
+version = "0.1.18"
+source = "git+https://github.com/restatedev/restate-web-ui-crate?tag=v0.1.18#d21a19ad391d015528aae40406958b4f0c14de20"
 dependencies = [
  "anyhow",
  "include_dir",

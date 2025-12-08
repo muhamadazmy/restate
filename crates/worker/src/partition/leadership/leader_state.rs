@@ -678,6 +678,12 @@ impl LeaderState {
                     )
                     .map_err(Error::Invoker)?
             }
+            Action::VQConsumePermit { qid, item_hash } => {
+                let _ = self
+                    .scheduler
+                    .confirm_assignment(&qid, item_hash)
+                    .expect("scheduler should have a pending assignment");
+            }
         }
 
         Ok(())
