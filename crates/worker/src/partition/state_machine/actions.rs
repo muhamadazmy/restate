@@ -79,7 +79,7 @@ pub enum Action {
     },
     AbortInvocation {
         invocation_id: InvocationId,
-        invocation_epoch: InvocationEpoch,
+        invocation_epoch: Option<InvocationEpoch>,
     },
     IngressResponse {
         request_id: PartitionProcessorRpcRequestId,
