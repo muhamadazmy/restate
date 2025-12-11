@@ -35,6 +35,7 @@ pub const PARTITION_RECORD_COMMITTED_TO_READ_LATENCY_SECONDS: &str =
 
 pub const PARTITION_INGESTION_REQUEST_LEN: &str = "restate.partition.ingest.request.len";
 pub const PARTITION_INGESTION_REQUEST_SIZE: &str = "restate.partition.ingest.request.size.bytes";
+pub const PARTITION_SHUFFLED_MESSAGE_COUNT: &str = "restate.partition.shuffle.message.count";
 
 pub(crate) fn describe_metrics() {
     describe_gauge!(
@@ -112,4 +113,10 @@ pub(crate) fn describe_metrics() {
         Unit::Bytes,
         "Total size of records in a single ingestion request"
     );
+
+    describe_counter!(
+        PARTITION_SHUFFLED_MESSAGE_COUNT,
+        Unit::Count,
+        "Number of message shuffled by source partition",
+    )
 }
