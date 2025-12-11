@@ -8510,6 +8510,7 @@ dependencies = [
  "comfy-table",
  "criterion",
  "crossbeam-epoch",
+ "crossbeam-utils",
  "digest",
  "either",
  "enum-map",
