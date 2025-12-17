@@ -7732,6 +7732,7 @@ dependencies = [
  "bytestring",
  "metrics",
  "prost 0.14.1",
+ "restate-serde-util",
  "restate-time-util",
  "restate-types",
  "restate-workspace-hack",
