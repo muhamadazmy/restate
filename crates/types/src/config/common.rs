@@ -1007,6 +1007,72 @@ impl Default for TracingOptions {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schemars",
+    schemars(
+        title = "Ingestion Options",
+        description = "Options for ingestion client"
+    )
+)]
+pub struct IngestionOptions {
+    /// # Inflight Memory Budget
+    ///
+    /// Max size of inflight requests in bytes
+    ///
+    /// Defaults to 1MB
+    pub inflight_memory_budget: NonZeroByteCount,
+
+    /// # Connection retry policy
+    ///
+    /// Retry policy for the ingestion client. This must
+    /// allow infinite retries. If finite, the client will
+    /// fallback to retry every 2 seconds.
+    pub connection_retry_policy: RetryPolicy,
+
+    /// # Request Batch Size
+    ///
+    /// The maximum ingestion request size.
+    ///
+    /// Defaults to 50KB
+    pub request_batch_size: NonZeroByteCount,
+
+    /// # Legacy ingestion
+    ///
+    /// Uses old style ingestion method
+    /// by writing directly to bifrost.
+    ///
+    /// To use new experimental ingestion mechanism you need
+    /// to set this explicitly to false.
+    ///
+    /// Legacy ingestion Will be completely dropped in v1.7
+    ///
+    /// Default to true in v1.6
+    pub legacy_ingestion: bool,
+}
+
+impl Default for IngestionOptions {
+    fn default() -> Self {
+        Self {
+            inflight_memory_budget: NonZeroByteCount::new(
+                NonZeroUsize::new(1024 * 1024).expect("non zero"),
+            ), //1 MiB
+            connection_retry_policy: RetryPolicy::exponential(
+                Duration::from_millis(10),
+                2.0,
+                None,
+                Some(Duration::from_secs(1)),
+            ),
+            request_batch_size: NonZeroByteCount::new(
+                NonZeroUsize::new(50 * 1024).expect("non zero"),
+            ),
+            legacy_ingestion: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
