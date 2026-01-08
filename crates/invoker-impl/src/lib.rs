@@ -50,7 +50,9 @@ use restate_time_util::DurationExt;
 use restate_timer_queue::TimerQueue;
 use restate_types::config::{InvokerOptions, ServiceClientOptions};
 use restate_types::deployment::PinnedDeployment;
-use restate_types::identifiers::{DeploymentId, InvocationId, PartitionKey, WithPartitionKey};
+use restate_types::identifiers::{
+    DeploymentId, InvocationId, PartitionKey, StateMachineId, WithPartitionKey,
+};
 use restate_types::identifiers::{PartitionId, PartitionLeaderEpoch};
 use restate_types::invocation::InvocationTarget;
 use restate_types::journal::enriched::EnrichedRawEntry;
@@ -392,7 +394,7 @@ struct ServiceInner<InvocationTaskRunner, Schemas, StorageReader> {
 
     // Invoker state machine
     invocation_tasks: JoinSet<()>,
-    retry_timers: TimerQueue<(PartitionLeaderEpoch, InvocationId)>,
+    retry_timers: TimerQueue<(PartitionLeaderEpoch, InvocationId, StateMachineId)>,
     quota: quota::InvokerConcurrencyQuota,
     status_store: InvocationStatusStore,
     invocation_state_machine_manager:
@@ -538,8 +540,8 @@ where
                 };
             },
             timer = self.retry_timers.await_timer() => {
-                let (partition, fid) = timer.into_inner();
-                self.handle_retry_timer_fired(options, partition, fid);
+                let (partition, invocation_id, state_machine_id) = timer.into_inner();
+                self.handle_retry_timer_fired(options, partition, invocation_id, Some(state_machine_id));
             },
             Some(invocation_task_result) = self.invocation_tasks.join_next() => {
                 if let Err(err) = invocation_task_result {
@@ -703,10 +705,13 @@ where
         options: &InvokerOptions,
         partition: PartitionLeaderEpoch,
         invocation_id: InvocationId,
+        state_machine_id: Option<StateMachineId>,
     ) {
         trace!("Retry timeout fired");
         self.handle_retry_event(options, partition, invocation_id, |sm| {
-            sm.notify_retry_timer_fired()
+            if state_machine_id.is_none_or(|v| v == sm.id) {
+                sm.notify_retry_timer_fired()
+            }
         });
     }
 
@@ -1243,8 +1248,17 @@ where
         partition: PartitionLeaderEpoch,
         invocation_id: InvocationId,
     ) {
-        // Retry now is equivalent to immediately firing the retry timer.
-        self.handle_retry_timer_fired(options, partition, invocation_id);
+        if self
+            .invocation_state_machine_manager
+            .resolve_invocation(partition, &invocation_id)
+            .is_some_and(|(_, ism)| ism.is_waiting_retry())
+        {
+            // Since we don't know the state_machine id we have to make sure that
+            // the state machine is in the right `awaiting retry`` status.
+
+            // Retry now is equivalent to immediately firing the retry timer.
+            self.handle_retry_timer_fired(options, partition, invocation_id, None);
+        }
     }
 
     #[instrument(
@@ -1425,13 +1439,15 @@ where
                     invocation_error_report,
                     Some(next_retry_at),
                 );
+
+                self.retry_timers
+                    .sleep_until(next_retry_at, (partition, invocation_id, ism.id));
+
                 self.invocation_state_machine_manager.register_invocation(
                     partition,
                     invocation_id,
                     ism,
                 );
-                self.retry_timers
-                    .sleep_until(next_retry_at, (partition, invocation_id));
             }
             OnTaskError::Pause => {
                 counter!(INVOKER_INVOCATION_TASKS,
@@ -2209,7 +2225,12 @@ mod tests {
             .register_invocation(MOCK_PARTITION, invocation_id, ism);
 
         // Fire the retry timer
-        service_inner.handle_retry_timer_fired(&invoker_options, MOCK_PARTITION, invocation_id);
+        service_inner.handle_retry_timer_fired(
+            &invoker_options,
+            MOCK_PARTITION,
+            invocation_id,
+            None,
+        );
 
         // Create a notification
         let notification = RawNotification::new(
@@ -2277,6 +2298,7 @@ mod tests {
             &InvokerOptions::default(),
             MOCK_PARTITION,
             invocation_id,
+            None,
         );
 
         // Now a new command proposal should clear the last failure (progress made)
@@ -2370,7 +2392,12 @@ mod tests {
         );
 
         // Fire the timer to let the invocation go back to in flight
-        service_inner.handle_retry_timer_fired(&invoker_options, MOCK_PARTITION, invocation_id);
+        service_inner.handle_retry_timer_fired(
+            &invoker_options,
+            MOCK_PARTITION,
+            invocation_id,
+            None,
+        );
 
         // Same transient error (A again) -> should NOT propose a new event
         let error_a_same = InvokerError::SdkV2(SdkInvocationErrorV2 {
@@ -2387,7 +2414,12 @@ mod tests {
         );
 
         // Fire the timer to let the invocation go back to in flight
-        service_inner.handle_retry_timer_fired(&invoker_options, MOCK_PARTITION, invocation_id);
+        service_inner.handle_retry_timer_fired(
+            &invoker_options,
+            MOCK_PARTITION,
+            invocation_id,
+            None,
+        );
 
         // Different transient error (B: different message) -> should propose a new event
         let error_b = InvokerError::SdkV2(SdkInvocationErrorV2 {
@@ -2490,7 +2522,12 @@ mod tests {
         let _ = effects_rx.try_recv();
 
         // Fire timer to go back in flight
-        service_inner.handle_retry_timer_fired(&invoker_options, MOCK_PARTITION, invocation_id);
+        service_inner.handle_retry_timer_fired(
+            &invoker_options,
+            MOCK_PARTITION,
+            invocation_id,
+            None,
+        );
 
         // Second transient error -> retries exhausted and Pause behavior -> expect Paused effect
         let error_b = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
@@ -2587,7 +2624,12 @@ mod tests {
             .await;
         // Drain any proposed event
         effects_rx.try_recv().unwrap();
-        service_inner.handle_retry_timer_fired(&invoker_options, MOCK_PARTITION, invocation_id);
+        service_inner.handle_retry_timer_fired(
+            &invoker_options,
+            MOCK_PARTITION,
+            invocation_id,
+            None,
+        );
 
         // Second transient failure after pin -> schedules retry (attempts now exhausted)
         let err2 = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
@@ -2595,7 +2637,12 @@ mod tests {
             .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, err2)
             .await;
         effects_rx.try_recv().unwrap_err();
-        service_inner.handle_retry_timer_fired(&invoker_options, MOCK_PARTITION, invocation_id);
+        service_inner.handle_retry_timer_fired(
+            &invoker_options,
+            MOCK_PARTITION,
+            invocation_id,
+            None,
+        );
 
         // Send the same pinned deployment again -> must NOT reset the retry iterator
         let same_dp = PinnedDeployment::new(dp.deployment_id, ServiceProtocolVersion::V4);
