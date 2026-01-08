@@ -11,6 +11,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use restate_types::identifiers::StateMachineId;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
@@ -26,6 +27,7 @@ use super::*;
 /// Component encapsulating the business logic of the invocation state machine
 #[derive(Debug)]
 pub(super) struct InvocationStateMachine {
+    pub(super) id: StateMachineId,
     #[allow(dead_code)]
     pub(super) qid: Option<VQueueId>,
     #[allow(dead_code)]
@@ -186,6 +188,7 @@ impl InvocationStateMachine {
         on_max_attempts: OnMaxAttempts,
     ) -> InvocationStateMachine {
         Self {
+            id: StateMachineId::new(),
             qid,
             _permit: permit,
             invocation_target,
@@ -481,6 +484,10 @@ impl InvocationStateMachine {
         }
     }
 
+    pub(crate) fn is_waiting_retry(&self) -> bool {
+        matches!(self.invocation_state, AttemptState::WaitingRetry { .. })
+    }
+
     pub(super) fn attempt_deployment_id(&self) -> AttemptDeploymentId {
         AttemptDeploymentId(match &self.invocation_state {
             AttemptState::InFlight {
@@ -570,12 +577,6 @@ mod tests {
     use restate_test_util::{assert, check, let_assert};
     use restate_types::journal_v2::{CompletionType, NotificationType};
     use restate_types::retries::RetryPolicy;
-
-    impl InvocationStateMachine {
-        pub(crate) fn is_waiting_retry(&self) -> bool {
-            matches!(self.invocation_state, AttemptState::WaitingRetry { .. })
-        }
-    }
 
     #[test]
     fn handle_error_when_waiting_for_retry() {
