@@ -1276,6 +1276,8 @@ where
                         },
                     }))
                     .await;
+
+                self.clear_timers(&invocation_id);
             } else {
                 // Invocation still in flight, pause will happen later on
                 self.invocation_state_machine_manager.register_invocation(
@@ -1325,6 +1327,10 @@ where
         for partition in partitions {
             self.handle_abort_partition(partition);
         }
+    }
+
+    fn clear_timers(&mut self, invocation_id: &InvocationId) {
+        self.retry_timers.remove(|(_, id)| id == invocation_id);
     }
 
     // --- Helpers
@@ -1494,6 +1500,8 @@ where
                         },
                     }))
                     .await;
+
+                self.clear_timers(&invocation_id);
             }
             OnTaskError::Kill => {
                 counter!(INVOKER_INVOCATION_TASKS,
@@ -1520,6 +1528,12 @@ where
                         kind: EffectKind::Failed(error.into_invocation_error()),
                     }))
                     .await;
+
+                // Clear the timer for *consistency* although after killing,
+                // the invocation can only be restarted as new so it will
+                // have a new invocation-id and will not conflict with the
+                // killed invocation timers.
+                self.clear_timers(&invocation_id);
             }
         }
     }
@@ -2651,6 +2665,8 @@ mod tests {
         // Drain any proposed event
         let _ = effects_rx.try_recv();
 
+        assert!(!service_inner.retry_timers.is_empty());
+
         // Verify invocation is in WaitingRetry state
         let (_, ism) = service_inner
             .invocation_state_machine_manager
@@ -2662,6 +2678,9 @@ mod tests {
         service_inner
             .handle_pause_invocation(MOCK_PARTITION, invocation_id)
             .await;
+
+        // make sure that retry timers has been cleared
+        assert!(service_inner.retry_timers.is_empty());
 
         // Should emit Paused effect immediately with no last_failure
         let effect = effects_rx

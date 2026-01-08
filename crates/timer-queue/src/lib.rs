@@ -81,6 +81,14 @@ impl<T> TimerQueue<T> {
             futures::future::pending().await
         }
     }
+
+    /// Remove all timers that matches predicate
+    pub fn remove<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.0.retain(|o| !predicate(&o.0.payload));
+    }
 }
 
 impl<T> FromIterator<(SystemTime, T)> for TimerQueue<T> {
