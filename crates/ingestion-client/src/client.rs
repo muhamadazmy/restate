@@ -267,6 +267,7 @@ impl InputRecord<String> {
 mod test {
     use std::{num::NonZeroUsize, time::Duration};
 
+    use bytes::BytesMut;
     use futures::{FutureExt, StreamExt};
     use googletest::prelude::*;
     use test_log::test;
