@@ -8,13 +8,17 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::num::NonZeroUsize;
+
+use bytes::BytesMut;
 use futures::FutureExt;
 use pin_project::pin_project;
-use restate_types::logs::Record;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{trace, warn};
 
-use restate_core::{ShutdownError, TaskCenter, TaskHandle, cancellation_watcher};
+use restate_core::{ShutdownError, TaskCenter, TaskHandle, cancellation_token};
+use restate_types::logs::Record;
 use restate_types::storage::StorageEncode;
 
 use crate::error::EnqueueError;
@@ -31,7 +35,7 @@ pub struct BackgroundAppender<T> {
     /// The number of records that can get batched together before appending to the log
     max_batch_size: usize,
     /// Reusable vector for buffering recv() operations
-    recv_buffer: Vec<AppendOperation>,
+    current_batch: Batch,
     /// Reusable vector for callbacks of enqueue_with_notification calls
     notif_buffer: Vec<oneshot::Sender<()>>,
     _phantom: std::marker::PhantomData<T>,
@@ -46,7 +50,7 @@ where
             appender,
             queue_capacity,
             max_batch_size,
-            recv_buffer: Vec::with_capacity(max_batch_size),
+            current_batch: Batch::with_capacity(max_batch_size),
             notif_buffer: Vec::with_capacity(max_batch_size),
             _phantom: std::marker::PhantomData,
         }
@@ -57,6 +61,7 @@ where
     /// behaviour to the owner of [`AppenderHandle`] to drain or drop when appropriate.
     pub fn start(self, name: &'static str) -> Result<AppenderHandle<T>, ShutdownError> {
         let (tx, rx) = tokio::sync::mpsc::channel(self.queue_capacity);
+        let record_size_limit = self.appender.record_size_limit();
 
         let handle = TaskCenter::spawn_unmanaged_child(
             restate_core::TaskKind::BifrostAppender,
@@ -67,7 +72,9 @@ where
         Ok(AppenderHandle {
             inner_handle: Some(handle),
             sender: Some(LogSender {
+                arena: BytesMut::default(),
                 tx,
+                record_size_limit,
                 _phantom: std::marker::PhantomData,
             }),
         })
@@ -78,48 +85,87 @@ where
             mut appender,
             max_batch_size,
             mut notif_buffer,
-            mut recv_buffer,
+            mut current_batch,
             ..
         } = self;
 
-        // fused to avoid a busy loop while draining.
-        let mut drain_fut = std::pin::pin!(cancellation_watcher().fuse());
-        loop {
-            tokio::select! {
-                _ = &mut drain_fut => {
+        let cancel_token = cancellation_token();
+        // to avoid a busy loop while draining.
+        let mut draining = false;
+
+        let batch_limit_bytes = appender.record_size_limit().get();
+
+        'main: loop {
+            // Wait for the next operation or drain signal
+            let op = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled(), if !draining => {
                     trace!("Draining the background appender");
                     // stop accepting messages and drain the queue
                     rx.close();
+                    draining = true;
+                    continue;
                 }
-                received = rx.recv_many(&mut recv_buffer, max_batch_size) => {
-                    if received == 0 {
-                        // channel is closed, appender is drained
-                        break;
-                    }
+                Some(op) = rx.recv() => op,
+                else => { break 'main; }
+            };
 
-                    // The background appender stops if a batch write failed. All enqueued messages
-                    // will be dropped and senders will receive [`EnqueueError::Closed`]
-                    //
-                    // All buffers get reset within `process_appends()`
-                    Self::process_appends(
-                        &mut appender,
-                        &mut recv_buffer,
-                        &mut notif_buffer,
-                    ).await?;
+            // Check if this operation fits in the current batch (by size and count)
+            if current_batch.can_fit(op.cost_in_bytes(), batch_limit_bytes, max_batch_size) {
+                current_batch.push(op);
+            } else {
+                // Current batch is full, flush it first
+                Self::process_appends(&mut appender, &mut current_batch, &mut notif_buffer).await?;
+                // Then add the operation to the new (empty) batch
+                current_batch.push(op);
+            }
+
+            // Opportunistically drain the queue to fill the batch
+            'opportunistic: loop {
+                match rx.try_recv() {
+                    Ok(op)
+                        if current_batch.can_fit(
+                            op.cost_in_bytes(),
+                            batch_limit_bytes,
+                            max_batch_size,
+                        ) =>
+                    {
+                        current_batch.push(op);
+                    }
+                    Ok(op) => {
+                        // Batch is full, flush it
+                        Self::process_appends(&mut appender, &mut current_batch, &mut notif_buffer)
+                            .await?;
+                        // Add op to the next batch
+                        current_batch.push(op);
+                    }
+                    Err(TryRecvError::Empty) => {
+                        // No more messages available, flush current batch and wait for more
+                        Self::process_appends(&mut appender, &mut current_batch, &mut notif_buffer)
+                            .await?;
+                        break 'opportunistic;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        // Channel closed, flush remaining and exit outer loop
+                        break 'main;
+                    }
                 }
             }
         }
+
+        // Make sure to flush any remaining items before exiting.
+        Self::process_appends(&mut appender, &mut current_batch, &mut notif_buffer).await?;
 
         Ok(())
     }
 
     async fn process_appends(
         appender: &mut Appender,
-        buffered_records: &mut Vec<AppendOperation>,
+        buffered_records: &mut Batch,
         notif_buffer: &mut Vec<oneshot::Sender<()>>,
     ) -> Result<()> {
-        let mut batch = Vec::with_capacity(buffered_records.len());
-        for record in buffered_records.drain(..) {
+        let mut batch = Vec::with_capacity(buffered_records.inner.len());
+        for record in buffered_records.inner.drain(..) {
             match record {
                 AppendOperation::Enqueue(record) => {
                     batch.push(record);
@@ -151,6 +197,8 @@ where
         });
         // Clear buffers
         notif_buffer.clear();
+        buffered_records.reset();
+
         Ok(())
     }
 }
@@ -209,8 +257,8 @@ impl<T> AppenderHandle<T> {
     }
 
     /// If you need an owned LogSender, clone this.
-    pub fn sender(&self) -> &LogSender<T> {
-        self.sender.as_ref().unwrap()
+    pub fn sender(&mut self) -> &mut LogSender<T> {
+        self.sender.as_mut().unwrap()
     }
 
     /// Waits for the underlying appender task to finish.
@@ -227,16 +275,39 @@ impl<T> AppenderHandle<T> {
     }
 }
 
-#[derive(Clone)]
 pub struct LogSender<T> {
+    arena: BytesMut,
     tx: tokio::sync::mpsc::Sender<AppendOperation>,
+    record_size_limit: NonZeroUsize,
     _phantom: std::marker::PhantomData<T>,
 }
 
+impl<T> Clone for LogSender<T> {
+    fn clone(&self) -> Self {
+        Self {
+            arena: BytesMut::default(),
+            tx: self.tx.clone(),
+            record_size_limit: self.record_size_limit,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
 impl<T: StorageEncode> LogSender<T> {
+    fn check_record_size<E>(&self, record: &Record) -> Result<(), EnqueueError<E>> {
+        let record_size = record.estimated_encode_size();
+        if record_size > self.record_size_limit.get() {
+            return Err(EnqueueError::RecordTooLarge {
+                record_size,
+                limit: self.record_size_limit,
+            });
+        }
+        Ok(())
+    }
+
     /// Attempt to enqueue a record to the appender. Returns immediately if the
     /// appender is pushing back or if the appender is draining or drained.
-    pub fn try_enqueue<A>(&self, record: A) -> Result<(), EnqueueError<A>>
+    pub fn try_enqueue<A>(&mut self, record: A) -> Result<(), EnqueueError<A>>
     where
         A: Into<InputRecord<T>>,
     {
@@ -246,14 +317,15 @@ impl<T: StorageEncode> LogSender<T> {
             Err(mpsc::error::TrySendError::Closed(_)) => return Err(EnqueueError::Closed(record)),
         };
 
-        let record = record.into().into_record();
+        let record = record.into().into_record().ensure_encoded(&mut self.arena);
+        self.check_record_size(&record)?;
         permit.send(AppendOperation::Enqueue(record));
         Ok(())
     }
 
     /// Enqueues an append and returns a commit token
     pub fn try_enqueue_with_notification<A>(
-        &self,
+        &mut self,
         record: A,
     ) -> Result<CommitToken, EnqueueError<A>>
     where
@@ -266,21 +338,23 @@ impl<T: StorageEncode> LogSender<T> {
         };
 
         let (tx, rx) = oneshot::channel();
-        let record = record.into().into_record();
+        let record = record.into().into_record().ensure_encoded(&mut self.arena);
+        self.check_record_size(&record)?;
         permit.send(AppendOperation::EnqueueWithNotification(record, tx));
         Ok(CommitToken { rx })
     }
 
     /// Waits for capacity on the channel and returns an error if the appender is
     /// draining or drained.
-    pub async fn enqueue<A>(&self, record: A) -> Result<(), EnqueueError<A>>
+    pub async fn enqueue<A>(&mut self, record: A) -> Result<(), EnqueueError<A>>
     where
         A: Into<InputRecord<T>>,
     {
         let Ok(permit) = self.tx.reserve().await else {
             return Err(EnqueueError::Closed(record));
         };
-        let record = record.into().into_record();
+        let record = record.into().into_record().ensure_encoded(&mut self.arena);
+        self.check_record_size(&record)?;
         permit.send(AppendOperation::Enqueue(record));
 
         Ok(())
@@ -291,7 +365,7 @@ impl<T: StorageEncode> LogSender<T> {
     ///
     /// Attempts to enqueue all records in the iterator. This will immediately return if there is
     /// no capacity in the channel to enqueue _all_ records.
-    pub fn try_enqueue_many<I, A>(&self, records: I) -> Result<(), EnqueueError<I>>
+    pub fn try_enqueue_many<I, A>(&mut self, records: I) -> Result<(), EnqueueError<I>>
     where
         I: Iterator<Item = A> + ExactSizeIterator,
         A: Into<InputRecord<T>>,
@@ -303,7 +377,9 @@ impl<T: StorageEncode> LogSender<T> {
         };
 
         for (permit, record) in std::iter::zip(permits, records) {
-            permit.send(AppendOperation::Enqueue(record.into().into_record()));
+            let record = record.into().into_record().ensure_encoded(&mut self.arena);
+            self.check_record_size(&record)?;
+            permit.send(AppendOperation::Enqueue(record));
         }
         Ok(())
     }
@@ -313,7 +389,7 @@ impl<T: StorageEncode> LogSender<T> {
     ///
     /// The method is cancel safe in the sense that if enqueue_many is used in a `tokio::select!`,
     /// no records are enqueued if another branch completed.
-    pub async fn enqueue_many<I, A>(&self, records: I) -> Result<(), EnqueueError<I>>
+    pub async fn enqueue_many<I, A>(&mut self, records: I) -> Result<(), EnqueueError<I>>
     where
         I: Iterator<Item = A> + ExactSizeIterator,
         A: Into<InputRecord<T>>,
@@ -323,7 +399,9 @@ impl<T: StorageEncode> LogSender<T> {
         };
 
         for (permit, record) in std::iter::zip(permits, records) {
-            permit.send(AppendOperation::Enqueue(record.into().into_record()));
+            let record = record.into().into_record().ensure_encoded(&mut self.arena);
+            self.check_record_size(&record)?;
+            permit.send(AppendOperation::Enqueue(record));
         }
 
         Ok(())
@@ -332,7 +410,7 @@ impl<T: StorageEncode> LogSender<T> {
     /// Enqueues a record and returns a [`CommitToken`] future that's resolved when the record is
     /// committed.
     pub async fn enqueue_with_notification<A>(
-        &self,
+        &mut self,
         record: A,
     ) -> Result<CommitToken, EnqueueError<A>>
     where
@@ -343,10 +421,9 @@ impl<T: StorageEncode> LogSender<T> {
         };
 
         let (tx, rx) = oneshot::channel();
-        permit.send(AppendOperation::EnqueueWithNotification(
-            record.into().into_record(),
-            tx,
-        ));
+        let record = record.into().into_record().ensure_encoded(&mut self.arena);
+        self.check_record_size(&record)?;
+        permit.send(AppendOperation::EnqueueWithNotification(record, tx));
 
         Ok(CommitToken { rx })
     }
@@ -421,4 +498,155 @@ enum AppendOperation {
     MarkAsPreferred,
     /// Let's bifrost know that this node might not be the preferred writer of this log
     ForgetPreference,
+}
+
+impl AppendOperation {
+    fn cost_in_bytes(&self) -> usize {
+        match self {
+            AppendOperation::Enqueue(record) => record.estimated_encode_size(),
+            AppendOperation::EnqueueWithNotification(record, _) => record.estimated_encode_size(),
+            AppendOperation::Canary(_) => 0,
+            AppendOperation::MarkAsPreferred => 0,
+            AppendOperation::ForgetPreference => 0,
+        }
+    }
+}
+
+struct Batch {
+    inner: Vec<AppendOperation>,
+    bytes_accumulated: usize,
+}
+
+impl Batch {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Vec::with_capacity(capacity),
+            bytes_accumulated: 0,
+        }
+    }
+
+    /// Returns true if an operation of the given size can fit in the batch
+    /// without exceeding the byte limit or max count.
+    fn can_fit(&self, op_size: usize, byte_limit: usize, max_count: usize) -> bool {
+        self.bytes_accumulated + op_size <= byte_limit && self.inner.len() < max_count
+    }
+
+    fn push(&mut self, op: AppendOperation) {
+        self.bytes_accumulated += op.cost_in_bytes();
+        self.inner.push(op);
+    }
+
+    fn reset(&mut self) {
+        self.bytes_accumulated = 0;
+        self.inner.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use restate_types::logs::{Keys, Record};
+    use restate_types::storage::PolyBytes;
+    use restate_types::time::NanosSinceEpoch;
+
+    fn make_record_with_size(size: usize) -> Record {
+        // Create a record with approximately the given size
+        // The actual size will be dominated by the PolyBytes::Bytes variant
+        let payload = vec![0u8; size];
+        Record::from_parts(
+            NanosSinceEpoch::now(),
+            Keys::None,
+            PolyBytes::Bytes(payload.into()),
+        )
+    }
+
+    #[test]
+    fn test_append_operation_cost_in_bytes() {
+        // Test that Enqueue operations report their record size
+        let record = make_record_with_size(100);
+        let expected_size = record.estimated_encode_size();
+        let op = AppendOperation::Enqueue(record);
+        assert_eq!(op.cost_in_bytes(), expected_size);
+
+        // Test that EnqueueWithNotification also reports record size
+        let record = make_record_with_size(200);
+        let expected_size = record.estimated_encode_size();
+        let (tx, _rx) = oneshot::channel();
+        let op = AppendOperation::EnqueueWithNotification(record, tx);
+        assert_eq!(op.cost_in_bytes(), expected_size);
+
+        // Test that control operations have zero cost
+        let (tx, _rx) = oneshot::channel();
+        assert_eq!(AppendOperation::Canary(tx).cost_in_bytes(), 0);
+        assert_eq!(AppendOperation::MarkAsPreferred.cost_in_bytes(), 0);
+        assert_eq!(AppendOperation::ForgetPreference.cost_in_bytes(), 0);
+    }
+
+    #[test]
+    fn test_batch_can_fit_by_bytes() {
+        let mut batch = Batch::with_capacity(100);
+        let byte_limit = 1000;
+        let max_count = 100; // High count limit, so bytes is the constraint
+
+        // Empty batch can fit a record smaller than limit
+        assert!(batch.can_fit(500, byte_limit, max_count));
+        assert!(batch.can_fit(1000, byte_limit, max_count));
+        assert!(!batch.can_fit(1001, byte_limit, max_count));
+
+        // Add a 400-byte record
+        let record = make_record_with_size(400);
+        let record_size = record.estimated_encode_size();
+        batch.push(AppendOperation::Enqueue(record));
+        assert_eq!(batch.bytes_accumulated, record_size);
+
+        // Can fit another record if total stays under limit
+        let remaining = byte_limit - batch.bytes_accumulated;
+        assert!(batch.can_fit(remaining, byte_limit, max_count));
+        assert!(!batch.can_fit(remaining + 1, byte_limit, max_count));
+    }
+
+    #[test]
+    fn test_batch_can_fit_by_count() {
+        let mut batch = Batch::with_capacity(100);
+        let byte_limit = 1_000_000; // High byte limit, so count is the constraint
+        let max_count = 3;
+
+        // Add records until count limit
+        for i in 0..3 {
+            assert!(
+                batch.can_fit(100, byte_limit, max_count),
+                "Should fit record {i}"
+            );
+            let record = make_record_with_size(100);
+            batch.push(AppendOperation::Enqueue(record));
+        }
+
+        // Now at max count, cannot fit more regardless of size
+        assert!(!batch.can_fit(1, byte_limit, max_count));
+        assert!(!batch.can_fit(100, byte_limit, max_count));
+        assert_eq!(batch.inner.len(), 3);
+    }
+
+    #[test]
+    fn test_batch_bytes_accumulated_tracking() {
+        let mut batch = Batch::with_capacity(10);
+        let mut expected_total = 0;
+
+        // Add records and verify accumulated bytes
+        for _ in 0..5 {
+            let record = make_record_with_size(100);
+            let size = record.estimated_encode_size();
+            expected_total += size;
+            batch.push(AppendOperation::Enqueue(record));
+            assert_eq!(batch.bytes_accumulated, expected_total);
+        }
+
+        // Control operations don't add to byte count
+        let (tx, _rx) = oneshot::channel();
+        batch.push(AppendOperation::Canary(tx));
+        assert_eq!(batch.bytes_accumulated, expected_total);
+
+        batch.push(AppendOperation::MarkAsPreferred);
+        assert_eq!(batch.bytes_accumulated, expected_total);
+    }
 }
