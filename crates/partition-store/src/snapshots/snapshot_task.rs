@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, instrument, warn};
 
 use restate_core::cancellation_token;
 use restate_types::identifiers::{PartitionId, SnapshotId};
@@ -54,7 +54,7 @@ impl SnapshotPartitionTask {
         {
             result
                 .inspect(|metadata| {
-                    info!(archived_lsn = %metadata.min_applied_lsn, "Created partition snapshot");
+                    debug!(archived_lsn = %metadata.min_applied_lsn, "Created partition snapshot");
                 })
                 .inspect_err(|err| {
                     warn!("Create snapshot failed: {}", err);
