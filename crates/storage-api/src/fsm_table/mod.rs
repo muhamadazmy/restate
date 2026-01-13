@@ -13,6 +13,7 @@ use std::future::Future;
 use restate_types::SemanticRestateVersion;
 use restate_types::logs::Lsn;
 use restate_types::message::MessageIndex;
+use restate_types::partitions::state::ReplicaSetState;
 use restate_types::schema::Schema;
 use restate_types::time::MillisSinceEpoch;
 
@@ -35,6 +36,10 @@ pub trait ReadFsmTable {
     ) -> impl Future<Output = Result<Option<PartitionDurability>>> + Send + '_;
 
     fn get_schema(&mut self) -> impl Future<Output = Result<Option<Schema>>> + Send + '_;
+
+    fn get_partition_config_state(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<StoredPartitionConfigState>>> + Send + '_;
 }
 
 pub trait WriteFsmTable {
@@ -49,6 +54,8 @@ pub trait WriteFsmTable {
     fn put_partition_durability(&mut self, durability: &PartitionDurability) -> Result<()>;
 
     fn put_schema(&mut self, schema: &Schema) -> Result<()>;
+
+    fn put_partition_config_state(&mut self, state: &StoredPartitionConfigState) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, derive_more::From, derive_more::Into)]
@@ -83,3 +90,15 @@ impl PartialOrd for PartitionDurability {
 impl PartitionStoreProtobufValue for PartitionDurability {
     type ProtobufType = crate::protobuf_types::v1::PartitionDurability;
 }
+
+/// Stores the current and next replica set state from the latest AnnounceLeader.
+/// *Since v1.6*
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StoredPartitionConfigState {
+    /// The current replica set state at the time of the announcement.
+    pub current: ReplicaSetState,
+    /// The next replica set state
+    pub next: Option<ReplicaSetState>,
+}
+
+restate_types::flexbuffers_storage_encode_decode!(StoredPartitionConfigState);

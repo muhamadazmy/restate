@@ -405,7 +405,7 @@ impl MembershipState {
     }
 }
 
-#[derive(Debug, Clone, bilrost::Message, NetSerde)]
+#[derive(Debug, Clone, bilrost::Message, NetSerde, serde::Serialize, serde::Deserialize)]
 pub struct ReplicaSetState {
     pub version: Version,
     // ordered, akin to NodeSet
@@ -461,7 +461,7 @@ impl Merge for ReplicaSetState {
     }
 }
 
-#[derive(Debug, Clone, bilrost::Message, NetSerde)]
+#[derive(Debug, Clone, bilrost::Message, NetSerde, serde::Serialize, serde::Deserialize)]
 pub struct MemberState {
     pub node_id: PlainNodeId,
     pub durable_lsn: Lsn,

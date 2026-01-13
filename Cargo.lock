@@ -7789,13 +7789,14 @@ dependencies = [
  "futures",
  "futures-util",
  "googletest",
- "humantime",
+ "jiff",
  "num-bigint",
  "object_store 0.13.0",
  "parking_lot",
  "paste",
  "prost 0.14.1",
  "rand 0.9.2",
+ "restate-clock",
  "restate-core",
  "restate-errors",
  "restate-object-store-util",
@@ -8051,6 +8052,7 @@ dependencies = [
  "static_assertions",
  "strum",
  "thiserror 2.0.17",
+ "tracing",
 ]
 
 [[package]]
@@ -8327,8 +8329,8 @@ dependencies = [
 
 [[package]]
 name = "restate-web-ui"
-version = "0.1.22"
-source = "git+https://github.com/restatedev/restate-web-ui-crate?tag=v0.1.22#55ac98b139c5dd022e4d7ab338dbe5daa4789542"
+version = "0.1.23"
+source = "git+https://github.com/restatedev/restate-web-ui-crate?tag=v0.1.23#9c5ab65c0068048f9ceceb30b840fc57d3f8aaf0"
 dependencies = [
  "anyhow",
  "include_dir",
