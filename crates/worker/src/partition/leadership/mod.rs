@@ -43,7 +43,6 @@ use restate_storage_api::invocation_status_table::{
 use restate_storage_api::outbox_table::{OutboxMessage, ReadOutboxTable};
 use restate_storage_api::timer_table::{ReadTimerTable, TimerKey};
 use restate_timer::TokioClock;
-use restate_types::GenerationalNodeId;
 use restate_types::cluster::cluster_state::RunMode;
 use restate_types::config::Configuration;
 use restate_types::errors::GenericError;
@@ -59,11 +58,13 @@ use restate_types::partitions::state::PartitionReplicaSetStates;
 use restate_types::retries::with_jitter;
 use restate_types::schema::Schema;
 use restate_types::storage::{StorageDecodeError, StorageEncodeError};
+use restate_types::{GenerationalNodeId, SemanticRestateVersion};
 use restate_vqueues::{SchedulerService, VQueuesMeta, VQueuesMetaMut};
 use restate_wal_protocol::control::{AnnounceLeader, PartitionDurability};
 use restate_wal_protocol::timer::TimerKeyValue;
 use restate_wal_protocol::{Command, Envelope};
 
+use crate::partition::LeadershipInfo;
 use crate::partition::cleaner::{self, Cleaner};
 use crate::partition::invoker_storage_reader::InvokerStorageReader;
 use crate::partition::leadership::leader_state::LeaderState;
@@ -215,11 +216,11 @@ where
         }
     }
 
-    #[instrument(level = "debug", skip_all, fields(leader_epoch = %leader_epoch))]
-    pub async fn run_for_leader(&mut self, leader_epoch: LeaderEpoch) -> Result<(), Error> {
-        if self.is_new_leader_epoch(leader_epoch) {
+    #[instrument(level = "debug", skip_all, fields(leader_epoch = %leadership_info.leader_epoch))]
+    pub async fn run_for_leader(&mut self, leadership_info: LeadershipInfo) -> Result<(), Error> {
+        if self.is_new_leader_epoch(leadership_info.leader_epoch) {
             self.become_follower().await;
-            self.announce_leadership(leader_epoch).await?;
+            self.announce_leadership(leadership_info).await?;
             debug!("Running for leadership.");
         } else {
             debug!(
@@ -230,12 +231,29 @@ where
         Ok(())
     }
 
-    async fn announce_leadership(&mut self, leader_epoch: LeaderEpoch) -> Result<(), Error> {
-        let announce_leader = Command::AnnounceLeader(Box::new(AnnounceLeader {
-            node_id: my_node_id(),
-            leader_epoch,
-            partition_key_range: self.partition.key_range.clone(),
-        }));
+    async fn announce_leadership(&mut self, leadership_info: LeadershipInfo) -> Result<(), Error> {
+        let leader_epoch = leadership_info.leader_epoch;
+
+        const GATE_VERSION: SemanticRestateVersion = SemanticRestateVersion::new(1, 7, 0);
+
+        let announce_leader =
+            if SemanticRestateVersion::current().is_equal_or_newer_than(&GATE_VERSION) {
+                Command::AnnounceLeader(Box::new(AnnounceLeader {
+                    node_id: my_node_id(),
+                    leader_epoch,
+                    partition_key_range: self.partition.key_range.clone(),
+                    current_config: Some(leadership_info.current_config),
+                    next_config: leadership_info.next_config,
+                }))
+            } else {
+                Command::AnnounceLeader(Box::new(AnnounceLeader {
+                    node_id: my_node_id(),
+                    leader_epoch,
+                    partition_key_range: self.partition.key_range.clone(),
+                    current_config: None,
+                    next_config: None,
+                }))
+            };
 
         let mut self_proposer = SelfProposer::new(
             self.partition.log_id(),
@@ -719,6 +737,7 @@ impl shuffle::OutboxReader for OutboxReader {
 
 #[cfg(test)]
 mod tests {
+    use crate::partition::LeadershipInfo;
     use crate::partition::leadership::trim_queue::TrimQueue;
     use crate::partition::leadership::{LeadershipState, State};
     use assert2::let_assert;
@@ -730,15 +749,15 @@ mod tests {
     use restate_invoker_api::test_util::MockInvokerHandle;
     use restate_partition_store::PartitionStoreManager;
     use restate_rocksdb::RocksDbManager;
-    use restate_types::GenerationalNodeId;
     use restate_types::config::Configuration;
     use restate_types::identifiers::{LeaderEpoch, PartitionId, PartitionKey};
     use restate_types::logs::{KeyFilter, Lsn, SequenceNumber};
-    use restate_types::partitions::Partition;
     use restate_types::partitions::state::PartitionReplicaSetStates;
+    use restate_types::partitions::{Partition, PartitionConfiguration};
+    use restate_types::{GenerationalNodeId, SemanticRestateVersion};
     use restate_vqueues::VQueuesMetaMut;
-    use restate_wal_protocol::control::AnnounceLeader;
-    use restate_wal_protocol::{Command, Envelope};
+    use restate_wal_protocol::Command;
+    use restate_wal_protocol::Envelope;
     use std::num::NonZeroUsize;
     use std::ops::RangeInclusive;
     use std::sync::Arc;
@@ -782,7 +801,13 @@ mod tests {
         assert!(matches!(state.state, State::Follower));
 
         let leader_epoch = LeaderEpoch::from(1);
-        state.run_for_leader(leader_epoch).await?;
+        let current_config = PartitionConfiguration::default();
+        let leadership_info = LeadershipInfo {
+            leader_epoch,
+            current_config: current_config.clone(),
+            next_config: None,
+        };
+        state.run_for_leader(leadership_info).await?;
 
         assert!(matches!(state.state, State::Candidate { .. }));
 
@@ -796,14 +821,16 @@ mod tests {
         let envelope = record.try_decode::<Envelope>().unwrap()?;
 
         let_assert!(Command::AnnounceLeader(announce_leader) = envelope.command);
-        assert_eq!(
-            *announce_leader,
-            AnnounceLeader {
-                node_id: NODE_ID,
-                leader_epoch,
-                partition_key_range: PARTITION_KEY_RANGE,
-            }
-        );
+        assert_eq!(announce_leader.node_id, NODE_ID);
+        assert_eq!(announce_leader.leader_epoch, leader_epoch);
+        assert_eq!(announce_leader.partition_key_range, PARTITION_KEY_RANGE);
+
+        const GATE_VERSION: SemanticRestateVersion = SemanticRestateVersion::new(1, 7, 0);
+
+        if SemanticRestateVersion::current().is_equal_or_newer_than(&GATE_VERSION) {
+            assert!(announce_leader.current_config.is_some());
+            assert!(announce_leader.next_config.is_none());
+        }
 
         let mut partition_store = partition_store_manager.open(&PARTITION, None).await?;
         state

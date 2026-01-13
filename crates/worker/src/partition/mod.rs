@@ -44,7 +44,9 @@ use restate_storage_api::deduplication_table::{
     DedupInformation, DedupSequenceNumber, ProducerId, ReadDeduplicationTable,
     WriteDeduplicationTable,
 };
-use restate_storage_api::fsm_table::{PartitionDurability, ReadFsmTable, WriteFsmTable};
+use restate_storage_api::fsm_table::{
+    PartitionDurability, ReadFsmTable, StoredPartitionConfigState, WriteFsmTable,
+};
 use restate_storage_api::outbox_table::ReadOutboxTable;
 use restate_storage_api::{StorageError, Transaction};
 use restate_time_util::DurationExt;
@@ -61,6 +63,7 @@ use restate_types::net::partition_processor::{
     PartitionProcessorRpcResponse,
 };
 use restate_types::net::{RpcRequest, ingest};
+use restate_types::partitions::PartitionConfiguration;
 use restate_types::partitions::state::PartitionReplicaSetStates;
 use restate_types::retries::{RetryPolicy, with_jitter};
 use restate_types::schema::Schema;
@@ -80,10 +83,18 @@ use crate::partition::invoker_storage_reader::InvokerStorageReader;
 use crate::partition::leadership::LeadershipState;
 use crate::partition::state_machine::{ActionCollector, StateMachine};
 
+/// Information needed to run as leader, including the epoch and partition configurations.
+#[derive(Clone, Debug)]
+pub struct LeadershipInfo {
+    pub leader_epoch: LeaderEpoch,
+    pub current_config: PartitionConfiguration,
+    pub next_config: Option<PartitionConfiguration>,
+}
+
 /// Target leader state of the partition processor.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub enum TargetLeaderState {
-    Leader(LeaderEpoch),
+    Leader(Box<LeadershipInfo>),
     #[default]
     Follower,
 }
@@ -167,6 +178,19 @@ where
                     // we don't know the old leader node-id, another node might update it
                     current_leader: GenerationalNodeId::INVALID,
                 },
+            );
+        }
+
+        // Load persisted partition configuration state (since v1.6)
+        if let Some(stored_config) = partition_store.get_partition_config_state().await? {
+            replica_set_states.note_observed_membership(
+                partition_store.partition_id(),
+                restate_types::partitions::state::LeadershipState {
+                    current_leader_epoch: last_seen_leader_epoch.unwrap_or(LeaderEpoch::INVALID),
+                    current_leader: GenerationalNodeId::INVALID,
+                },
+                &stored_config.current,
+                &stored_config.next,
             );
         }
 
@@ -495,7 +519,7 @@ where
             let config = live_config.live_load();
             tokio::select! {
                 _ = self.target_leader_state_rx.changed() => {
-                    let target_leader_state = *self.target_leader_state_rx.borrow_and_update();
+                    let target_leader_state = self.target_leader_state_rx.borrow_and_update().clone();
                     self.on_target_leader_state(target_leader_state).await.context("failed handling target leader state change")?;
                 }
                 Ok(()) = watch_leader_changes.changed() => {
@@ -566,6 +590,19 @@ where
                         ).await?;
 
                         if let Some(announce_leader) = maybe_announce_leader {
+                            // Persist partition configuration state if present (since v1.6)
+                            if let Some(current_config) = &announce_leader.current_config {
+                                transaction.put_partition_config_state(
+                                    &StoredPartitionConfigState {
+                                        current: current_config.to_replica_set_state(),
+                                        next: announce_leader
+                                            .next_config
+                                            .as_ref()
+                                            .map(|c| c.to_replica_set_state()),
+                                    },
+                                )?;
+                            }
+
                             // commit all changes so far, this is important so that the actuators see all changes
                             // when becoming leader.
                             transaction.commit().await?;
@@ -630,10 +667,10 @@ where
         target_leader_state: TargetLeaderState,
     ) -> anyhow::Result<()> {
         match target_leader_state {
-            TargetLeaderState::Leader(leader_epoch) => {
+            TargetLeaderState::Leader(leadership_info) => {
                 self.status.planned_mode = RunMode::Leader;
                 self.leadership_state
-                    .run_for_leader(leader_epoch)
+                    .run_for_leader(*leadership_info)
                     .await
                     .context("failed handling RunForLeader command")?;
             }
