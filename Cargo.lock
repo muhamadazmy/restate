@@ -8052,6 +8052,7 @@ dependencies = [
  "static_assertions",
  "strum",
  "thiserror 2.0.17",
+ "tracing",
 ]
 
 [[package]]
