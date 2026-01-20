@@ -11,14 +11,17 @@
 use std::ops::RangeInclusive;
 
 use restate_types::identifiers::{LeaderEpoch, PartitionId, PartitionKey};
-use restate_types::logs::{Keys, Lsn};
+use restate_types::logs::{Keys, Lsn, SequenceNumber};
+use restate_types::partitions::PartitionConfiguration;
+use restate_types::partitions::state::{MemberState, ReplicaSetState};
+use restate_types::replication::NodeSet;
 use restate_types::schema::Schema;
 use restate_types::time::MillisSinceEpoch;
-use restate_types::{GenerationalNodeId, SemanticRestateVersion};
+use restate_types::{GenerationalNodeId, SemanticRestateVersion, Version, Versioned};
 
 /// Announcing a new leader. This message can be written by any component to make the specified
 /// partition processor the leader.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnnounceLeader {
     /// Sender of the announce leader message.
@@ -28,6 +31,71 @@ pub struct AnnounceLeader {
     pub node_id: GenerationalNodeId,
     pub leader_epoch: LeaderEpoch,
     pub partition_key_range: RangeInclusive<PartitionKey>,
+    /// Current replica set configuration at the time of the announcement.
+    /// This field is optional for backward compatibility with older versions.
+    /// *Since v1.6*
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub current_config: Option<ReplicaSetConfiguration>,
+    /// Next replica set configuration (if a reconfiguration is in progress).
+    /// This field is optional for backward compatibility with older versions.
+    /// *Since v1.6*
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub next_config: Option<ReplicaSetConfiguration>,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ReplicaSetConfiguration {
+    pub version: Version,
+    pub replica_set: NodeSet,
+}
+
+impl ReplicaSetConfiguration {
+    pub fn to_replica_set_state(&self) -> ReplicaSetState {
+        let members = self
+            .replica_set
+            .iter()
+            .map(|node_id| MemberState {
+                node_id: *node_id,
+                durable_lsn: Lsn::INVALID,
+            })
+            .collect();
+
+        ReplicaSetState {
+            version: self.version,
+            members,
+        }
+    }
+}
+
+impl From<PartitionConfiguration> for ReplicaSetConfiguration {
+    fn from(value: PartitionConfiguration) -> Self {
+        Self {
+            version: value.version(),
+            replica_set: value.replica_set().clone(),
+        }
+    }
+}
+
+impl From<ReplicaSetConfiguration> for ReplicaSetState {
+    fn from(value: ReplicaSetConfiguration) -> Self {
+        value.to_replica_set_state()
+    }
+}
+
+impl From<ReplicaSetState> for ReplicaSetConfiguration {
+    fn from(value: ReplicaSetState) -> Self {
+        Self {
+            version: value.version,
+            replica_set: value.members.into_iter().map(|m| m.node_id).collect(),
+        }
+    }
 }
 
 /// A version barrier to fence off state machine changes that require a certain minimum
