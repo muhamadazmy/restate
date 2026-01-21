@@ -38,7 +38,7 @@ use restate_types::net::ingest::IngestRecord;
 use restate_types::net::partition_processor::{
     PartitionProcessorRpcError, PartitionProcessorRpcResponse,
 };
-use restate_types::{RESTATE_VERSION_1_7_0, SemanticRestateVersion, Version, Versioned};
+use restate_types::{SemanticRestateVersion, Version, Versioned};
 use restate_vqueues::VQueueEvent;
 use restate_vqueues::{SchedulerService, VQueuesMeta, scheduler};
 use restate_wal_protocol::control::UpsertSchema;
