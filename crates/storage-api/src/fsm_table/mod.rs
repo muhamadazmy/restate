@@ -10,11 +10,18 @@
 
 use std::future::Future;
 
-use restate_types::SemanticRestateVersion;
+use bytes::BytesMut;
+use restate_types::identifiers::LeaderEpoch;
 use restate_types::logs::Lsn;
 use restate_types::message::MessageIndex;
+use restate_types::partitions::state::ReplicaSetState;
 use restate_types::schema::Schema;
+use restate_types::storage::{
+    StorageCodecKind, StorageDecode, StorageDecodeError, StorageEncode, StorageEncodeError, decode,
+    encode,
+};
 use restate_types::time::MillisSinceEpoch;
+use restate_types::{GenerationalNodeId, SemanticRestateVersion};
 
 use crate::Result;
 use crate::protobuf_types::PartitionStoreProtobufValue;
@@ -35,6 +42,10 @@ pub trait ReadFsmTable {
     ) -> impl Future<Output = Result<Option<PartitionDurability>>> + Send + '_;
 
     fn get_schema(&mut self) -> impl Future<Output = Result<Option<Schema>>> + Send + '_;
+
+    fn get_partition_config_state(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<StoredPartitionConfiguration>>> + Send + '_;
 }
 
 pub trait WriteFsmTable {
@@ -49,6 +60,8 @@ pub trait WriteFsmTable {
     fn put_partition_durability(&mut self, durability: &PartitionDurability) -> Result<()>;
 
     fn put_schema(&mut self, schema: &Schema) -> Result<()>;
+
+    fn put_partition_config_state(&mut self, state: &StoredPartitionConfiguration) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, derive_more::From, derive_more::Into)]
@@ -82,4 +95,52 @@ impl PartialOrd for PartitionDurability {
 
 impl PartitionStoreProtobufValue for PartitionDurability {
     type ProtobufType = crate::protobuf_types::v1::PartitionDurability;
+}
+
+/// Stores the current and next replica set state from the latest AnnounceLeader.
+/// *Since v1.6*
+#[derive(Debug, Clone, bilrost::Message)]
+pub struct StoredPartitionConfiguration {
+    #[bilrost(tag(1))]
+    pub node_id: GenerationalNodeId,
+    #[bilrost(tag(2))]
+    pub leader_epoch: LeaderEpoch,
+    /// The current replica set state at the time of the announcement.
+    #[bilrost(tag(3))]
+    pub current: StoredReplicaSetState,
+    /// The next replica set state
+    #[bilrost(tag(4))]
+    pub next: Option<StoredReplicaSetState>,
+}
+
+#[derive(Debug, Clone, bilrost::Message)]
+pub struct StoredReplicaSetState {
+    #[bilrost(tag(1))]
+    pub replica_set: ReplicaSetState,
+    #[bilrost(tag(2))]
+    pub modified_at: MillisSinceEpoch,
+}
+
+impl StorageEncode for StoredPartitionConfiguration {
+    fn default_codec(&self) -> StorageCodecKind {
+        StorageCodecKind::Bilrost
+    }
+
+    fn encode(&self, buf: &mut BytesMut) -> Result<(), StorageEncodeError> {
+        encode::encode_bilrost(self, buf)
+    }
+}
+
+impl StorageDecode for StoredPartitionConfiguration {
+    fn decode<B: bytes::Buf>(
+        buf: &mut B,
+        kind: StorageCodecKind,
+    ) -> Result<Self, StorageDecodeError>
+    where
+        Self: Sized,
+    {
+        assert_eq!(kind, StorageCodecKind::Bilrost);
+
+        decode::decode_bilrost(buf)
+    }
 }
