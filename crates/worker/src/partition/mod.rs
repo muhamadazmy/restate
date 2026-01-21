@@ -25,6 +25,7 @@ use assert2::let_assert;
 use enumset::EnumSet;
 use futures::{FutureExt, Stream, StreamExt};
 use metrics::{SharedString, gauge, histogram};
+use restate_types::epoch::EpochMetadata;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{Span, debug, error, info, instrument, trace, warn};
@@ -44,7 +45,9 @@ use restate_storage_api::deduplication_table::{
     DedupInformation, DedupSequenceNumber, ProducerId, ReadDeduplicationTable,
     WriteDeduplicationTable,
 };
-use restate_storage_api::fsm_table::{PartitionDurability, ReadFsmTable, WriteFsmTable};
+use restate_storage_api::fsm_table::{
+    CachedEpochMetadata, PartitionDurability, ReadFsmTable, WriteFsmTable,
+};
 use restate_storage_api::outbox_table::ReadOutboxTable;
 use restate_storage_api::{StorageError, Transaction};
 use restate_time_util::DurationExt;
@@ -66,9 +69,11 @@ use restate_types::retries::{RetryPolicy, with_jitter};
 use restate_types::schema::Schema;
 use restate_types::storage::StorageDecodeError;
 use restate_types::time::{MillisSinceEpoch, NanosSinceEpoch};
-use restate_types::{GenerationalNodeId, SemanticRestateVersion};
+use restate_types::{GenerationalNodeId, Merge, SemanticRestateVersion, Version};
 use restate_vqueues::VQueuesMetaMut;
-use restate_wal_protocol::control::AnnounceLeader;
+use restate_wal_protocol::control::{
+    AnnounceLeader, CurrentReplicaSetConfiguration, NextReplicaSetConfiguration,
+};
 use restate_wal_protocol::{Command, Destination, Envelope, Header};
 
 use self::leadership::trim_queue::TrimQueue;
@@ -80,10 +85,32 @@ use crate::partition::invoker_storage_reader::InvokerStorageReader;
 use crate::partition::leadership::LeadershipState;
 use crate::partition::state_machine::{ActionCollector, StateMachine};
 
+/// Information needed to run as leader, including the epoch and partition configurations.
+#[derive(Clone, Debug)]
+pub struct LeadershipInfo {
+    pub version: Version,
+    pub leader_epoch: LeaderEpoch,
+    pub current_config: CurrentReplicaSetConfiguration,
+    pub next_config: Option<NextReplicaSetConfiguration>,
+}
+
+impl From<EpochMetadata> for LeadershipInfo {
+    fn from(value: EpochMetadata) -> Self {
+        let (version, leader_epoch, current, next) = value.into_inner();
+
+        Self {
+            version,
+            leader_epoch,
+            current_config: current.into(),
+            next_config: next.map(|c| c.into()),
+        }
+    }
+}
+
 /// Target leader state of the partition processor.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub enum TargetLeaderState {
-    Leader(LeaderEpoch),
+    Leader(Box<LeadershipInfo>),
     #[default]
     Follower,
 }
@@ -159,7 +186,20 @@ where
                 esn.leader_epoch
             });
 
-        if let Some(last_leader_epoch) = last_seen_leader_epoch {
+        // Load persisted partition configuration state (since v1.6)
+        let cached_epoch_metadata = partition_store.get_partition_config_state().await?;
+
+        if let Some(stored_config) = &cached_epoch_metadata {
+            replica_set_states.note_observed_membership(
+                partition_store.partition_id(),
+                restate_types::partitions::state::LeadershipState {
+                    current_leader_epoch: stored_config.leader_epoch,
+                    current_leader: stored_config.leader_node_id,
+                },
+                &stored_config.current.replica_set,
+                &stored_config.next.clone().map(|c| c.replica_set),
+            );
+        } else if let Some(last_leader_epoch) = last_seen_leader_epoch {
             replica_set_states.note_observed_leader(
                 partition_store.partition_id(),
                 restate_types::partitions::state::LeadershipState {
@@ -195,6 +235,7 @@ where
             replica_set_states,
             trim_queue,
             last_applied_log_lsn_watch,
+            cached_epoch_metadata,
         })
     }
 
@@ -246,6 +287,7 @@ pub struct PartitionProcessor<T, InvokerSender> {
     trim_queue: TrimQueue,
 
     last_applied_log_lsn_watch: watch::Sender<Lsn>,
+    cached_epoch_metadata: Option<CachedEpochMetadata>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -498,7 +540,7 @@ where
             let config = live_config.live_load();
             tokio::select! {
                 _ = self.target_leader_state_rx.changed() => {
-                    let target_leader_state = *self.target_leader_state_rx.borrow_and_update();
+                    let target_leader_state = self.target_leader_state_rx.borrow_and_update().clone();
                     self.on_target_leader_state(target_leader_state).await.context("failed handling target leader state change")?;
                 }
                 Ok(()) = watch_leader_changes.changed() => {
@@ -548,7 +590,6 @@ where
                             continue;
                         };
 
-
                         if self.leadership_state.is_leader() {
                             leader_record_write_to_read_latency.record(record.created_at().elapsed());
                         } else {
@@ -569,6 +610,28 @@ where
                         ).await?;
 
                         if let Some(announce_leader) = maybe_announce_leader {
+                            if let Some(current_config) = &announce_leader.current_config {
+                                let announced = CachedEpochMetadata {
+                                    version: announce_leader.epoch_version.expect("to be set"),
+                                    leader_node_id: announce_leader.node_id,
+                                    leader_epoch: announce_leader.leader_epoch,
+                                    current: current_config.to_current_replica_set_state(),
+                                    next: announce_leader.next_config.as_ref().map(|v| v.to_next_replica_set_state()),
+                                };
+
+                                // merge with latest known
+                                match &mut self.cached_epoch_metadata {
+                                    None => {
+                                        transaction.put_partition_config_state(&announced)?;
+                                        self.cached_epoch_metadata = Some(announced);
+                                    },
+                                    Some(cached) => {
+                                        cached.merge(announced);
+                                        transaction.put_partition_config_state(cached)?;
+                                    }
+                                }
+                            };
+
                             // commit all changes so far, this is important so that the actuators see all changes
                             // when becoming leader.
                             transaction.commit().await?;
@@ -582,15 +645,33 @@ where
 
                             self.status.last_observed_leader_epoch = Some(announce_leader.leader_epoch);
                             self.status.last_observed_leader_node = Some(announce_leader.node_id);
-                            self.replica_set_states.note_observed_leader(
-                                partition_id,
-                                restate_types::partitions::state::LeadershipState {
-                                    current_leader_epoch: announce_leader.leader_epoch,
-                                    current_leader:
-                                    self.status.last_observed_leader_node.unwrap_or(GenerationalNodeId::INVALID),
-                                });
 
-                            let is_leader = self.leadership_state.on_announce_leader(&announce_leader, &mut partition_store, &self.replica_set_states, config, &mut vqueues).await?;
+                            if let Some(current_config) = &announce_leader.current_config {
+                                self.replica_set_states.note_observed_membership(
+                                    partition_id,
+                                    restate_types::partitions::state::LeadershipState {
+                                        current_leader_epoch: announce_leader.leader_epoch,
+                                        current_leader: announce_leader.node_id,
+                                    },
+                                    &current_config.to_replica_set_state(),
+                                    &announce_leader.next_config.as_ref().map(|c| c.to_replica_set_state())
+                                );
+                            } else {
+                                self.replica_set_states.note_observed_leader(
+                                    partition_id,
+                                    restate_types::partitions::state::LeadershipState {
+                                        current_leader_epoch: announce_leader.leader_epoch,
+                                        current_leader: announce_leader.node_id,
+                                    });
+                            }
+
+                            let is_leader = self.leadership_state.on_announce_leader(
+                                &announce_leader,
+                                &mut partition_store,
+                                &self.replica_set_states,
+                                config,
+                                &mut vqueues
+                            ).await?;
 
                             Span::current().record("is_leader", is_leader);
 
@@ -633,10 +714,10 @@ where
         target_leader_state: TargetLeaderState,
     ) -> anyhow::Result<()> {
         match target_leader_state {
-            TargetLeaderState::Leader(leader_epoch) => {
+            TargetLeaderState::Leader(leadership_info) => {
                 self.status.planned_mode = RunMode::Leader;
                 self.leadership_state
-                    .run_for_leader(leader_epoch)
+                    .run_for_leader(leadership_info)
                     .await
                     .context("failed handling RunForLeader command")?;
             }
