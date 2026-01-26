@@ -381,14 +381,10 @@ async fn register_v3_admin_api(
                    No changes will be made.
 
             ❯ To overwrite this deployment during development, use:
-                restate deployment register {} --force
-
-            ❯ To modify connection parameters, use:
-                restate deployment edit {}"
+                restate deployment register {} --force"
             },
             Styled(Style::Info, &dry_run_result.id),
             discover_opts.deployment.cli_parameter_display(),
-            dry_run_result.id
         );
         return Ok(());
     }
