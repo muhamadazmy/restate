@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use bytes::Bytes;
 use opentelemetry::Context;
 use tokio::sync::{oneshot, watch};
-use tracing::Span;
+use tracing::{Span, error};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use restate_types::GenerationalNodeId;
@@ -522,19 +522,27 @@ impl<M: RpcRequest + WireDecode> Incoming<Rpc<M>> {
     /// of the message.
     ///
     /// **Panics** if message decoding failed
-    pub fn split(self) -> (Reciprocal<Oneshot<M::Response>>, M) {
-        let body = M::decode(self.inner.payload, self.protocol_version);
-        (
-            Reciprocal {
-                protocol_version: self.protocol_version,
-                reply_port: Oneshot {
-                    inner: self.inner.reply_port,
-                    _phantom: PhantomData,
-                },
+    pub fn split(self) -> Option<(Reciprocal<Oneshot<M::Response>>, M)> {
+        let reciprocal = Reciprocal {
+            protocol_version: self.protocol_version,
+            reply_port: Oneshot {
+                inner: self.inner.reply_port,
                 _phantom: PhantomData,
             },
-            body,
-        )
+            _phantom: PhantomData,
+        };
+
+        match M::try_decode(self.inner.payload, self.protocol_version) {
+            Ok(body) => Some((reciprocal, body)),
+            Err(err) => {
+                error!(
+                    "Failed to decode RPC message (this indicates a Restate server mismatch): {}",
+                    err.into()
+                );
+                reciprocal.fail(Verdict::MessageUnrecognized);
+                None
+            }
+        }
     }
 
     /// Consumes the message and returns a tuple of a reciprocal (reply port) and drops the body
