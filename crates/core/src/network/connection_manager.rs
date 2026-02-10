@@ -300,9 +300,10 @@ impl ConnectionManager {
         let nodes_config = metadata.nodes_config_ref();
 
         // check cluster fingerprint if it's set on the hello message *and* our nodes config has it
-        // set as well.
+        // set as well. Only validate if BOTH sides have a fingerprint.
         if let Ok(incoming_fingerprint) = ClusterFingerprint::try_from(hello.cluster_fingerprint)
-            && incoming_fingerprint != nodes_config.cluster_fingerprint()
+            && let Some(expected_fingerprint) = nodes_config.cluster_fingerprint()
+            && incoming_fingerprint != expected_fingerprint
         {
             return Err(HandshakeError::Failed("cluster fingerprint mismatch".to_owned()).into());
         }
@@ -358,7 +359,7 @@ impl ConnectionManager {
         // Enqueue the welcome message
         let welcome = Welcome::new(my_node_id, selected_protocol_version, hello.direction());
         shared
-            .unbounded_send(EgressMessage::Message(welcome.into(), None))
+            .unbounded_send(EgressMessage::Message(welcome.into()))
             .map_err(|_| HandshakeError::PeerDropped)?;
         let connection = Connection::new(
             peer_node_id,
@@ -647,6 +648,7 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
 
     use restate_test_util::assert_eq;
+    use restate_types::RestateVersion;
     use restate_types::Version;
     use restate_types::config::NetworkingOptions;
     use restate_types::net::address::AdvertisedAddress;
@@ -715,7 +717,10 @@ mod tests {
             max_protocol_version: ProtocolVersion::Unknown.into(),
             my_node_id: Some(my_node_id.into()),
             cluster_name: metadata.nodes_config_ref().cluster_name().to_owned(),
-            cluster_fingerprint: metadata.nodes_config_ref().cluster_fingerprint().to_u64(),
+            cluster_fingerprint: metadata
+                .nodes_config_ref()
+                .cluster_fingerprint()
+                .map_or(0, |f| f.to_u64()),
             direction: ConnectionDirection::Bidirectional.into(),
             swimlane: Swimlane::default().into(),
         };
@@ -741,7 +746,10 @@ mod tests {
             max_protocol_version: CURRENT_PROTOCOL_VERSION.into(),
             my_node_id: Some(my_node_id.into()),
             cluster_name: "Random-cluster".to_owned(),
-            cluster_fingerprint: metadata.nodes_config_ref().cluster_fingerprint().to_u64(),
+            cluster_fingerprint: metadata
+                .nodes_config_ref()
+                .cluster_fingerprint()
+                .map_or(0, |f| f.to_u64()),
             direction: ConnectionDirection::Bidirectional.into(),
             swimlane: Swimlane::default().into(),
         };
@@ -841,6 +849,7 @@ mod tests {
             .current_generation(node_id)
             .address(AdvertisedAddress::default())
             .roles(Role::Worker.into())
+            .binary_version(RestateVersion::current())
             .build();
         nodes_config.upsert_node(node_config);
 

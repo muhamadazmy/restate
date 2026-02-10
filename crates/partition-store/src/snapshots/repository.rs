@@ -180,7 +180,7 @@ impl LatestSnapshot {
     pub fn validate(
         &self,
         cluster_name: &str,
-        cluster_fingerprint: ClusterFingerprint,
+        cluster_fingerprint: Option<ClusterFingerprint>,
     ) -> anyhow::Result<()> {
         if cluster_name != self.cluster_name {
             anyhow::bail!(
@@ -191,13 +191,14 @@ impl LatestSnapshot {
         }
 
         // Snapshots from earlier Restate versions might not have the fingerprint set. Hence, only
-        // compare the fingerprints if the snapshot's fingerprint is present.
-        if let Some(incoming_fingerprint) = self.cluster_fingerprint
-            && cluster_fingerprint != incoming_fingerprint
+        // compare the fingerprints if both the snapshot and the cluster have fingerprints.
+        if let (Some(incoming_fingerprint), Some(expected_fingerprint)) =
+            (self.cluster_fingerprint, cluster_fingerprint)
+            && expected_fingerprint != incoming_fingerprint
         {
             bail!(
                 "cluster fingerprint mismatch, \
-                 expected:'{cluster_fingerprint}' {cluster_fingerprint:?} got:'{incoming_fingerprint}' {incoming_fingerprint:?}. \
+                 expected:'{expected_fingerprint}' {expected_fingerprint:?} got:'{incoming_fingerprint}' {incoming_fingerprint:?}. \
                  This often happens if this cluster is reusing a snapshot repository path from a different cluster"
             );
         }
@@ -364,8 +365,13 @@ impl SnapshotRepository {
         snapshot: &PartitionSnapshotMetadata,
         local_snapshot_path: PathBuf,
     ) -> anyhow::Result<PartitionSnapshotStatus> {
+        use crate::metric_definitions::{
+            SNAPSHOT_UPLOAD_DURATION, SNAPSHOT_UPLOAD_FAILED, SNAPSHOT_UPLOAD_SUCCESS,
+        };
+
         debug!("Publishing partition snapshot to: {}", self.destination);
 
+        let start = tokio::time::Instant::now();
         let put_result = self
             .put_snapshot_inner(snapshot, local_snapshot_path.as_path())
             .await;
@@ -377,9 +383,15 @@ impl SnapshotRepository {
             warn!(%err, "Failed to delete local snapshot files");
         }
 
+        metrics::histogram!(SNAPSHOT_UPLOAD_DURATION).record(start.elapsed());
+
         match put_result {
-            Ok(status) => Ok(status),
+            Ok(status) => {
+                metrics::counter!(SNAPSHOT_UPLOAD_SUCCESS).increment(1);
+                Ok(status)
+            }
             Err(put_error) => {
+                metrics::counter!(SNAPSHOT_UPLOAD_FAILED).increment(1);
                 for filename in put_error.uploaded_files {
                     let path = put_error.full_snapshot_path.child(filename);
 
@@ -690,6 +702,23 @@ impl SnapshotRepository {
         fields(%partition_id, snapshot_id = tracing::field::Empty),
     )]
     pub async fn get_latest(
+        &self,
+        partition_id: PartitionId,
+    ) -> anyhow::Result<Option<LocalPartitionSnapshot>> {
+        use crate::metric_definitions::{SNAPSHOT_DOWNLOAD_DURATION, SNAPSHOT_DOWNLOAD_FAILED};
+
+        let start = tokio::time::Instant::now();
+        let result = self.get_latest_inner(partition_id).await;
+
+        if result.is_err() {
+            metrics::counter!(SNAPSHOT_DOWNLOAD_FAILED).increment(1);
+        }
+        metrics::histogram!(SNAPSHOT_DOWNLOAD_DURATION).record(start.elapsed());
+
+        result
+    }
+
+    async fn get_latest_inner(
         &self,
         partition_id: PartitionId,
     ) -> anyhow::Result<Option<LocalPartitionSnapshot>> {
@@ -1317,9 +1346,9 @@ mod tests {
             cluster_name: Metadata::with_current(|m| {
                 m.nodes_config_ref().cluster_name().to_string()
             }),
-            cluster_fingerprint: Some(Metadata::with_current(|m| {
+            cluster_fingerprint: Metadata::with_current(|m| {
                 m.nodes_config_ref().cluster_fingerprint()
-            })),
+            }),
             node_name: "node".to_string(),
             partition_id: PartitionId::MIN,
             created_at: jiff::Timestamp::now(),

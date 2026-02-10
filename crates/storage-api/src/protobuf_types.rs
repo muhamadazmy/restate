@@ -3939,37 +3939,34 @@ pub mod v1 {
         pub struct InvocationStatusV2Lazy<'a> {
             pub inner: super::InvocationStatusV2Lazy,
             // 2
-            invocation_target_lazy: Option<&'a [u8]>,
+            pub invocation_target_lazy: Option<&'a [u8]>,
             // 3
-            source_lazy: Option<&'a [u8]>,
+            pub source_lazy: Option<&'a [u8]>,
             // 4
-            span_context_lazy: Option<&'a [u8]>,
+            pub span_context_lazy: Option<&'a [u8]>,
             // 11
-            completion_retention_duration_lazy: Option<&'a [u8]>,
+            pub completion_retention_duration_lazy: Option<&'a [u8]>,
             // 12
-            idempotency_key: Option<&'a [u8]>,
+            pub idempotency_key: Option<&'a [u8]>,
             // 15
-            deployment_id: Option<&'a [u8]>,
+            pub deployment_id: Option<&'a [u8]>,
             // 18
-            result_lazy: Option<&'a [u8]>,
+            pub result_lazy: Option<&'a [u8]>,
             // 29
-            journal_retention_duration_lazy: Option<&'a [u8]>,
+            pub journal_retention_duration_lazy: Option<&'a [u8]>,
             // 30
-            created_using_restate_version: &'a [u8],
+            pub created_using_restate_version: &'a [u8],
         }
 
         impl<'a> InvocationStatusV2Lazy<'a> {
-            pub fn decode(
-                mut buf: &'a [u8],
-            ) -> Result<InvocationStatusV2Lazy<'a>, prost::DecodeError> {
-                let mut message = InvocationStatusV2Lazy::default();
+            pub fn merge(&mut self, mut buf: &'a [u8]) -> Result<(), prost::DecodeError> {
                 let ctx = prost::encoding::DecodeContext::default();
                 while !buf.is_empty() {
                     let (tag, wire_type) = prost::encoding::decode_key(&mut buf)?;
-                    message.merge_field(tag, wire_type, &mut buf, ctx.clone())?;
+                    self.merge_field(tag, wire_type, &mut buf, ctx.clone())?;
                 }
 
-                Ok(message)
+                Ok(())
             }
 
             fn merge_field<'b>(

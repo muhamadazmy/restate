@@ -54,7 +54,7 @@ use restate_types::partitions::state::PartitionReplicaSetStates;
 use restate_types::protobuf::common::{
     AdminStatus, IngressStatus, LogServerStatus, NodeRpcStatus, WorkerStatus,
 };
-use restate_types::{GenerationalNodeId, Version, Versioned};
+use restate_types::{GenerationalNodeId, RestateVersion, Version, Versioned};
 
 use self::failure_detector::FailureDetector;
 use crate::cluster_marker::ClusterValidationError;
@@ -508,7 +508,7 @@ impl Node {
             location = %my_node_config.location,
             nodes_config_version = %metadata.nodes_config_version(),
             cluster_name = %nodes_config.cluster_name(),
-            cluster_fingerprint = %nodes_config.cluster_fingerprint().to_string(),
+            cluster_fingerprint = ?nodes_config.cluster_fingerprint(),
             %partition_table_version,
             %logs_version,
             "My Node ID is {}", my_node_config.current_generation,
@@ -693,6 +693,7 @@ fn create_initial_nodes_configuration(common_opts: &CommonOptions) -> NodesConfi
         .location(common_opts.location().clone())
         .address(my_advertised_address)
         .roles(common_opts.roles)
+        .binary_version(RestateVersion::current())
         .build();
     initial_nodes_configuration.upsert_node(node_config);
     initial_nodes_configuration

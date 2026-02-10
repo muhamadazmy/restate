@@ -14,8 +14,9 @@ use std::time::Duration;
 use anyhow::Context;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::physical_expr::expressions::DynamicFilterPhysicalExpr;
 use datafusion::physical_plan::PhysicalExpr;
-use datafusion::prelude::SessionContext;
+use datafusion::physical_plan::metrics::Time;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt as TokioStreamExt;
 use tracing::{debug, warn};
@@ -28,6 +29,7 @@ use restate_types::net::remote_query_scanner::{
     ScannerBatch, ScannerFailure, ScannerId,
 };
 
+use crate::context::QueryContext;
 use crate::remote_query_scanner_manager::RemoteScannerManager;
 use crate::remote_query_scanner_server::ScannerMap;
 use crate::{decode_expr, decode_schema, encode_record_batch};
@@ -50,13 +52,14 @@ pub(crate) struct ScannerTask {
     scanners: Weak<ScannerMap>,
     ctx: Arc<TaskContext>,
     schema: SchemaRef,
-    predicate: Option<Arc<dyn PhysicalExpr>>,
+    dynamic_filter: Option<Arc<DynamicFilterPhysicalExpr>>,
 }
 
 impl ScannerTask {
     /// Spawns the scanner task and registers the scanner in the scanners map.
     pub fn spawn(
         scanner_id: ScannerId,
+        query_context: &QueryContext,
         remote_scanner_manager: &RemoteScannerManager,
         peer: GenerationalNodeId,
         scanners: &Arc<ScannerMap>,
@@ -66,7 +69,7 @@ impl ScannerTask {
             .local_partition_scanner(&request.table)
             .context("not registered scanner for a table")?;
         let schema = decode_schema(&request.projection_schema_bytes).context("bad schema bytes")?;
-        let ctx = SessionContext::new().task_ctx();
+        let ctx = query_context.task_ctx();
 
         let predicate = request
             .predicate
@@ -75,15 +78,22 @@ impl ScannerTask {
 
         let schema = Arc::new(schema);
 
+        let dynamic_filter = predicate
+            .as_ref()
+            .map(|pred| Arc::new(DynamicFilterPhysicalExpr::new(Vec::new(), Arc::clone(pred))));
+
         let stream = scanner.scan_partition(
             request.partition_id,
             request.range.clone(),
             schema.clone(),
-            predicate.clone(),
+            dynamic_filter
+                .as_ref()
+                .map(|filter| filter.clone() as Arc<dyn PhysicalExpr>),
             usize::try_from(request.batch_size).expect("batch_size to fit in a usize"),
             request
                 .limit
                 .map(|limit| usize::try_from(limit).expect("limit to fit in a usize")),
+            Time::new(),
         )?;
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -93,9 +103,9 @@ impl ScannerTask {
             stream,
             rx,
             scanners: Arc::downgrade(scanners),
-            ctx: SessionContext::new().task_ctx(),
+            ctx,
             schema,
-            predicate,
+            dynamic_filter,
         };
 
         scanners.insert(scanner_id, tx);
@@ -146,68 +156,49 @@ impl ScannerTask {
                     &self.schema,
                     &next_predicate.serialized_physical_expression,
                 ) {
-                    // for now, we are not updating the predicate being passed to ScanPartition,
-                    // so we rely on the filtering below to apply dynamic filters
-                    Ok(next_predicate) => self.predicate = Some(next_predicate),
+                    Ok(next_predicate) => {
+                        if let Some(dynamic_filter) = &self.dynamic_filter
+                            && let Err(e) = dynamic_filter.update(next_predicate)
+                        {
+                            warn!("Failed to update dynamic filter: {e}");
+                        }
+                    }
                     Err(e) => {
                         warn!("Failed to decode next predicate: {e}")
                     }
                 }
             }
 
-            let record_batch = loop {
-                // connection/request has been closed, don't bother with driving the stream.
-                // The scanner will be dropped because we want to make sure that we don't get supurious
-                // next messages from the client after.
-                if request.reciprocal.is_closed() {
+            // connection/request has been closed, don't bother with driving the stream.
+            // The scanner will be dropped because we want to make sure that we don't get spurious
+            // next messages from the client after.
+            if request.reciprocal.is_closed() {
+                return;
+            }
+
+            // The filtering is now done by FilterCoalesceStream inside scan_partition,
+            // so we just need to get the next batch from the stream.
+            let record_batch = match self.stream.next().await {
+                Some(Ok(record_batch)) => record_batch,
+                Some(Err(e)) => {
+                    warn!("Error while scanning {}: {e}", self.scanner_id);
+                    request
+                        .reciprocal
+                        .send(RemoteQueryScannerNextResult::Failure(ScannerFailure {
+                            scanner_id: self.scanner_id,
+                            message: e.to_string(),
+                        }));
                     return;
                 }
-
-                let record_batch = match self.stream.next().await {
-                    Some(Ok(record_batch)) => record_batch,
-                    Some(Err(e)) => break Err(e),
-                    None => {
-                        request
-                            .reciprocal
-                            .send(RemoteQueryScannerNextResult::NoMoreRecords(self.scanner_id));
-                        return;
-                    }
-                };
-
-                let Some(predicate) = &self.predicate else {
-                    break Ok(record_batch);
-                };
-
-                let filtered_batch = predicate
-                    .evaluate(&record_batch)
-                    .and_then(|v| v.into_array(record_batch.num_rows()))
-                    .and_then(|array| {
-                        match datafusion::common::cast::as_boolean_array(&array) {
-                            // Apply filter array to record batch
-                            Ok(filter_array) => {
-                                Ok(datafusion::arrow::compute::filter_record_batch(
-                                    &record_batch,
-                                    filter_array,
-                                )?)
-                            }
-                            Err(_) => {
-                                datafusion::common::internal_err!(
-                                    "Cannot create filter_array from non-boolean predicates"
-                                )
-                            }
-                        }
-                    });
-
-                match filtered_batch {
-                    Ok(filtered_batch) if filtered_batch.num_rows() == 0 => continue,
-                    Ok(filtered_batch) => break Ok(filtered_batch),
-                    Err(err) => break Err(err),
+                None => {
+                    request
+                        .reciprocal
+                        .send(RemoteQueryScannerNextResult::NoMoreRecords(self.scanner_id));
+                    return;
                 }
             };
 
-            match record_batch
-                .and_then(|record_batch| encode_record_batch(&self.stream.schema(), record_batch))
-            {
+            match encode_record_batch(&self.stream.schema(), record_batch) {
                 Ok(record_batch) => {
                     request
                         .reciprocal
@@ -217,15 +208,14 @@ impl ScannerTask {
                         }))
                 }
                 Err(e) => {
-                    warn!("Error while scanning {}: {e}", self.scanner_id);
-
+                    warn!("Error while encoding batch {}: {e}", self.scanner_id);
                     request
                         .reciprocal
                         .send(RemoteQueryScannerNextResult::Failure(ScannerFailure {
                             scanner_id: self.scanner_id,
                             message: e.to_string(),
                         }));
-                    break;
+                    return;
                 }
             }
         }

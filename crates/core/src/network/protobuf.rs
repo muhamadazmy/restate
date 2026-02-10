@@ -18,8 +18,6 @@ pub mod core_node_svc {
 pub mod network {
     tonic::include_proto!("restate.network");
 
-    use opentelemetry::propagation::{Extractor, Injector};
-
     use restate_types::GenerationalNodeId;
     use restate_types::net::metadata::MetadataKind;
     use restate_types::nodes_config::ClusterFingerprint;
@@ -47,7 +45,7 @@ pub mod network {
         pub fn new(
             my_node_id: Option<GenerationalNodeId>,
             cluster_name: String,
-            cluster_fingerprint: ClusterFingerprint,
+            cluster_fingerprint: Option<ClusterFingerprint>,
             direction: ConnectionDirection,
             swimlane: Swimlane,
         ) -> Self {
@@ -57,25 +55,9 @@ pub mod network {
                 max_protocol_version: CURRENT_PROTOCOL_VERSION.into(),
                 my_node_id: my_node_id.map(Into::into),
                 cluster_name,
-                cluster_fingerprint: cluster_fingerprint.to_u64(),
+                cluster_fingerprint: cluster_fingerprint.map_or(0, |f| f.to_u64()),
                 swimlane: swimlane.into(),
             }
-        }
-    }
-
-    impl Injector for SpanContext {
-        fn set(&mut self, key: &str, value: String) {
-            self.fields.insert(key.to_owned(), value);
-        }
-    }
-
-    impl Extractor for SpanContext {
-        fn get(&self, key: &str) -> Option<&str> {
-            self.fields.get(key).map(String::as_str)
-        }
-
-        fn keys(&self) -> Vec<&str> {
-            self.fields.keys().map(String::as_str).collect()
         }
     }
 

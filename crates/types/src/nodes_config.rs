@@ -8,21 +8,24 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::borrow::Cow;
 use std::num::NonZero;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Context;
 use enumset::{EnumSet, EnumSetType};
+use restate_clock::{UniqueTimestamp, WallClock};
 use serde_with::serde_as;
 
 use crate::base62_util::base62_max_length_for_type;
 use crate::locality::NodeLocation;
 use crate::metadata::GlobalMetadata;
-use crate::net::address::{AdvertisedAddress, FabricPort};
+use crate::net::address::{AdvertisedAddress, ControlPort, FabricPort};
 use crate::net::metadata::{MetadataContainer, MetadataKind};
 use crate::{
-    GenerationalNodeId, NodeId, PlainNodeId, base62_util, flexbuffers_storage_encode_decode,
+    GenerationalNodeId, NodeId, PlainNodeId, RestateVersion, base62_util,
+    flexbuffers_storage_encode_decode,
 };
 use crate::{Version, Versioned};
 use ahash::HashMap;
@@ -156,6 +159,9 @@ pub struct NodesConfiguration {
     nodes: HashMap<PlainNodeId, MaybeNode>,
     #[debug(skip)]
     name_lookup: HashMap<String, PlainNodeId>,
+    // The last modification time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modified_at: Option<UniqueTimestamp>,
 }
 
 impl Default for NodesConfiguration {
@@ -166,6 +172,7 @@ impl Default for NodesConfiguration {
             cluster_name: "Unspecified".to_owned(),
             nodes: Default::default(),
             name_lookup: Default::default(),
+            modified_at: None,
         }
     }
 }
@@ -180,16 +187,19 @@ impl GlobalMetadata for NodesConfiguration {
     }
 
     fn validate_update(&self, previous: Option<&Arc<Self>>) -> Result<(), anyhow::Error> {
-        // never accept new configuration that changes the cluster fingerprint if the previous
-        // configuration was valid
-        if let Some(previous_config) = previous
-            && previous_config.is_valid()
-            && self.cluster_fingerprint() != previous_config.cluster_fingerprint()
+        // never accept new configuration that changes the cluster fingerprint
+        if let Some(current_config) = previous
+            && let Some(current_fingerprint) = current_config.cluster_fingerprint()
+            && self
+                .cluster_fingerprint()
+                .is_none_or(|incoming| incoming != current_fingerprint)
         {
             Err(anyhow::anyhow!(
                 "Cannot accept nodes-configuration update that mutates the cluster fingerprint. Rejected a change of fingerprint from '{}' to incoming value of '{}'.",
-                previous_config.cluster_fingerprint(),
+                current_fingerprint,
                 self.cluster_fingerprint()
+                    .map(|f| f.to_string())
+                    .unwrap_or_default()
             ))
         } else {
             Ok(())
@@ -200,7 +210,7 @@ impl GlobalMetadata for NodesConfiguration {
 #[derive(Debug, Clone, Eq, PartialEq, strum::EnumIs, serde::Serialize, serde::Deserialize)]
 enum MaybeNode {
     Tombstone,
-    Node(NodeConfig),
+    Node(Box<NodeConfig>),
 }
 
 #[derive(
@@ -210,6 +220,11 @@ pub struct NodeConfig {
     pub name: String,
     pub current_generation: GenerationalNodeId,
     pub address: AdvertisedAddress<FabricPort>,
+    /// The address to use for control plane requests (NodeCtlSvc / ClusterCtrlSvc)
+    /// Introduced in v1.6.0 (for forward compatibility, not populated by v1.6.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub ctrl_address: Option<AdvertisedAddress<ControlPort>>,
     pub roles: EnumSet<Role>,
     #[serde(default)]
     #[builder(default)]
@@ -223,34 +238,24 @@ pub struct NodeConfig {
     #[serde(default)]
     #[builder(default)]
     pub worker_config: WorkerConfig,
+    /// The binary version observed from this node generation
+    /// Introduced in v1.6.0
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(setter(strip_option))]
+    pub binary_version: Option<RestateVersion>,
 }
 
 impl NodeConfig {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        name: String,
-        current_generation: GenerationalNodeId,
-        location: NodeLocation,
-        address: AdvertisedAddress<FabricPort>,
-        roles: EnumSet<Role>,
-        log_server_config: LogServerConfig,
-        metadata_server_config: MetadataServerConfig,
-        worker_config: WorkerConfig,
-    ) -> Self {
-        Self {
-            name,
-            current_generation,
-            address,
-            roles,
-            log_server_config,
-            location,
-            metadata_server_config,
-            worker_config,
-        }
-    }
-
+    #[inline]
     pub fn has_role(&self, role: Role) -> bool {
         self.roles.contains(role)
+    }
+
+    pub fn ctrl_address(&self) -> Cow<'_, AdvertisedAddress<ControlPort>> {
+        match &self.ctrl_address {
+            Some(addr) => Cow::Borrowed(addr),
+            None => Cow::Owned(self.address.clone().coerce()),
+        }
     }
 }
 
@@ -262,6 +267,9 @@ impl NodesConfiguration {
             cluster_name,
             nodes: HashMap::default(),
             name_lookup: HashMap::default(),
+            modified_at: Some(UniqueTimestamp::from_unix_millis_unchecked(
+                WallClock::now_ms(),
+            )),
         }
     }
 
@@ -273,6 +281,9 @@ impl NodesConfiguration {
             cluster_name: String::from("test-cluster"),
             nodes: HashMap::default(),
             name_lookup: HashMap::default(),
+            modified_at: Some(UniqueTimestamp::from_unix_millis_unchecked(
+                WallClock::now_ms(),
+            )),
         }
     }
 
@@ -291,36 +302,7 @@ impl NodesConfiguration {
         self.name_lookup.is_empty()
     }
 
-    #[track_caller]
-    pub fn cluster_fingerprint(&self) -> ClusterFingerprint {
-        let Some(fingerprint) = self.cluster_fingerprint else {
-            if self.is_valid() {
-                panic!(
-                    "No cluster fingerprint found in the nodes configuration {}. This indicates \
-                    that you are resuming from a nodes configuration that has been written by \
-                    Restate < v1.5. Please upgrade first to Restate v1.5 to store the cluster \
-                    fingerprint before upgrading to this version. Note that Restate does not \
-                    support skipping minor versions when upgrading.",
-                    self.version()
-                )
-            } else {
-                panic!(
-                    "Accessing the cluster fingerprint while the nodes configuration is invalid is \
-                    not supported and indicates a programming bug. Please contact the Restate \
-                    developers."
-                );
-            }
-        };
-
-        fingerprint
-    }
-
-    /// Returns the cluster fingerprint if the nodes configuration is valid.
-    ///
-    /// # Important
-    /// This method should only be used by components that operate before the NodesConfiguration is
-    /// properly initialized. If this is not the case, then use [`NodesConfiguration::cluster_fingerprint`]
-    pub fn try_cluster_fingerprint(&self) -> Option<ClusterFingerprint> {
+    pub fn cluster_fingerprint(&self) -> Option<ClusterFingerprint> {
         self.cluster_fingerprint
     }
 
@@ -330,6 +312,9 @@ impl NodesConfiguration {
 
     pub fn increment_version(&mut self) {
         self.version += Version::from(1);
+        self.modified_at = Some(UniqueTimestamp::from_unix_millis_unchecked(
+            WallClock::now_ms(),
+        ));
     }
 
     #[cfg(feature = "test-util")]
@@ -361,7 +346,7 @@ impl NodesConfiguration {
 
         let plain_id = node.current_generation.as_plain();
         let name = node.name.clone();
-        let existing = self.nodes.insert(plain_id, MaybeNode::Node(node));
+        let existing = self.nodes.insert(plain_id, MaybeNode::Node(Box::new(node)));
         if let Some(MaybeNode::Node(existing)) = existing {
             self.name_lookup.remove(&existing.name);
         }
@@ -454,17 +439,9 @@ impl NodesConfiguration {
         }
     }
 
-    /// Returns _an_ admin node.
-    pub fn get_admin_node(&self) -> Option<&NodeConfig> {
-        self.nodes.values().find_map(|maybe| match maybe {
-            MaybeNode::Node(node) if node.roles.contains(Role::Admin) => Some(node),
-            _ => None,
-        })
-    }
-
     pub fn get_admin_nodes(&self) -> impl Iterator<Item = &NodeConfig> {
         self.nodes.values().filter_map(|maybe| match maybe {
-            MaybeNode::Node(node) if node.roles.contains(Role::Admin) => Some(node),
+            MaybeNode::Node(node) if node.roles.contains(Role::Admin) => Some(node.as_ref()),
             _ => None,
         })
     }
@@ -479,7 +456,7 @@ impl NodesConfiguration {
     /// Iterate over nodes with a given role
     pub fn iter_role(&self, role: Role) -> impl Iterator<Item = (PlainNodeId, &'_ NodeConfig)> {
         self.nodes.iter().filter_map(move |(k, v)| match v {
-            MaybeNode::Node(node) if node.has_role(role) => Some((*k, node)),
+            MaybeNode::Node(node) if node.has_role(role) => Some((*k, node.as_ref())),
             _ => None,
         })
     }
@@ -488,7 +465,7 @@ impl NodesConfiguration {
     pub fn iter(&self) -> impl Iterator<Item = (PlainNodeId, &'_ NodeConfig)> {
         self.nodes.iter().filter_map(|(k, v)| {
             if let MaybeNode::Node(node) = v {
-                Some((*k, node))
+                Some((*k, node.as_ref()))
             } else {
                 None
             }
@@ -498,7 +475,7 @@ impl NodesConfiguration {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (PlainNodeId, &'_ mut NodeConfig)> {
         self.nodes.iter_mut().filter_map(|(k, v)| {
             if let MaybeNode::Node(node) = v {
-                Some((*k, node))
+                Some((*k, node.as_mut()))
             } else {
                 None
             }
@@ -759,6 +736,7 @@ mod tests {
             .location("region1.zone1".parse().unwrap())
             .address(address.clone())
             .roles(roles)
+            .binary_version(RestateVersion::current())
             .build();
         config.upsert_node(node.clone());
 
@@ -808,6 +786,7 @@ mod tests {
             .location("region1.zone1".parse().unwrap())
             .address(address)
             .roles(roles)
+            .binary_version(RestateVersion::current())
             .build();
         config.upsert_node(node.clone());
 
@@ -835,26 +814,30 @@ mod tests {
     fn test_remove_node() {
         let mut config = NodesConfiguration::new_for_testing();
         let address: AdvertisedAddress<_> = "unix:/tmp/my_socket".parse().unwrap();
-        let node1 = NodeConfig::new(
-            "node1".to_owned(),
-            GenerationalNodeId::new(1, 1),
-            "region1.zone1".parse().unwrap(),
-            address.clone(),
-            Role::Worker.into(),
-            LogServerConfig::default(),
-            MetadataServerConfig::default(),
-            WorkerConfig::default(),
-        );
-        let node2 = NodeConfig::new(
-            "node2".to_owned(),
-            GenerationalNodeId::new(2, 1),
-            "region1.zone1".parse().unwrap(),
-            address.clone(),
-            Role::Worker.into(),
-            LogServerConfig::default(),
-            MetadataServerConfig::default(),
-            WorkerConfig::default(),
-        );
+        let node1 = NodeConfig {
+            name: "node1".to_owned(),
+            current_generation: GenerationalNodeId::new(1, 1),
+            location: "region1.zone1".parse().unwrap(),
+            address: address.clone(),
+            ctrl_address: None,
+            roles: Role::Worker.into(),
+            log_server_config: LogServerConfig::default(),
+            metadata_server_config: MetadataServerConfig::default(),
+            worker_config: WorkerConfig::default(),
+            binary_version: Some(RestateVersion::current()),
+        };
+        let node2 = NodeConfig {
+            name: "node2".to_owned(),
+            current_generation: GenerationalNodeId::new(2, 1),
+            location: "region1.zone1".parse().unwrap(),
+            address: address.clone(),
+            ctrl_address: None,
+            roles: Role::Worker.into(),
+            log_server_config: LogServerConfig::default(),
+            metadata_server_config: MetadataServerConfig::default(),
+            worker_config: WorkerConfig::default(),
+            binary_version: Some(RestateVersion::current()),
+        };
         config.upsert_node(node1.clone());
         config.upsert_node(node2.clone());
 

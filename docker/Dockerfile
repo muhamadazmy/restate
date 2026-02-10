@@ -10,11 +10,12 @@
 
 ARG UPLOAD_DEBUGINFO=false
 
-FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:1.15.0 AS planner
+# NB this version is also pinned in dist-workspace.toml for release binary builds
+FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:1.16.1 AS planner
 COPY . .
 RUN just chef-prepare
 
-FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:1.15.0 AS base
+FROM --platform=$BUILDPLATFORM ghcr.io/restatedev/dev-tools:1.16.1 AS base
 COPY --from=planner /restate/recipe.json recipe.json
 COPY justfile justfile
 
@@ -31,6 +32,8 @@ ARG TARGETARCH
 
 ENV RUSTC_WRAPPER=/usr/bin/sccache
 ENV SCCACHE_DIR=/var/cache/sccache
+
+# Adding new env vars here to get a build working? They're probably also needed in release-build-setup.yml!
 
 # todo only enable those env variables when cross compiling
 # todo remove once https://github.com/MaterializeInc/rust-krb5-src/pull/30 has been merged and released
@@ -94,7 +97,7 @@ RUN --mount=type=secret,id=parca --mount=type=cache,target=/var/cache/sccache \
     $(just --set arch $TARGETARCH --evaluate _arch)-linux-gnu-objcopy --add-gnu-debuglink=target/restate-server.debug target/restate-server && \
     $(just --set arch $TARGETARCH --evaluate _arch)-linux-gnu-objcopy --strip-debug target/restatectl && \
     $(just --set arch $TARGETARCH --evaluate _arch)-linux-gnu-objcopy --strip-debug target/restate && \
-    parca-debuginfo upload --store-address=grpc.polarsignals.com:443 --bearer-token-file=/run/secrets/parca target/restate-server.debug && \
+    parca-debuginfo upload --store-address=grpc.polarsignals.com:443 --bearer-token-file=/run/secrets/parca --no-extract --type=debuginfo target/restate-server.debug && \
     rm target/restate-server.debug
 RUN cp docker/scripts/download-restate-debug-symbols.sh target/ && \
     sed -i"" "s/BUILD_ID/$($(just --set arch $TARGETARCH --evaluate _arch)-linux-gnu-readelf -n target/restate-server | awk '/Build/{print $3}')/g" target/download-restate-debug-symbols.sh
@@ -102,9 +105,13 @@ RUN cp docker/scripts/download-restate-debug-symbols.sh target/ && \
 FROM upload-$UPLOAD_DEBUGINFO AS upload
 
 # We do not need the Rust toolchain to run the server binary!
+# NOTE: When modifying this runtime stage, also update docker/Dockerfile.refresh to keep them in sync.
 FROM debian:trixie-slim AS runtime
 # useful for health checks
 RUN apt-get update && apt-get install --no-install-recommends -y jq curl && rm -rf /var/lib/apt/lists/*
+# Create symlink for debug symbols fallback path (for read-only /usr/local/bin scenarios)
+RUN mkdir -p /usr/local/bin/.debug && \
+    ln -s /tmp/.debug/restate-server.debug /usr/local/bin/.debug/restate-server.debug
 COPY --from=upload /restate/NOTICE /NOTICE
 COPY --from=upload /restate/LICENSE /LICENSE
 # copy OS roots

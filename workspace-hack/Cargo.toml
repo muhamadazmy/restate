@@ -38,7 +38,6 @@ bilrost = { version = "0.1014", features = ["bytestring", "smallvec"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 bytestring = { version = "1", default-features = false, features = ["serde"] }
-bzip2-sys = { version = "0.1", default-features = false, features = ["static"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", default-features = false, features = ["color", "derive", "env", "error-context", "help", "std", "suggestions", "usage", "wrap_help"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "std", "suggestions", "usage", "wrap_help"] }
@@ -56,11 +55,9 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 gardal = { version = "0.0.1-alpha.9", features = ["async"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
-hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", features = ["raw"] }
-hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16" }
+hashbrown = { version = "0.16" }
 hdrhistogram = { version = "7" }
 hex = { version = "0.4" }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
@@ -70,7 +67,7 @@ hyper-util = { version = "0.1", features = ["full"] }
 idna = { version = "1" }
 indexmap = { version = "2", features = ["serde"] }
 ipnet = { version = "2" }
-itertools-582f2526e08bb6a0 = { package = "itertools", version = "0.14" }
+itertools = { version = "0.14" }
 lexical-parse-float = { version = "1", features = ["format"] }
 lexical-parse-integer = { version = "1", default-features = false, features = ["format", "std"] }
 lexical-util = { version = "1", default-features = false, features = ["format", "parse-floats", "parse-integers", "std", "write-floats", "write-integers"] }
@@ -85,9 +82,6 @@ num-bigint = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1", features = ["critical-section"] }
-opentelemetry = { version = "0.31" }
-opentelemetry_sdk = { version = "0.31", features = ["experimental_trace_batch_span_processor_with_async_runtime", "rt-tokio"] }
-phf_shared = { version = "0.11" }
 portable-atomic = { version = "1" }
 pprof = { version = "0.15", features = ["criterion", "flamegraph", "frame-pointer"] }
 proc-macro2 = { version = "1" }
@@ -96,8 +90,6 @@ prost-types = { version = "0.14" }
 protobuf = { version = "2", default-features = false, features = ["with-bytes"] }
 quanta = { version = "0.12" }
 quote = { version = "1" }
-rand = { version = "0.8", features = ["small_rng"] }
-rand_core = { version = "0.6", default-features = false, features = ["std"] }
 rdkafka = { git = "https://github.com/restatedev/rust-rdkafka.git", rev = "e92cad90eff797a0dc29fa524cabb89b602ae234", features = ["cmake-build", "curl-static", "gssapi-vendored", "libz-static", "ssl-vendored"] }
 rdkafka-sys = { git = "https://github.com/restatedev/rust-rdkafka.git", rev = "e92cad90eff797a0dc29fa524cabb89b602ae234", default-features = false, features = ["cmake-build", "curl-static", "gssapi-vendored", "libz-static", "ssl-vendored"] }
 regex = { version = "1" }
@@ -164,7 +156,6 @@ bilrost = { version = "0.1014", features = ["bytestring", "smallvec"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 bytestring = { version = "1", default-features = false, features = ["serde"] }
-bzip2-sys = { version = "0.1", default-features = false, features = ["static"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", default-features = false, features = ["color", "derive", "env", "error-context", "help", "std", "suggestions", "usage", "wrap_help"] }
@@ -183,11 +174,9 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 gardal = { version = "0.0.1-alpha.9", features = ["async"] }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std", "wasm_js"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
-hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", features = ["raw"] }
-hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16" }
+hashbrown = { version = "0.16" }
 hdrhistogram = { version = "7" }
 hex = { version = "0.4" }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
@@ -197,7 +186,7 @@ hyper-util = { version = "0.1", features = ["full"] }
 idna = { version = "1" }
 indexmap = { version = "2", features = ["serde"] }
 ipnet = { version = "2" }
-itertools-582f2526e08bb6a0 = { package = "itertools", version = "0.14" }
+itertools = { version = "0.14" }
 lexical-parse-float = { version = "1", features = ["format"] }
 lexical-parse-integer = { version = "1", default-features = false, features = ["format", "std"] }
 lexical-util = { version = "1", default-features = false, features = ["format", "parse-floats", "parse-integers", "std", "write-floats", "write-integers"] }
@@ -212,9 +201,6 @@ num-bigint = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1", features = ["critical-section"] }
-opentelemetry = { version = "0.31" }
-opentelemetry_sdk = { version = "0.31", features = ["experimental_trace_batch_span_processor_with_async_runtime", "rt-tokio"] }
-phf_shared = { version = "0.11" }
 portable-atomic = { version = "1" }
 pprof = { version = "0.15", features = ["criterion", "flamegraph", "frame-pointer"] }
 proc-macro2 = { version = "1" }
@@ -224,8 +210,6 @@ prost-types = { version = "0.14" }
 protobuf = { version = "2", default-features = false, features = ["with-bytes"] }
 quanta = { version = "0.12" }
 quote = { version = "1" }
-rand = { version = "0.8", features = ["small_rng"] }
-rand_core = { version = "0.6", default-features = false, features = ["std"] }
 rdkafka = { git = "https://github.com/restatedev/rust-rdkafka.git", rev = "e92cad90eff797a0dc29fa524cabb89b602ae234", features = ["cmake-build", "curl-static", "gssapi-vendored", "libz-static", "ssl-vendored"] }
 rdkafka-sys = { git = "https://github.com/restatedev/rust-rdkafka.git", rev = "e92cad90eff797a0dc29fa524cabb89b602ae234", default-features = false, features = ["cmake-build", "curl-static", "gssapi-vendored", "libz-static", "ssl-vendored"] }
 regex = { version = "1" }
@@ -272,52 +256,78 @@ zstd-sys = { version = "2", features = ["experimental", "std"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
+clap = { version = "4" }
 crossterm = { version = "0.29" }
 derive_more = { version = "2", features = ["full"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
+jemalloc_pprof = { git = "https://github.com/restatedev/rust-jemalloc-pprof", branch = "max-limit", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.30", features = ["signal"] }
 num = { version = "0.4" }
+pprof_util = { git = "https://github.com/restatedev/rust-jemalloc-pprof", branch = "max-limit", default-features = false, features = ["flamegraph"] }
+prost = { version = "0.14", default-features = false, features = ["no-recursion-limit"] }
+quick-xml = { version = "0.38", features = ["overlapped-lists", "serialize"] }
 rustix = { version = "1", features = ["fs", "stdio", "termios"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
 tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
+clap = { version = "4" }
 crossterm = { version = "0.29" }
 derive_more = { version = "2", features = ["full"] }
 derive_more-impl = { version = "2", features = ["add", "add_assign", "as_ref", "constructor", "debug", "deref", "deref_mut", "display", "eq", "error", "from", "from_str", "index", "index_mut", "into", "into_iterator", "is_variant", "mul", "mul_assign", "not", "sum", "try_from", "try_into", "try_unwrap", "unwrap"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
-itertools-594e8ee84c453af0 = { package = "itertools", version = "0.13" }
+jemalloc_pprof = { git = "https://github.com/restatedev/rust-jemalloc-pprof", branch = "max-limit", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.30", features = ["signal"] }
 num = { version = "0.4" }
+pprof_util = { git = "https://github.com/restatedev/rust-jemalloc-pprof", branch = "max-limit", default-features = false, features = ["flamegraph"] }
+prost = { version = "0.14", default-features = false, features = ["no-recursion-limit"] }
+quick-xml = { version = "0.38", features = ["overlapped-lists", "serialize"] }
 rustix = { version = "1", features = ["fs", "stdio", "termios"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
 tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 
 [target.aarch64-apple-darwin.dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
+clap = { version = "4" }
 crossterm = { version = "0.29" }
 derive_more = { version = "2", features = ["full"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
+jemalloc_pprof = { git = "https://github.com/restatedev/rust-jemalloc-pprof", branch = "max-limit", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
 nix = { version = "0.30", features = ["signal"] }
 num = { version = "0.4" }
+pprof_util = { git = "https://github.com/restatedev/rust-jemalloc-pprof", branch = "max-limit", default-features = false, features = ["flamegraph"] }
+prost = { version = "0.14", default-features = false, features = ["no-recursion-limit"] }
+quick-xml = { version = "0.38", features = ["overlapped-lists", "serialize"] }
 rustix = { version = "1", features = ["fs", "stdio", "termios"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
 tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["std"] }
+clap = { version = "4" }
 crossterm = { version = "0.29" }
 derive_more = { version = "2", features = ["full"] }
 derive_more-impl = { version = "2", features = ["add", "add_assign", "as_ref", "constructor", "debug", "deref", "deref_mut", "display", "eq", "error", "from", "from_str", "index", "index_mut", "into", "into_iterator", "is_variant", "mul", "mul_assign", "not", "sum", "try_from", "try_into", "try_unwrap", "unwrap"] }
+getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
-itertools-594e8ee84c453af0 = { package = "itertools", version = "0.13" }
+jemalloc_pprof = { git = "https://github.com/restatedev/rust-jemalloc-pprof", branch = "max-limit", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
 nix = { version = "0.30", features = ["signal"] }
 num = { version = "0.4" }
+pprof_util = { git = "https://github.com/restatedev/rust-jemalloc-pprof", branch = "max-limit", default-features = false, features = ["flamegraph"] }
+prost = { version = "0.14", default-features = false, features = ["no-recursion-limit"] }
+quick-xml = { version = "0.38", features = ["overlapped-lists", "serialize"] }
 rustix = { version = "1", features = ["fs", "stdio", "termios"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "use_std"] }
 tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unprefixed_malloc_on_supported_platforms"] }
 
 ### END HAKARI SECTION

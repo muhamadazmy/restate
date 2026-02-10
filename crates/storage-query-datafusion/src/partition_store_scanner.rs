@@ -10,6 +10,7 @@
 
 use std::ops::RangeInclusive;
 use std::sync::Arc;
+use std::time::Instant;
 use std::{fmt::Debug, ops::ControlFlow};
 
 use anyhow::anyhow;
@@ -17,6 +18,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::error::DataFusionError;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_plan::PhysicalExpr;
+use datafusion::physical_plan::metrics::Time;
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 
 use restate_partition_store::{PartitionStore, PartitionStoreManager};
@@ -72,14 +74,16 @@ where
     S: ScanLocalPartition<Builder = RB>,
     RB: crate::table_util::Builder + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     fn scan_partition(
         &self,
         partition_id: PartitionId,
         range: RangeInclusive<PartitionKey>,
         projection: SchemaRef,
-        _predicate: Option<Arc<dyn PhysicalExpr>>,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
         batch_size: usize,
-        mut limit: Option<usize>,
+        limit: Option<usize>,
+        elapsed_compute: Time,
     ) -> anyhow::Result<SendableRecordBatchStream> {
         let partition_store_manager = self.partition_store_manager.clone();
         let mut stream_builder = RecordBatchReceiverStream::builder(projection.clone(), 1);
@@ -94,34 +98,18 @@ where
                 DataFusionError::External(err.into())
             })?;
 
-            // will send the last batch on Drop.
-            let mut batch_sender = BatchSender::new(projection.clone(), tx);
+            // timer starts on first row, stops on scanner drop
+            let mut elapsed_compute = ElapsedCompute::new(elapsed_compute);
+
+            let mut batch_sender = BatchSender::new(projection, tx, predicate, batch_size, limit);
 
             S::for_each_row(&partition_store, range, move |row| {
-                if let Some(0) = limit {
-                    return ControlFlow::Break(Ok(()));
-                }
+                elapsed_compute.start();
                 match S::append_row(batch_sender.builder_mut(), row) {
                     Ok(()) => {}
                     err => return ControlFlow::Break(err),
                 }
-
-                if batch_sender.num_rows() >= batch_size && batch_sender.send().is_err() {
-                    // the other side has hung up on us.
-                    return ControlFlow::Break(Ok(()));
-                }
-
-                match &mut limit {
-                    Some(limit) => {
-                        *limit -= 1; // we already checked for 0 above
-                        if *limit == 0 {
-                            ControlFlow::Break(Ok(()))
-                        } else {
-                            ControlFlow::Continue(())
-                        }
-                    }
-                    None => ControlFlow::Continue(()),
-                }
+                batch_sender.send_if_needed().map_break(Ok)
             })
             .map_err(|err| DataFusionError::External(err.into()))?
             .await
@@ -147,6 +135,7 @@ where
         predicate: Option<Arc<dyn PhysicalExpr>>,
         batch_size: usize,
         limit: Option<usize>,
+        elapsed_compute: Time,
     ) -> anyhow::Result<SendableRecordBatchStream> {
         self.scan_partition(
             partition_id,
@@ -155,6 +144,30 @@ where
             predicate,
             batch_size,
             limit,
+            elapsed_compute,
         )
+    }
+}
+
+struct ElapsedCompute {
+    time: Time,
+    start: Option<Instant>,
+}
+
+impl ElapsedCompute {
+    fn new(time: Time) -> Self {
+        Self { time, start: None }
+    }
+
+    fn start(&mut self) {
+        self.start.get_or_insert_with(Instant::now);
+    }
+}
+
+impl Drop for ElapsedCompute {
+    fn drop(&mut self) {
+        if let Some(start) = &self.start {
+            self.time.add_elapsed(*start)
+        }
     }
 }
