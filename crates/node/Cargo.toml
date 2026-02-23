@@ -38,6 +38,7 @@ restate-futures-util = { workspace = true }
 restate-ingestion-client = { workspace = true }
 restate-ingress-http = { workspace = true }
 restate-log-server = { workspace = true }
+restate-memory = { workspace = true }
 restate-metadata-providers = { workspace = true }
 restate-metadata-server = { workspace = true }
 restate-metadata-server-grpc = { workspace = true, features = ["grpc-client"] }
@@ -80,8 +81,7 @@ tonic = { workspace = true, features = ["gzip", "zstd"] }
 tracing = { workspace = true }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-# forked version while we wait for an upstream release of https://github.com/polarsignals/rust-jemalloc-pprof/pull/31
-jemalloc_pprof = { git = "https://github.com/restatedev/rust-jemalloc-pprof", branch = "max-limit", default-features = false, features = ["symbolize"] }
+jemalloc_pprof = { version = "0.8.2", default-features = false, features = ["symbolize"] }
 tikv-jemalloc-ctl = { workspace = true }
 tikv-jemalloc-sys = { workspace = true }
 

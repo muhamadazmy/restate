@@ -61,11 +61,19 @@ pub trait ReadJournalTable {
         journal_index: u32,
     ) -> impl Future<Output = Result<Option<JournalEntry>>> + Send;
 
-    fn get_journal(
-        &mut self,
+    /// Returns a lazy stream over journal entries.
+    /// The stream borrows from `self` only, not from `invocation_id`.
+    fn get_journal<'a>(
+        &'a self,
         invocation_id: &InvocationId,
         journal_length: EntryIndex,
-    ) -> Result<impl Stream<Item = Result<(EntryIndex, JournalEntry)>> + Send>;
+    ) -> Result<impl Stream<Item = Result<(EntryIndex, JournalEntry)>> + Send + 'a>;
+}
+
+#[derive(Debug, Clone)]
+pub enum ScanJournalTableRange {
+    PartitionKey(RangeInclusive<PartitionKey>),
+    InvocationId(RangeInclusive<InvocationId>),
 }
 
 pub trait ScanJournalTable {
@@ -73,7 +81,7 @@ pub trait ScanJournalTable {
         F: FnMut((JournalEntryId, JournalEntry)) -> std::ops::ControlFlow<()> + Send + Sync + 'static,
     >(
         &self,
-        range: RangeInclusive<PartitionKey>,
+        range: ScanJournalTableRange,
         f: F,
     ) -> Result<impl Future<Output = Result<()>> + Send>;
 }

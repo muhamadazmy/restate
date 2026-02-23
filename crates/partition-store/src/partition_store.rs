@@ -451,7 +451,7 @@ impl PartitionStore {
         }
     }
 
-    pub fn iterator_for_each<K: TableKey>(
+    pub fn iterator_for_each<K: TableKeyPrefix>(
         &self,
         name: &'static str,
         priority: Priority,
@@ -498,7 +498,7 @@ impl PartitionStore {
         Ok(ReceiverStream::new(rx))
     }
 
-    fn run_iterator_internal<K: TableKey>(
+    fn run_iterator_internal<K: TableKeyPrefix>(
         &self,
         name: &'static str,
         priority: Priority,
@@ -1272,16 +1272,21 @@ pub(crate) trait StorageAccess {
                 }
                 TableScanIterationDecision::BreakWith(result) => {
                     res.push(result);
-                    break;
+                    return Ok(res);
                 }
                 TableScanIterationDecision::Continue => {
                     iterator.next();
                     continue;
                 }
                 TableScanIterationDecision::Break => {
-                    break;
+                    return Ok(res);
                 }
             };
+        }
+
+        // Check whether we stopped the iteration because of an iterator error
+        if let Some(err) = iterator.status().err() {
+            res.push(Err(StorageError::Generic(err.into())));
         }
 
         Ok(res)

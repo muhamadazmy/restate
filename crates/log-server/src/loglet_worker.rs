@@ -11,13 +11,14 @@
 use std::pin::Pin;
 
 use futures::future::OptionFuture;
-use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio_stream::StreamExt;
 use tracing::{debug, error, instrument, trace, warn};
 
-use restate_core::network::{Incoming, Rpc, ServiceMessage, Verdict};
+use restate_core::network::{Incoming, Rpc, ServiceMessage, ServiceStream, ShardSender, Verdict};
 use restate_core::task_center::TaskGuard;
 use restate_core::{ShutdownError, TaskCenter, TaskKind, cancellation_token};
+use restate_memory::MemoryLease;
 use restate_types::GenerationalNodeId;
 use restate_types::logs::{LogletId, LogletOffset, SequenceNumber};
 use restate_types::net::{RpcRequest, UnaryMessage, log_server::*};
@@ -34,9 +35,8 @@ use crate::metadata::LogletState;
 ///   1) Record offset > local tail
 ///   2) Or, Record offset > known_global_tail
 pub struct LogletWorkerHandle {
-    data_svc_tx: mpsc::UnboundedSender<ServiceMessage<LogServerDataService>>,
-    info_svc_tx: mpsc::UnboundedSender<ServiceMessage<LogServerMetaService>>,
-
+    meta_tx: ShardSender<LogServerMetaService>,
+    data_tx: ShardSender<LogServerDataService>,
     loglet_guard: TaskGuard<()>,
 }
 
@@ -45,12 +45,12 @@ impl LogletWorkerHandle {
         self.loglet_guard.cancel_and_wait().await
     }
 
-    pub fn enqueue_data_msg(&self, op: ServiceMessage<LogServerDataService>) {
-        let _ = self.data_svc_tx.send(op);
+    pub(crate) fn data_tx(&self) -> ShardSender<LogServerDataService> {
+        self.data_tx.clone()
     }
 
-    pub fn enqueue_info_msg(&self, op: ServiceMessage<LogServerMetaService>) {
-        let _ = self.info_svc_tx.send(op);
+    pub(crate) fn meta_tx(&self) -> ShardSender<LogServerMetaService> {
+        self.meta_tx.clone()
     }
 }
 
@@ -72,26 +72,26 @@ impl<S: LogStore> LogletWorker<S> {
             loglet_state,
         };
 
-        let (data_svc_tx, data_svc_rx) = mpsc::unbounded_channel();
-        let (info_svc_tx, info_svc_rx) = mpsc::unbounded_channel();
+        let (data_tx, data_rx) = ShardSender::new();
+        let (meta_tx, meta_rx) = ShardSender::new();
 
         let loglet_guard = TaskCenter::spawn_unmanaged(
             TaskKind::LogletWriter,
             "loglet-worker",
-            writer.run(data_svc_rx, info_svc_rx),
+            writer.run(data_rx, meta_rx),
         )?
         .into_guard();
         Ok(LogletWorkerHandle {
-            data_svc_tx,
-            info_svc_tx,
+            data_tx,
+            meta_tx,
             loglet_guard,
         })
     }
 
     async fn run(
         mut self,
-        mut data_svc_rx: mpsc::UnboundedReceiver<ServiceMessage<LogServerDataService>>,
-        mut info_svc_rx: mpsc::UnboundedReceiver<ServiceMessage<LogServerMetaService>>,
+        mut data_rx: ServiceStream<LogServerDataService>,
+        mut meta_rx: ServiceStream<LogServerMetaService>,
     ) {
         // The worker is the sole writer to this loglet's local-tail so it's safe to maintain a moving
         // local tail view and serialize changes to logstore as long as we send them in the correct
@@ -114,9 +114,14 @@ impl<S: LogStore> LogletWorker<S> {
                     // since cancelled() will always be `Poll::Ready`.
                 _ = cancel_token.cancelled(), if !draining => {
                     draining = true;
-                    data_svc_rx.close();
-                    info_svc_rx.close();
-                    trace!(loglet_id = %self.loglet_id, "Loglet worker shutting down");
+                    data_rx.close();
+                    meta_rx.close();
+                    debug!(
+                        loglet_id = %self.loglet_id,
+                        "Loglet worker shutting down. Will drain {} data and {} meta messages",
+                        data_rx.len(),
+                        meta_rx.len(),
+                    );
                 }
                 // The in-flight seal (if any)
                 Some(res) = &mut in_flight_seal => {
@@ -134,12 +139,12 @@ impl<S: LogStore> LogletWorker<S> {
                 // The set of requests waiting for seal to complete
                 Some(_) = waiting_for_seal.join_next() => {}
                 // LogServiceInfoService
-                Some(msg) = info_svc_rx.recv() => {
+                Some(msg) = meta_rx.next() => {
                     self.process_info_svc_op(msg, &mut sealing_in_progress, &mut in_flight_seal, &mut waiting_for_seal).await;
                 }
                 Some(_) = in_flight_stores.join_next() => {}
                 // LogServiceDataService
-                Some(msg) = data_svc_rx.recv() => {
+                Some(msg) = data_rx.next() => {
                     self.process_data_svc_op(msg, &sealing_in_progress, &mut staging_local_tail, &mut in_flight_stores).await;
                 }
                 else =>  {
@@ -149,8 +154,8 @@ impl<S: LogStore> LogletWorker<S> {
         }
 
         // draining in-flight operations
-        drop(data_svc_rx);
-        drop(info_svc_rx);
+        drop(data_rx);
+        drop(meta_rx);
         tracing::debug!(loglet_id = %self.loglet_id, "Draining loglet worker");
         loop {
             tokio::select! {
@@ -186,7 +191,7 @@ impl<S: LogStore> LogletWorker<S> {
                 let msg = message.into_typed::<Store>();
                 let peer = msg.peer();
 
-                let (reciprocal, msg) = msg.split();
+                let (reciprocal, msg, reservation) = msg.split_with_reservation();
                 let first_offset = msg.first_offset;
                 // this message might be telling us about a higher `known_global_tail`
                 self.loglet_state
@@ -200,6 +205,7 @@ impl<S: LogStore> LogletWorker<S> {
                         staging_local_tail,
                         next_ok_offset,
                         sealing_in_progress,
+                        reservation,
                     )
                     .await;
                 // if this store is complete, the last committed is updated to this value.
@@ -290,15 +296,19 @@ impl<S: LogStore> LogletWorker<S> {
                 // seal to happen
                 let tail_watcher = self.loglet_state.get_local_tail_watch();
                 let global_tail = self.loglet_state.get_global_tail_tracker();
-                waiting_for_seal.spawn(Box::pin(async move {
-                    let seal_watcher = tail_watcher.wait_for_seal();
-                    if seal_watcher.await.is_ok() {
-                        let body = Sealed::new(*tail_watcher.get(), global_tail.get())
-                            .with_status(Status::Ok);
-                        // send the response over the network
-                        reciprocal.send(body);
-                    }
-                }));
+                waiting_for_seal
+                    .build_task()
+                    .name("loglet-wait-for-seal")
+                    .spawn(Box::pin(async move {
+                        let seal_watcher = tail_watcher.wait_for_seal();
+                        if seal_watcher.await.is_ok() {
+                            let body = Sealed::new(*tail_watcher.get(), global_tail.get())
+                                .with_status(Status::Ok);
+                            // send the response over the network
+                            reciprocal.send(body);
+                        }
+                    }))
+                    .unwrap();
                 let seal_token = self.process_seal(msg, sealing_in_progress).await;
                 if let Some(seal_token) = seal_token {
                     in_flight_seal.set(Some(seal_token).into());
@@ -320,6 +330,7 @@ impl<S: LogStore> LogletWorker<S> {
         staging_local_tail: &mut LogletOffset,
         next_ok_offset: LogletOffset,
         sealing_in_progress: &bool,
+        reservation: MemoryLease,
     ) -> (Status, Option<AsyncToken>) {
         // Is this a sealed loglet?
         if !body.flags.contains(StoreFlags::IgnoreSeal) && self.loglet_state.is_sealed() {
@@ -392,7 +403,7 @@ impl<S: LogStore> LogletWorker<S> {
         // exhausted.
         match self
             .log_store
-            .enqueue_store(body, set_sequencer_in_metadata)
+            .enqueue_store(body, set_sequencer_in_metadata, reservation)
             .await
         {
             Ok(store_token) => {
@@ -668,8 +679,8 @@ mod tests {
             ServiceMessage::fake_rpc(msg2, Some(LOGLET.into()), SEQUENCER, None);
 
         // pipelined writes
-        worker.enqueue_data_msg(msg1);
-        worker.enqueue_data_msg(msg2);
+        worker.data_tx().send(msg1);
+        worker.data_tx().send(msg2);
         // wait for response (in test-env, it's safe to assume that responses will arrive in order)
         let stored = msg1_reply.await?;
         assert_that!(stored.status, eq(Status::Ok));
@@ -742,17 +753,17 @@ mod tests {
         let (msg2, msg2_reply) =
             ServiceMessage::fake_rpc(msg2, Some(LOGLET.into()), SEQUENCER, None);
 
-        worker.enqueue_data_msg(msg1);
+        worker.data_tx().send(msg1);
         // first store is successful
         let stored = msg1_reply.await?;
         assert_that!(stored.status, eq(Status::Ok));
         assert_that!(stored.local_tail, eq(LogletOffset::new(3)));
-        worker.enqueue_info_msg(seal1);
+        worker.meta_tx().send(seal1);
         // should latch onto existing seal
-        worker.enqueue_info_msg(seal2);
+        worker.meta_tx().send(seal2);
         // seal takes precedence, but it gets processed in the background. This store is likely to
         // observe Status::Sealing.
-        worker.enqueue_data_msg(msg2);
+        worker.data_tx().send(msg2);
         // sealing
         let stored = msg2_reply.await?;
         assert_that!(stored.status, eq(Status::Sealing));
@@ -781,7 +792,7 @@ mod tests {
         };
         let (msg3, msg3_reply) =
             ServiceMessage::fake_rpc(msg3, Some(LOGLET.into()), SEQUENCER, None);
-        worker.enqueue_data_msg(msg3);
+        worker.data_tx().send(msg3);
         let stored = msg3_reply.await?;
         assert_that!(stored.status, eq(Status::Sealed));
         assert_that!(stored.local_tail, eq(LogletOffset::new(3)));
@@ -792,7 +803,7 @@ mod tests {
             header: LogServerRequestHeader::new(LOGLET, LogletOffset::INVALID),
         };
         let (msg, msg_reply) = ServiceMessage::fake_rpc(msg, Some(LOGLET.into()), SEQUENCER, None);
-        worker.enqueue_info_msg(msg);
+        worker.meta_tx().send(msg);
 
         let info = msg_reply.await?;
         assert_that!(info.status, eq(Status::Ok));
@@ -894,8 +905,8 @@ mod tests {
         let (seal1, seal1_reply) =
             ServiceMessage::fake_rpc(seal1, Some(LOGLET.into()), SEQUENCER, None);
 
-        worker.enqueue_data_msg(msg1);
-        worker.enqueue_data_msg(msg2);
+        worker.data_tx().send(msg1);
+        worker.data_tx().send(msg2);
         // first store is successful
         let stored = msg1_reply.await?;
         assert_that!(stored.status, eq(Status::Ok));
@@ -908,7 +919,7 @@ mod tests {
         assert_that!(stored.sealed, eq(false));
         assert_that!(stored.local_tail, eq(LogletOffset::new(12)));
 
-        worker.enqueue_info_msg(seal1);
+        worker.meta_tx().send(seal1);
         // seal responses can come at any order, but we'll consume waiters queue before we process
         // store messages.
         // sealed
@@ -917,12 +928,12 @@ mod tests {
         assert_that!(sealed.local_tail, eq(LogletOffset::new(12)));
 
         // repair store (before local tail, local tail won't move)
-        worker.enqueue_data_msg(repair1);
+        worker.data_tx().send(repair1);
         let stored: Stored = repair1_reply.await?;
         assert_that!(stored.status, eq(Status::Ok));
         assert_that!(stored.local_tail, eq(LogletOffset::new(12)));
 
-        worker.enqueue_data_msg(repair2);
+        worker.data_tx().send(repair2);
         let stored: Stored = repair2_reply.await?;
         assert_that!(stored.status, eq(Status::Ok));
         assert_that!(stored.local_tail, eq(LogletOffset::new(18)));
@@ -933,7 +944,7 @@ mod tests {
             header: LogServerRequestHeader::new(LOGLET, LogletOffset::INVALID),
         };
         let (msg, msg_reply) = ServiceMessage::fake_rpc(msg, Some(LOGLET.into()), SEQUENCER, None);
-        worker.enqueue_info_msg(msg);
+        worker.meta_tx().send(msg);
 
         let info = msg_reply.await?;
         assert_that!(info.status, eq(Status::Ok));
@@ -973,7 +984,7 @@ mod tests {
             SEQUENCER,
             None,
         );
-        worker.enqueue_data_msg(store);
+        worker.data_tx().send(store);
         stores.spawn(store_reply);
 
         let (store, store_reply) = ServiceMessage::fake_rpc(
@@ -991,7 +1002,7 @@ mod tests {
             SEQUENCER,
             None,
         );
-        worker.enqueue_data_msg(store);
+        worker.data_tx().send(store);
         stores.spawn(store_reply);
 
         let (store, store_reply) = ServiceMessage::fake_rpc(
@@ -1009,7 +1020,7 @@ mod tests {
             SEQUENCER,
             None,
         );
-        worker.enqueue_data_msg(store);
+        worker.data_tx().send(store);
         stores.spawn(store_reply);
 
         // Wait for stores to complete.
@@ -1034,7 +1045,7 @@ mod tests {
             None,
         );
 
-        worker.enqueue_data_msg(get_records);
+        worker.data_tx().send(get_records);
 
         let mut records: Records = get_records_reply.await?;
         assert_that!(records.status, eq(Status::Ok));
@@ -1069,7 +1080,7 @@ mod tests {
             None,
         );
 
-        worker.enqueue_data_msg(get_records);
+        worker.data_tx().send(get_records);
 
         let mut records: Records = get_records_reply.await?;
         assert_that!(records.status, eq(Status::Ok));
@@ -1112,7 +1123,7 @@ mod tests {
             None,
         );
 
-        worker.enqueue_data_msg(get_records);
+        worker.data_tx().send(get_records);
 
         let mut records: Records = get_records_reply.await?;
         assert_that!(records.status, eq(Status::Ok));
@@ -1165,7 +1176,7 @@ mod tests {
             SEQUENCER,
             None,
         );
-        worker.enqueue_info_msg(msg);
+        worker.meta_tx().send(msg);
 
         let trimmed: Trimmed = msg_reply.await?;
         assert_that!(trimmed.status, eq(Status::Malformed));
@@ -1183,7 +1194,7 @@ mod tests {
             SEQUENCER,
             None,
         );
-        worker.enqueue_info_msg(msg);
+        worker.meta_tx().send(msg);
 
         let trimmed: Trimmed = msg_reply.await?;
         assert_that!(trimmed.status, eq(Status::Ok));
@@ -1207,7 +1218,7 @@ mod tests {
             None,
         );
 
-        worker.enqueue_data_msg(msg);
+        worker.data_tx().send(msg);
         let stored: Stored = msg_reply.await?;
         assert_that!(stored.status, eq(Status::Ok));
         assert_that!(stored.local_tail, eq(LogletOffset::new(7)));
@@ -1223,7 +1234,7 @@ mod tests {
             None,
         );
 
-        worker.enqueue_info_msg(msg);
+        worker.meta_tx().send(msg);
 
         let trimmed: Trimmed = msg_reply.await?;
         assert_that!(trimmed.status, eq(Status::Ok));
@@ -1245,7 +1256,7 @@ mod tests {
             None,
         );
 
-        worker.enqueue_data_msg(msg);
+        worker.data_tx().send(msg);
 
         let mut records: Records = msg_reply.await?;
         assert_that!(records.status, eq(Status::Ok));
@@ -1281,7 +1292,7 @@ mod tests {
             None,
         );
 
-        worker.enqueue_info_msg(msg);
+        worker.meta_tx().send(msg);
 
         let trimmed: Trimmed = msg_reply.await?;
         assert_that!(trimmed.status, eq(Status::Ok));
@@ -1303,7 +1314,7 @@ mod tests {
             None,
         );
 
-        worker.enqueue_data_msg(msg);
+        worker.data_tx().send(msg);
 
         let mut records: Records = msg_reply.await?;
         assert_that!(records.status, eq(Status::Ok));

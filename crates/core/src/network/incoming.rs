@@ -14,6 +14,8 @@ use bytes::Bytes;
 use tokio::sync::{oneshot, watch};
 
 use restate_memory::EstimatedMemorySize;
+
+pub use restate_memory::MemoryLease;
 use restate_types::GenerationalNodeId;
 use restate_types::net::codec::{WireDecode, WireEncode};
 use restate_types::net::{ProtocolVersion, Service, UnaryMessage, WatchResponse};
@@ -23,7 +25,7 @@ use super::protobuf::network::{rpc_reply, watch_update};
 use super::{ConnectionClosed, PeerMetadataVersion, Verdict};
 
 /// A wrapper for incoming messages over a network connection.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Incoming<M> {
     protocol_version: ProtocolVersion,
     inner: M,
@@ -71,6 +73,7 @@ pub struct Rpc<M> {
     reply_port: RpcReplyPort,
     payload: Bytes,
     sort_code: Option<u64>,
+    reservation: MemoryLease,
     _phantom: PhantomData<M>,
 }
 
@@ -90,6 +93,15 @@ impl RpcReplyPort {
         let (tx, rx) = oneshot::channel();
         (Self(tx), rx)
     }
+
+    pub fn reply_with_verdict(verdict: Verdict) -> oneshot::Receiver<ReplyEnvelope> {
+        let (tx, rx) = oneshot::channel();
+        let status = rpc_reply::Status::from(verdict);
+        let _ = tx.send(ReplyEnvelope {
+            body: rpc_reply::Body::Status(status.into()),
+        });
+        rx
+    }
 }
 
 /// Untyped RPC message
@@ -101,6 +113,9 @@ pub struct RawRpc {
     pub(super) payload: Bytes,
     pub(super) sort_code: Option<u64>,
     pub(super) msg_type: String,
+    /// Memory reservation for this message, used for backpressure.
+    #[debug(skip)]
+    pub(super) reservation: MemoryLease,
 }
 
 /// Untyped RPC message bound to a certain service type
@@ -112,6 +127,8 @@ pub struct RawSvcRpc<S> {
     pub(super) payload: Bytes,
     pub(super) sort_code: Option<u64>,
     msg_type: String,
+    #[debug(skip)]
+    reservation: MemoryLease,
     _phantom: PhantomData<S>,
 }
 // --- END RPC ---
@@ -125,6 +142,10 @@ pub struct Watch<M> {
     #[debug("Bytes({} bytes)", payload.len())]
     payload: Bytes,
     sort_code: Option<u64>,
+    /// Memory reservation held until the message is processed (RAII).
+    #[debug(skip)]
+    #[allow(dead_code)]
+    reservation: MemoryLease,
     _phantom: PhantomData<M>,
 }
 
@@ -143,48 +164,62 @@ pub struct WatchUpdateEnvelope {
 // streaming watch updates
 pub(crate) struct WatchUpdatePort(watch::Sender<WatchUpdateEnvelope>);
 
+#[derive(derive_more::Debug)]
 pub struct RawSvcWatch<S> {
+    #[debug(skip)]
     updates_port: WatchUpdatePort,
+    #[debug("Bytes({} bytes)", payload.len())]
     pub(super) payload: Bytes,
     pub(super) sort_code: Option<u64>,
     msg_type: String,
+    #[debug(skip)]
+    reservation: MemoryLease,
     _phantom: PhantomData<S>,
 }
 
 pub struct RawWatch {
-    reply_port: WatchUpdatePort,
-    payload: Bytes,
-    sort_code: Option<u64>,
-    msg_type: String,
+    pub(super) reply_port: WatchUpdatePort,
+    pub(super) payload: Bytes,
+    pub(super) sort_code: Option<u64>,
+    pub(super) msg_type: String,
+    pub(super) reservation: MemoryLease,
 }
 
 // --- END WATCH ---
 
 // --- BEGIN UNARY ---
 /// A typed Unary message
-#[derive(Clone, derive_more::Debug)]
+#[derive(derive_more::Debug)]
 pub struct Unary<M> {
     #[debug("Bytes({} bytes)", payload.len())]
     pub(super) payload: Bytes,
     pub(super) sort_code: Option<u64>,
+    /// Memory reservation held until the message is processed (RAII).
+    #[debug(skip)]
+    #[allow(dead_code)]
+    reservation: MemoryLease,
     pub(super) _phantom: PhantomData<M>,
 }
 
 /// Untyped Unary message
-#[derive(Clone, derive_more::Debug)]
+#[derive(derive_more::Debug)]
 pub struct RawUnary {
     #[debug("Bytes({} bytes)", payload.len())]
     pub(super) payload: Bytes,
     pub(super) sort_code: Option<u64>,
     pub(super) msg_type: String,
+    #[debug(skip)]
+    pub(super) reservation: MemoryLease,
 }
 
-#[derive(Clone, derive_more::Debug)]
+#[derive(derive_more::Debug)]
 pub struct RawSvcUnary<S> {
     #[debug("Bytes({} bytes)", payload.len())]
     pub(super) payload: Bytes,
     pub(super) sort_code: Option<u64>,
     msg_type: String,
+    #[debug(skip)]
+    reservation: MemoryLease,
     _phantom: PhantomData<S>,
 }
 
@@ -250,10 +285,27 @@ impl<S: Service> Incoming<RawSvcRpc<S>> {
                 payload: raw.inner.payload,
                 sort_code: raw.inner.sort_code,
                 msg_type: raw.inner.msg_type,
+                reservation: raw.inner.reservation,
                 _phantom: PhantomData,
             },
             peer: raw.peer,
             metadata_version: raw.metadata_version,
+        }
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(crate) fn into_raw_rpc(self) -> Incoming<RawRpc> {
+        Incoming {
+            protocol_version: self.protocol_version,
+            inner: RawRpc {
+                reply_port: self.inner.reply_port,
+                payload: self.inner.payload,
+                sort_code: self.inner.sort_code,
+                msg_type: self.inner.msg_type,
+                reservation: self.inner.reservation,
+            },
+            peer: self.peer,
+            metadata_version: self.metadata_version,
         }
     }
 
@@ -291,6 +343,7 @@ impl<S: Service> Incoming<RawSvcRpc<S>> {
                 reply_port: self.inner.reply_port,
                 payload: self.inner.payload,
                 sort_code: self.inner.sort_code,
+                reservation: self.inner.reservation,
                 _phantom: PhantomData,
             },
             protocol_version: self.protocol_version,
@@ -349,10 +402,26 @@ impl<S: Service> Incoming<RawSvcUnary<S>> {
                 payload: raw.inner.payload,
                 sort_code: raw.inner.sort_code,
                 msg_type: raw.inner.msg_type,
+                reservation: raw.inner.reservation,
                 _phantom: PhantomData,
             },
             peer: raw.peer,
             metadata_version: raw.metadata_version,
+        }
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(crate) fn into_raw_unary(self) -> Incoming<RawUnary> {
+        Incoming {
+            protocol_version: self.protocol_version,
+            inner: RawUnary {
+                payload: self.inner.payload,
+                sort_code: self.inner.sort_code,
+                msg_type: self.inner.msg_type,
+                reservation: self.inner.reservation,
+            },
+            peer: self.peer,
+            metadata_version: self.metadata_version,
         }
     }
 
@@ -389,6 +458,7 @@ impl<S: Service> Incoming<RawSvcUnary<S>> {
             inner: Unary {
                 payload: self.inner.payload,
                 sort_code: self.inner.sort_code,
+                reservation: self.inner.reservation,
                 _phantom: PhantomData,
             },
             protocol_version: self.protocol_version,
@@ -448,10 +518,27 @@ impl<S: Service> Incoming<RawSvcWatch<S>> {
                 payload: raw.inner.payload,
                 sort_code: raw.inner.sort_code,
                 msg_type: raw.inner.msg_type,
+                reservation: raw.inner.reservation,
                 _phantom: PhantomData,
             },
             peer: raw.peer,
             metadata_version: raw.metadata_version,
+        }
+    }
+
+    #[cfg(feature = "test-util")]
+    pub(crate) fn into_raw_watch(self) -> Incoming<RawWatch> {
+        Incoming {
+            protocol_version: self.protocol_version,
+            inner: RawWatch {
+                reply_port: self.inner.updates_port,
+                payload: self.inner.payload,
+                sort_code: self.inner.sort_code,
+                msg_type: self.inner.msg_type,
+                reservation: self.inner.reservation,
+            },
+            peer: self.peer,
+            metadata_version: self.metadata_version,
         }
     }
 
@@ -500,6 +587,7 @@ impl<S: Service> Incoming<RawSvcWatch<S>> {
                 updates_port: self.inner.updates_port,
                 payload: self.inner.payload,
                 sort_code: self.inner.sort_code,
+                reservation: self.inner.reservation,
                 _phantom: PhantomData,
             },
             protocol_version: self.protocol_version,
@@ -537,6 +625,9 @@ impl<M: RpcRequest + WireDecode> Incoming<Rpc<M>> {
     /// Consumes the message and returns a tuple of a reciprocal (reply port) and the decoded body
     /// of the message.
     ///
+    /// Note: This method drops any attached memory reservation. If you need to preserve the
+    /// reservation, use [`Self::split_with_reservation()`] instead.
+    ///
     /// **Panics** if message decoding failed
     pub fn split(self) -> (Reciprocal<Oneshot<M::Response>>, M) {
         let body = M::decode(self.inner.payload, self.protocol_version);
@@ -550,6 +641,28 @@ impl<M: RpcRequest + WireDecode> Incoming<Rpc<M>> {
                 _phantom: PhantomData,
             },
             body,
+        )
+    }
+
+    /// Like [`Self::split()`], but also returns the memory reservation.
+    ///
+    /// Use this when you need to hold the memory reservation until processing is complete
+    /// (e.g., until data has been persisted to storage).
+    ///
+    /// **Panics** if message decoding failed
+    pub fn split_with_reservation(self) -> (Reciprocal<Oneshot<M::Response>>, M, MemoryLease) {
+        let body = M::decode(self.inner.payload, self.protocol_version);
+        (
+            Reciprocal {
+                protocol_version: self.protocol_version,
+                reply_port: Oneshot {
+                    inner: self.inner.reply_port,
+                    _phantom: PhantomData,
+                },
+                _phantom: PhantomData,
+            },
+            body,
+            self.inner.reservation,
         )
     }
 
