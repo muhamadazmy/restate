@@ -252,6 +252,12 @@ impl<T> PartitionSession<T> {
     }
 }
 
+impl<T> Drop for PartitionSession<T> {
+    fn drop(&mut self) {
+        self.manager.handles.remove(&self.partition);
+    }
+}
+
 impl<T> PartitionSession<T>
 where
     T: TransportConnect,
