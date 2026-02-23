@@ -188,6 +188,11 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// Returns true if the underlying session has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
     /// Enqueues an ingest request along with the owned permit and returns a future tracking commit outcome.
     pub fn ingest(
         &self,
@@ -449,32 +454,44 @@ where
     /// Gets or start a new session to partition with given partition id.
     /// It guarantees that only one session is started per partition id.
     pub fn get(&self, id: PartitionId) -> SessionHandle {
+        // Evict stale handle if the underlying session has terminated.
+        self.handles.remove_if(&id, |_, v| {
+            if v.is_closed() {
+                debug!(partition_id = %id, "Evicting stale ingestion session handle");
+                true
+            } else {
+                false
+            }
+        });
+
         self.handles
             .entry(id)
-            .or_insert_with(|| {
-                let session = PartitionSession::new(
-                    self.networking.clone(),
-                    self.partition_routing.clone(),
-                    id,
-                    self.opts.clone(),
-                );
-
-                let handle = session.handle();
-
-                let cancellation = self.cancellation.child_token();
-                let _ = TaskCenter::spawn(
-                    TaskKind::Background,
-                    "ingestion-partition-session",
-                    async move {
-                        session.start(cancellation).await;
-                        Ok(())
-                    },
-                );
-
-                handle
-            })
+            .or_insert_with(|| self.start_session(id))
             .value()
             .clone()
+    }
+
+    fn start_session(&self, id: PartitionId) -> SessionHandle {
+        let session = PartitionSession::new(
+            self.networking.clone(),
+            self.partition_routing.clone(),
+            id,
+            self.opts.clone(),
+        );
+
+        let handle = session.handle();
+
+        let cancellation = self.cancellation.child_token();
+        let _ = TaskCenter::spawn(
+            TaskKind::Background,
+            "ingestion-partition-session",
+            async move {
+                session.start(cancellation).await;
+                Ok(())
+            },
+        );
+
+        handle
     }
 }
 
