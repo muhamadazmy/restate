@@ -541,9 +541,4 @@ where
     pub fn get(&self, id: PartitionId) -> SessionHandle {
         self.inner.get(id)
     }
-
-    /// Signals all sessions to shut down and prevents new work from being scheduled.
-    pub fn close(&self) {
-        self.inner.cancellation.cancel();
-    }
 }

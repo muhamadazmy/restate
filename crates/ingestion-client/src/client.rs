@@ -35,8 +35,8 @@ use crate::{
 /// Errors that can be observed when interacting with the ingestion facade.
 #[derive(Debug, thiserror::Error)]
 pub enum IngestionError {
-    #[error("Ingestion closed")]
-    Closed,
+    #[error("Ingestion client closed: {0}")]
+    Closed(&'static str),
     #[error(transparent)]
     PartitionTableError(#[from] PartitionTableError),
 }
@@ -139,7 +139,6 @@ where
     /// Inflight records might still get committed.
     pub fn close(&self) {
         self.permits.close();
-        self.manager.close();
     }
 }
 
@@ -207,9 +206,9 @@ impl Future for IngestFuture {
                         let record = record.take().unwrap();
                         handle
                             .ingest(permit, record)
-                            .map_err(|_| IngestionError::Closed)
+                            .map_err(|_| IngestionError::Closed("partition session closed"))
                     }
-                    Err(_) => Err(IngestionError::Closed),
+                    Err(_) => Err(IngestionError::Closed("permits semaphore closed")),
                 };
 
                 Poll::Ready(output)
