@@ -16,6 +16,7 @@ publish = false
 
 ### BEGIN HAKARI SECTION
 [dependencies]
+adaptive-timeout = { version = "0.0.1-alpha.4", features = ["schemars", "serde", "sync", "tokio"] }
 ahash = { version = "0.8", features = ["serde"] }
 arrow = { version = "57", features = ["chrono-tz", "prettyprint"] }
 arrow-array = { version = "57", default-features = false, features = ["chrono-tz"] }
@@ -29,8 +30,7 @@ aws-runtime = { version = "1", default-features = false, features = ["event-stre
 aws-sdk-sts = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sigv4 = { version = "1", features = ["http0-compat", "sign-eventstream"] }
 aws-smithy-http = { version = "0.62", default-features = false, features = ["event-stream"] }
-aws-smithy-http-client = { version = "1", default-features = false, features = ["legacy-rustls-ring", "rustls-aws-lc"] }
-aws-smithy-runtime = { version = "1", default-features = false, features = ["client", "default-https-client", "rt-tokio", "tls-rustls"] }
+aws-smithy-runtime = { version = "1", default-features = false, features = ["client", "default-https-client", "rt-tokio"] }
 aws-smithy-runtime-api = { version = "1", features = ["client", "http-02x", "http-auth", "test-util"] }
 aws-smithy-types = { version = "1", default-features = false, features = ["byte-stream-poll-next", "http-body-0-4-x", "http-body-1-x", "rt-tokio", "test-util"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "query", "tokio"] }
@@ -45,10 +45,13 @@ comfy-table = { version = "7" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
+dashmap = { version = "6", default-features = false, features = ["inline"] }
+derive_more = { version = "2", features = ["add", "add_assign", "as_ref", "debug", "deref", "deref_mut", "display", "from", "from_str", "index", "index_mut", "into", "into_iterator", "is_variant", "try_from", "try_unwrap"] }
 digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1" }
 enum-map = { version = "2", default-features = false, features = ["serde"] }
 flate2 = { version = "1", features = ["zlib-rs"] }
+foldhash = { version = "0.2" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
@@ -57,7 +60,8 @@ futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 gardal = { version = "0.0.1-alpha.9", features = ["async"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
-hashbrown = { version = "0.16" }
+hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", default-features = false, features = ["inline-more", "raw"] }
+hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16" }
 hdrhistogram = { version = "7" }
 hex = { version = "0.4" }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
@@ -76,7 +80,6 @@ libz-sys = { version = "1", features = ["static"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 md-5 = { version = "0.10" }
 memchr = { version = "2" }
-metrics-util = { version = "0.20" }
 nom = { version = "7" }
 num-bigint = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
@@ -100,6 +103,7 @@ ring = { version = "0.17", features = ["std"] }
 rustls = { version = "0.23", default-features = false, features = ["logging", "prefer-post-quantum", "ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+schemars = { version = "1", features = ["bytes1"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
@@ -134,6 +138,7 @@ zstd-safe = { version = "7", default-features = false, features = ["arrays", "le
 zstd-sys = { version = "2", features = ["experimental", "std"] }
 
 [build-dependencies]
+adaptive-timeout = { version = "0.0.1-alpha.4", features = ["schemars", "serde", "sync", "tokio"] }
 ahash = { version = "0.8", features = ["serde"] }
 arrow = { version = "57", features = ["chrono-tz", "prettyprint"] }
 arrow-array = { version = "57", default-features = false, features = ["chrono-tz"] }
@@ -147,8 +152,7 @@ aws-runtime = { version = "1", default-features = false, features = ["event-stre
 aws-sdk-sts = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sigv4 = { version = "1", features = ["http0-compat", "sign-eventstream"] }
 aws-smithy-http = { version = "0.62", default-features = false, features = ["event-stream"] }
-aws-smithy-http-client = { version = "1", default-features = false, features = ["legacy-rustls-ring", "rustls-aws-lc"] }
-aws-smithy-runtime = { version = "1", default-features = false, features = ["client", "default-https-client", "rt-tokio", "tls-rustls"] }
+aws-smithy-runtime = { version = "1", default-features = false, features = ["client", "default-https-client", "rt-tokio"] }
 aws-smithy-runtime-api = { version = "1", features = ["client", "http-02x", "http-auth", "test-util"] }
 aws-smithy-types = { version = "1", default-features = false, features = ["byte-stream-poll-next", "http-body-0-4-x", "http-body-1-x", "rt-tokio", "test-util"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "query", "tokio"] }
@@ -164,10 +168,14 @@ comfy-table = { version = "7" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 crossbeam-epoch = { version = "0.9" }
 crossbeam-utils = { version = "0.8" }
+dashmap = { version = "6", default-features = false, features = ["inline"] }
+derive_more = { version = "2", features = ["add", "add_assign", "as_ref", "debug", "deref", "deref_mut", "display", "from", "from_str", "index", "index_mut", "into", "into_iterator", "is_variant", "try_from", "try_unwrap"] }
+derive_more-impl = { version = "2", features = ["add", "add_assign", "as_ref", "debug", "deref", "deref_mut", "display", "from", "from_str", "index", "index_mut", "into", "into_iterator", "is_variant", "try_from", "try_unwrap"] }
 digest = { version = "0.10", features = ["mac", "std"] }
 either = { version = "1" }
 enum-map = { version = "2", default-features = false, features = ["serde"] }
 flate2 = { version = "1", features = ["zlib-rs"] }
+foldhash = { version = "0.2" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-core = { version = "0.3" }
 futures-executor = { version = "0.3" }
@@ -176,7 +184,8 @@ futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 gardal = { version = "0.0.1-alpha.9", features = ["async"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
-hashbrown = { version = "0.16" }
+hashbrown-582f2526e08bb6a0 = { package = "hashbrown", version = "0.14", default-features = false, features = ["inline-more", "raw"] }
+hashbrown-986da7b5efc2b80e = { package = "hashbrown", version = "0.16" }
 hdrhistogram = { version = "7" }
 hex = { version = "0.4" }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
@@ -195,7 +204,6 @@ libz-sys = { version = "1", features = ["static"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 md-5 = { version = "0.10" }
 memchr = { version = "2" }
-metrics-util = { version = "0.20" }
 nom = { version = "7" }
 num-bigint = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
@@ -220,6 +228,7 @@ ring = { version = "0.17", features = ["std"] }
 rustls = { version = "0.23", default-features = false, features = ["logging", "prefer-post-quantum", "ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
+schemars = { version = "1", features = ["bytes1"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
@@ -258,7 +267,6 @@ zstd-sys = { version = "2", features = ["experimental", "std"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
 clap = { version = "4" }
 crossterm = { version = "0.29" }
-derive_more = { version = "2", features = ["full"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
@@ -277,8 +285,6 @@ tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unpref
 bitflags = { version = "2", default-features = false, features = ["std"] }
 clap = { version = "4" }
 crossterm = { version = "0.29" }
-derive_more = { version = "2", features = ["full"] }
-derive_more-impl = { version = "2", features = ["add", "add_assign", "as_ref", "constructor", "debug", "deref", "deref_mut", "display", "eq", "error", "from", "from_str", "index", "index_mut", "into", "into_iterator", "is_variant", "mul", "mul_assign", "not", "sum", "try_from", "try_into", "try_unwrap", "unwrap"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
@@ -297,7 +303,6 @@ tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unpref
 bitflags = { version = "2", default-features = false, features = ["std"] }
 clap = { version = "4" }
 crossterm = { version = "0.29" }
-derive_more = { version = "2", features = ["full"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
@@ -315,8 +320,6 @@ tikv-jemalloc-sys = { version = "0.6", features = ["profiling", "stats", "unpref
 bitflags = { version = "2", default-features = false, features = ["std"] }
 clap = { version = "4" }
 crossterm = { version = "0.29" }
-derive_more = { version = "2", features = ["full"] }
-derive_more-impl = { version = "2", features = ["add", "add_assign", "as_ref", "constructor", "debug", "deref", "deref_mut", "display", "eq", "error", "from", "from_str", "index", "index_mut", "into", "into_iterator", "is_variant", "mul", "mul_assign", "not", "sum", "try_from", "try_into", "try_unwrap", "unwrap"] }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }

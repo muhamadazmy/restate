@@ -9,7 +9,12 @@ publish = false
 
 [features]
 default = []
+# Lightweight feature that enables ServiceMessage::fake_rpc() and ShardSender::send()
+# without pulling in tokio/test-util or restate-types/test-util. Intended for
+# benchmark tooling that needs to inject messages into service workers directly.
+message-util = []
 test-util = [
+  "message-util",
   "restate-core-derive",
   "restate-metadata-store/test-util",
   "restate-types/test-util",
@@ -36,13 +41,12 @@ axum = { workspace = true, default-features = false }
 bytes = { workspace = true }
 bytestring = { workspace = true }
 dashmap = { workspace = true }
-derive_more = { workspace = true }
+derive_more = { workspace = true, features = ["debug", "deref", "display", "from", "index", "index_mut", "into", "is_variant"] }
 prost-dto = { workspace = true }
 enum-map = { workspace = true }
 enumset = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
-http-body = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true, features = ["server-graceful", "server"] }
 itertools = { workspace = true }
@@ -50,7 +54,6 @@ metrics = { workspace = true }
 parking_lot = { workspace = true }
 pin-project-lite = { workspace = true }
 prost = { workspace = true }
-prost-types = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_with = { workspace = true }
