@@ -65,7 +65,7 @@ use crate::error::{
 use crate::invocation_task::{
     InvocationTask, InvocationTaskOutputInner, InvokerBodyStream, InvokerRequestStreamSender,
     ResponseChunk, ResponseStream, TerminalLoopState, X_RESTATE_SERVER,
-    invocation_id_to_header_value, service_protocol_version_to_header_value,
+    invocation_id_to_header_value, retry_after, service_protocol_version_to_header_value,
 };
 
 ///  Provides the value of the invocation id
@@ -636,6 +636,12 @@ where
         // case we still need to return the proper error
         if GATEWAY_ERRORS_CODES.contains(&parts.status) {
             return Err(InvokerError::ServiceUnavailable(parts.status));
+        }
+
+        if parts.status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(InvokerError::RateLimited {
+                retry_after: retry_after::parse_retry_after(&parts),
+            });
         }
 
         // otherwise we return generic UnexpectedResponse
