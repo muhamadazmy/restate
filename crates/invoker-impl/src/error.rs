@@ -170,6 +170,9 @@ pub(crate) enum InvokerError {
     #[code(restate_errors::RT0010)]
     ServiceUnavailable(http::StatusCode),
 
+    #[error("too many requests")]
+    #[code(restate_errors::RT0023)]
+    RateLimited { retry_after: Option<Duration> },
     #[error(
         "service {0} is exposed by the deprecated deployment {1}, please upgrade the SDK used by the service."
     )]
@@ -220,6 +223,7 @@ impl InvokerError {
                 next_retry_interval_override,
                 ..
             }) => *next_retry_interval_override,
+            InvokerError::RateLimited { retry_after } => *retry_after,
             _ => None,
         }
     }
