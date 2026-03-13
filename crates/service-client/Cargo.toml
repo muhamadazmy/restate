@@ -25,6 +25,8 @@ base64 = { workspace = true }
 bs58 = { workspace = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
+dashmap = { workspace = true }
+derive_builder = { workspace = true }
 futures = { workspace = true }
 h2 = "0.4.12"
 http = { workspace = true }
