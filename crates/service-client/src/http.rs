@@ -10,6 +10,7 @@
 
 use super::proxy::ProxyConnector;
 
+use crate::pool;
 use crate::utils::ErrorExt;
 
 use bytes::Bytes;
@@ -30,6 +31,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::{fmt, future};
+use tower::Layer;
 
 type ProxiedHttpsConnector = ProxyConnector<HttpsConnector<HttpConnector>>;
 
@@ -106,6 +108,11 @@ impl HttpClient {
             .https_or_http()
             .enable_http2()
             .wrap_connector(http_connector.clone());
+
+        {
+            let _connector = pool::tls::TlsConnectorLayer::new(TLS_CLIENT_CONFIG.clone())
+                .layer(pool::TcpConnector);
+        }
 
         HttpClient {
             alpn_client: builder.clone().build::<_, BoxBody>(ProxyConnector::new(
