@@ -271,6 +271,7 @@ getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-f
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.30", features = ["signal"] }
 num = { version = "0.4" }
@@ -289,6 +290,7 @@ getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-f
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 nix = { version = "0.30", features = ["signal"] }
 num = { version = "0.4" }
@@ -307,6 +309,7 @@ getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-f
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 nix = { version = "0.30", features = ["signal"] }
 num = { version = "0.4" }
 pprof_util = { version = "0.8", default-features = false, features = ["flamegraph"] }
@@ -324,6 +327,7 @@ getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-f
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 nix = { version = "0.30", features = ["signal"] }
 num = { version = "0.4" }
 pprof_util = { version = "0.8", default-features = false, features = ["flamegraph"] }
