@@ -8,6 +8,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::num::NonZeroUsize;
+
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -59,7 +61,15 @@ pub struct HttpOptions {
     ///
     /// **NOTE**: Setting this value to None (default) users the default
     /// recommended value from HTTP2 specs
-    pub initial_max_send_streams: Option<usize>,
+    pub initial_max_send_streams: Option<u32>,
+
+    /// # Max HTTP2 Connections
+    ///
+    /// Sets the maximum number of open HTTP/2 connections per
+    /// client for a single host.
+    ///
+    /// Default: 20
+    pub max_http2_connections: NonZeroUsize,
 }
 
 impl Default for HttpOptions {
@@ -70,6 +80,7 @@ impl Default for HttpOptions {
             no_proxy: None,
             connect_timeout: NonZeroFriendlyDuration::from_secs_unchecked(10),
             initial_max_send_streams: None,
+            max_http2_connections: NonZeroUsize::new(20).unwrap(),
         }
     }
 }
