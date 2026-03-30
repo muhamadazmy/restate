@@ -1356,6 +1356,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
+name = "castaway"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1612,6 +1621,22 @@ dependencies = [
  "crossterm",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "compact_str"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fdb1325a1cece981e8a296ab8f0f9b63ae357bd0784a9faaf548cc7b480707a"
+dependencies = [
+ "bytes",
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "rustversion",
+ "ryu",
+ "serde",
+ "static_assertions",
 ]
 
 [[package]]
@@ -7329,6 +7354,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "restate-limiter"
+version = "1.6.3-dev"
+dependencies = [
+ "bilrost",
+ "restate-limiter",
+ "restate-util-string",
+ "restate-workspace-hack",
+ "slotmap",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "restate-lite"
 version = "1.6.3-dev"
 dependencies = [
@@ -7698,12 +7735,12 @@ dependencies = [
  "restate-storage-api",
  "restate-test-util",
  "restate-types",
+ "restate-util-string",
  "restate-workspace-hack",
  "rust-rocksdb",
  "serde",
  "serde_json",
  "serde_with",
- "smartstring",
  "static_assertions",
  "strum",
  "tempfile",
@@ -7749,9 +7786,9 @@ dependencies = [
  "restate-test-util",
  "restate-time-util",
  "restate-types",
+ "restate-util-string",
  "restate-workspace-hack",
  "rust-rocksdb",
- "smartstring",
  "static_assertions",
  "strum",
  "thiserror 2.0.18",
@@ -7842,17 +7879,24 @@ dependencies = [
  "bs58",
  "bytes",
  "bytestring",
+ "criterion",
+ "dashmap",
+ "derive_builder",
  "futures",
  "googletest",
  "h2",
  "http 1.4.0",
+ "http-body 1.0.1",
  "http-body-util",
  "http-serde",
  "hyper",
  "hyper-rustls",
  "hyper-util",
  "jsonwebtoken 10.3.0",
+ "parking_lot",
  "pem",
+ "pin-project",
+ "pprof",
  "restate-types",
  "restate-workspace-hack",
  "ring",
@@ -7862,7 +7906,11 @@ dependencies = [
  "serde_with",
  "tempfile",
  "thiserror 2.0.18",
- "tower-service",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-util",
+ "tower",
  "tracing",
  "zstd",
 ]
@@ -8132,6 +8180,7 @@ dependencies = [
  "restate-test-util",
  "restate-time-util",
  "restate-types",
+ "restate-util-string",
  "restate-utoipa",
  "restate-workspace-hack",
  "rustc-hash",
@@ -8143,7 +8192,6 @@ dependencies = [
  "serde_with",
  "sha2",
  "smallvec",
- "smartstring",
  "static_assertions",
  "strum",
  "syn 2.0.117",
@@ -8162,6 +8210,18 @@ dependencies = [
  "ulid",
  "utoipa",
  "xxhash-rust",
+]
+
+[[package]]
+name = "restate-util-string"
+version = "1.6.3-dev"
+dependencies = [
+ "bilrost",
+ "bytes",
+ "compact_str",
+ "restate-util-string",
+ "restate-workspace-hack",
+ "serde",
 ]
 
 [[package]]
@@ -8319,6 +8379,7 @@ dependencies = [
  "clap",
  "clap_builder",
  "comfy-table",
+ "compact_str",
  "constant_time_eq",
  "criterion",
  "crossbeam-epoch",
@@ -8363,6 +8424,7 @@ dependencies = [
  "log",
  "md-5",
  "memchr",
+ "miniz_oxide",
  "mio",
  "nom",
  "num",
@@ -9224,7 +9286,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
 dependencies = [
  "autocfg",
- "serde",
  "static_assertions",
  "version_check",
 ]

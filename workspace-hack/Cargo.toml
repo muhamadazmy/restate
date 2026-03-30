@@ -41,6 +41,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", default-features = false, features = ["color", "derive", "env", "error-context", "help", "std", "suggestions", "usage", "wrap_help"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "std", "suggestions", "usage", "wrap_help"] }
 comfy-table = { version = "7" }
+compact_str = { version = "0.9", default-features = false, features = ["bytes", "serde", "std"] }
 constant_time_eq = { version = "0.4" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 crossbeam-epoch = { version = "0.9" }
@@ -117,7 +118,7 @@ stable_deref_trait = { version = "1" }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = { version = "1", default-features = false, features = ["futures"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", features = ["ring"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = { version = "0.7", features = ["codec", "io-util", "net", "rt", "time"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
@@ -170,6 +171,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", default-features = false, features = ["color", "derive", "env", "error-context", "help", "std", "suggestions", "usage", "wrap_help"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "env", "std", "suggestions", "usage", "wrap_help"] }
 comfy-table = { version = "7" }
+compact_str = { version = "0.9", default-features = false, features = ["bytes", "serde", "std"] }
 constant_time_eq = { version = "0.4" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 crossbeam-epoch = { version = "0.9" }
@@ -248,7 +250,7 @@ stable_deref_trait = { version = "1" }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 sync_wrapper = { version = "1", default-features = false, features = ["futures"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", features = ["ring"] }
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = { version = "0.7", features = ["codec", "io-util", "net", "rt", "time"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
@@ -283,6 +285,7 @@ getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-f
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 num = { version = "0.4" }
 object = { version = "0.37", default-features = false, features = ["read", "std"] }
@@ -301,6 +304,7 @@ getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-f
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 num = { version = "0.4" }
 object = { version = "0.37", default-features = false, features = ["read", "std"] }
@@ -320,6 +324,7 @@ getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-f
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 num = { version = "0.4" }
 object = { version = "0.37", default-features = false, features = ["read", "std"] }
 pprof_util = { version = "0.8", default-features = false, features = ["flamegraph"] }
@@ -338,6 +343,7 @@ getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-f
 hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio"] }
 jemalloc_pprof = { version = "0.8", default-features = false, features = ["flamegraph", "symbolize"] }
 libc = { version = "0.2", default-features = false, features = ["use_std"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["simd", "with-alloc"] }
 num = { version = "0.4" }
 object = { version = "0.37", default-features = false, features = ["read", "std"] }
 pprof_util = { version = "0.8", default-features = false, features = ["flamegraph"] }

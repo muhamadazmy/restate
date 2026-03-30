@@ -19,12 +19,13 @@ use crate::identifiers::{PartitionId, PartitionKey};
 use crate::logs::LogId;
 use crate::metadata::GlobalMetadata;
 use crate::net::metadata::{MetadataContainer, MetadataKind};
+use crate::protobuf::common::DatabaseKind;
 use crate::replication::ReplicationProperty;
 use crate::{Version, Versioned, flexbuffers_storage_encode_decode};
 
 const PARTITION_CF_PREFIX: &str = "data-";
 
-type SmartString = smartstring::SmartString<smartstring::LazyCompact>;
+use restate_util_string::ReString;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Cannot find partition for partition key '{0}'")]
@@ -214,21 +215,21 @@ impl FindPartition for PartitionTable {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct DbName(SmartString);
+pub struct DbName(ReString);
 
 impl From<String> for DbName {
     fn from(val: String) -> Self {
-        Self(SmartString::from(val))
+        Self(ReString::from(val))
     }
 }
 
 impl From<&str> for DbName {
     fn from(val: &str) -> Self {
-        Self(SmartString::from(val))
+        Self(ReString::from(val))
     }
 }
 
-impl From<DbName> for SmartString {
+impl From<DbName> for ReString {
     fn from(val: DbName) -> Self {
         val.0
     }
@@ -243,7 +244,7 @@ impl AsRef<str> for DbName {
 #[derive(
     Clone, derive_more::Display, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
 )]
-pub struct CfName(SmartString);
+pub struct CfName(ReString);
 
 impl CfName {
     pub fn for_partition(partition_id: PartitionId) -> Self {
@@ -251,12 +252,12 @@ impl CfName {
     }
 
     #[inline]
-    pub fn into_inner(self) -> SmartString {
+    pub fn into_inner(self) -> ReString {
         self.0
     }
 }
 
-impl From<CfName> for SmartString {
+impl From<CfName> for ReString {
     fn from(val: CfName) -> Self {
         val.0
     }
@@ -298,13 +299,14 @@ impl Partition {
     }
 
     pub fn db_name(&self) -> DbName {
+        let base = DatabaseKind::PartitionStore.db_name();
         #[cfg(feature = "multi-db")]
         return self
             .db_name
             .clone()
-            .unwrap_or_else(|| DbName::from(format!("db-{}", self.partition_id)));
+            .unwrap_or_else(|| DbName::from(format!("{base}-{}", self.partition_id)));
         #[cfg(not(feature = "multi-db"))]
-        return self.db_name.clone().unwrap_or_else(|| DbName::from("db"));
+        return self.db_name.clone().unwrap_or_else(|| DbName::from(base));
     }
 
     pub fn cf_name(&self) -> CfName {

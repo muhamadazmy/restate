@@ -12,10 +12,11 @@ use std::path::PathBuf;
 
 use derive_builder::Builder;
 
+use restate_types::protobuf::common::DatabaseKind;
+use restate_util_string::ReString;
+
 use crate::BoxedCfMatcher;
 use crate::configuration::{CfConfigurator, DbConfigurator};
-
-type SmartString = smartstring::SmartString<smartstring::LazyCompact>;
 
 #[derive(
     Debug,
@@ -31,7 +32,7 @@ type SmartString = smartstring::SmartString<smartstring::LazyCompact>;
     PartialOrd,
     Hash,
 )]
-pub struct DbName(SmartString);
+pub struct DbName(ReString);
 impl DbName {
     pub fn new(name: &str) -> Self {
         Self(name.into())
@@ -40,7 +41,7 @@ impl DbName {
 
 impl From<restate_types::partitions::DbName> for DbName {
     fn from(name: restate_types::partitions::DbName) -> Self {
-        let inner: SmartString = name.into();
+        let inner: ReString = name.into();
         Self(inner)
     }
 }
@@ -59,7 +60,7 @@ impl From<restate_types::partitions::DbName> for DbName {
     PartialOrd,
     Hash,
 )]
-pub struct CfName(SmartString);
+pub struct CfName(ReString);
 impl CfName {
     pub fn new(name: &str) -> Self {
         Self(name.into())
@@ -80,7 +81,7 @@ impl AsRef<str> for CfName {
 
 impl From<restate_types::partitions::CfName> for CfName {
     fn from(name: restate_types::partitions::CfName) -> Self {
-        let inner: SmartString = name.into();
+        let inner: ReString = name.into();
         Self(inner)
     }
 }
@@ -97,12 +98,12 @@ pub trait CfNameMatch: std::fmt::Debug {
 
 #[derive(Debug)]
 pub struct CfPrefixPattern {
-    prefix: SmartString,
+    prefix: ReString,
 }
 
 impl CfPrefixPattern {
     pub const ANY: Self = Self {
-        prefix: SmartString::new_const(),
+        prefix: ReString::from_static(""),
     };
 
     pub fn new(prefix: &str) -> Self {
@@ -120,11 +121,11 @@ impl CfNameMatch for CfPrefixPattern {
 
 #[derive(Debug)]
 pub struct CfExactPattern {
-    name: SmartString,
+    name: ReString,
 }
 
 impl CfExactPattern {
-    pub fn new(name: impl Into<SmartString>) -> Self {
+    pub fn new(name: impl Into<ReString>) -> Self {
         Self { name: name.into() }
     }
 }
@@ -145,6 +146,7 @@ pub enum OpenMode {
 #[builder(pattern = "owned", build_fn(name = "build"))]
 pub struct DbSpec {
     pub(crate) name: DbName,
+    pub(crate) kind: DatabaseKind,
     pub(crate) path: PathBuf,
     /// All column families that should be flushed on shutdown, no flush will be performed if empty
     /// which should be the default for most cases.
@@ -174,6 +176,10 @@ impl DbSpec {
         &self.name
     }
 
+    pub fn kind(&self) -> DatabaseKind {
+        self.kind
+    }
+
     pub fn open_mode(&self) -> OpenMode {
         self.db_configurator.get_db_open_mode()
     }
@@ -182,11 +188,13 @@ impl DbSpec {
 impl DbSpecBuilder {
     pub fn new(
         name: DbName,
+        kind: DatabaseKind,
         path: PathBuf,
         configurator: impl DbConfigurator + Send + Sync + 'static,
     ) -> DbSpecBuilder {
         Self {
             name: Some(name),
+            kind: Some(kind),
             path: Some(path),
             db_configurator: Some(Box::new(configurator)),
             ..Self::default()

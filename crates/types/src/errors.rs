@@ -165,14 +165,18 @@ pub mod codes {
     codes!(
         BAD_REQUEST 400 "Bad request",
         NOT_FOUND 404 "Not found",
-        INTERNAL 500 "Internal",
         ABORTED 409 "Aborted",
+        CONFLICT 409 "Conflict",
         GONE 410 "Gone",
+        NOT_READY 470 "Not ready",
         UNSUPPORTED_MEDIA_TYPE 415 "Unsupported media type",
+        // The 500 range in this list should remain in sync with
+        // https://github.com/restatedev/sdk-shared-core/blob/435557dfb8edd0987cd4a9632e15381bd07c36d0/src/vm/errors.rs#L69
+        INTERNAL 500 "Internal",
         JOURNAL_MISMATCH 570 "Journal mismatch",
         PROTOCOL_VIOLATION 571 "Protocol violation",
-        CONFLICT 409 "Conflict",
-        NOT_READY 470 "Not ready",
+        AWAITING_TWO_ASYNC_RESULTS 572 "Awaiting two async results",
+        UNSUPPORTED_FEATURE 573 "Unsupported feature",
     );
 }
 
@@ -449,6 +453,24 @@ impl fmt::Display for SimpleStatus {
 impl std::error::Error for SimpleStatus {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.0.source()
+    }
+}
+
+/// Check if a gRPC status represents a retryable error.
+///
+/// Transport errors can manifest in different ways:
+/// - `Unknown`: General transport errors
+/// - `Unavailable`: Server is not reachable or temporarily unable to serve
+/// - `Cancelled`: Connection was terminated (common with UDS when server is killed)
+/// - `Internal` with h2 errors: HTTP/2 protocol errors (e.g., connection reset, stream errors)
+pub fn is_retryable_status(status: &tonic::Status) -> bool {
+    match status.code() {
+        tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Cancelled => true,
+        tonic::Code::Internal => {
+            let message = status.message();
+            message.contains("h2 protocol error") || message.contains("http2 error")
+        }
+        _ => false,
     }
 }
 
