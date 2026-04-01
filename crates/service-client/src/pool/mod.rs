@@ -7,25 +7,106 @@
 // As of the Change Date specified in that file, in accordance with
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
+
+pub mod authority;
+mod config;
 pub mod conn;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub mod tls;
 
 use std::{
+    future::poll_fn,
+    hash::Hash,
     io::{self, ErrorKind},
     net::IpAddr,
     str::FromStr,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
 
+use bytes::Bytes;
+use dashmap::DashMap;
 use futures::future::BoxFuture;
-use http::Uri;
+use http::{Response, Uri};
+use http_body::Body;
 use rustls::pki_types::{DnsName, ServerName};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+};
 use tower::Service;
 use tracing::trace;
+
+use crate::pool::{authority::AuthorityPool, conn::PermittedRecvStream};
+
+pub use config::PoolBuilder;
+use config::PoolConfig;
+pub use conn::ConnectionError;
+
+#[derive(Clone)]
+pub struct Pool<C> {
+    connector: C,
+    config: PoolConfig,
+    authorities: Arc<DashMap<PoolKey, AuthorityPool<C>>>,
+}
+
+impl<C> Pool<C> {
+    fn new(connector: C, config: PoolConfig) -> Self {
+        Self {
+            config,
+            connector,
+            authorities: Arc::new(DashMap::default()),
+        }
+    }
+}
+
+impl<C> Pool<C>
+where
+    C: Service<Uri> + Send + Clone + 'static,
+    C::Response: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+    C::Future: Send + 'static,
+    C::Error: Into<ConnectionError>,
+{
+    pub fn request<B>(
+        &self,
+        request: http::Request<B>,
+    ) -> impl Future<Output = Result<Response<PermittedRecvStream>, ConnectionError>> + Send + 'static
+    where
+        B: Body<Data = Bytes> + Unpin + Send + Sync + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+    {
+        let key = PoolKey::from_uri(request.uri());
+
+        let mut authority_pool = self
+            .authorities
+            .entry(key)
+            .or_insert_with(|| AuthorityPool::new(self.connector.clone(), self.config.clone()))
+            .value()
+            .clone();
+
+        async move {
+            poll_fn(|cx| authority_pool.poll_ready(cx)).await?;
+            authority_pool.call(request).await
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct PoolKey {
+    scheme: Option<http::uri::Scheme>,
+    authority: Option<http::uri::Authority>,
+}
+
+impl PoolKey {
+    fn from_uri(u: &Uri) -> Self {
+        Self {
+            scheme: u.scheme().cloned(),
+            authority: u.authority().cloned(),
+        }
+    }
+}
 
 /// A Tower [`Service`] that establishes TCP connections to a given URI.
 ///
@@ -82,7 +163,7 @@ impl Service<Uri> for TcpConnector {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Host {
+enum Host {
     IpAddress(IpAddr),
     DnsName(DnsName<'static>),
 }
@@ -157,5 +238,104 @@ impl IntoConnectionInfo for Uri {
 impl<T> IntoConnectionInfo for http::Request<T> {
     fn get_connection_info(&self) -> ConnectionInfo {
         self.uri().get_connection_info()
+    }
+}
+
+#[cfg(test)]
+mod test {
+
+    use bytes::Bytes;
+    use http::{Request, Uri};
+    use http_body_util::BodyExt;
+
+    use crate::pool::PoolBuilder;
+    use crate::pool::test_util::TestConnector;
+
+    fn make_pool(
+        max_concurrent_streams: u32,
+        max_connections: usize,
+    ) -> super::Pool<TestConnector> {
+        PoolBuilder::default()
+            .max_connections(std::num::NonZeroUsize::new(max_connections).unwrap())
+            .initial_max_send_streams(std::num::NonZeroU32::new(max_concurrent_streams).unwrap())
+            .build(TestConnector::new(max_concurrent_streams))
+    }
+
+    /// Requests to different hosts create separate authority pools.
+    #[tokio::test]
+    async fn routes_to_separate_authorities() {
+        let pool = make_pool(10, 4);
+
+        assert_eq!(pool.authorities.len(), 0);
+
+        pool.request(
+            Request::builder()
+                .uri("http://host-a:80")
+                .body(http_body_util::Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(pool.authorities.len(), 1);
+
+        pool.request(
+            Request::builder()
+                .uri("http://host-b:80")
+                .body(http_body_util::Empty::<Bytes>::new())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(pool.authorities.len(), 2);
+    }
+
+    /// Multiple requests to the same authority reuse the same pool entry.
+    #[tokio::test]
+    async fn same_authority_shares_pool() {
+        let pool = make_pool(10, 4);
+
+        for _ in 0..3 {
+            pool.request(
+                Request::builder()
+                    .uri("http://host-a:80")
+                    .body(http_body_util::Empty::<Bytes>::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(pool.authorities.len(), 1);
+    }
+
+    /// Requests to multiple authorities with echo payloads all resolve correctly.
+    #[tokio::test]
+    async fn multi_authority_echo() {
+        let pool = make_pool(10, 4);
+
+        for (i, host) in ["host-a", "host-b", "host-c"].iter().enumerate() {
+            let uri: Uri = format!("http://{}:80", host).parse().unwrap();
+            let resp = pool
+                .request(
+                    Request::builder()
+                        .uri(uri)
+                        .body(http_body_util::Full::new(Bytes::from(vec![i as u8; 4])))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let collected = resp.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                collected.as_ref(),
+                &[i as u8; 4],
+                "response should echo request body for {}",
+                host,
+            );
+        }
+
+        assert_eq!(pool.authorities.len(), 3);
     }
 }
