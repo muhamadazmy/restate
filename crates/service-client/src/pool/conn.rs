@@ -160,6 +160,13 @@ where
     }
 }
 
+impl<C> Connection<C> {
+    /// Returns the number of currently in-flight H2 streams on this connection.
+    pub(crate) fn inflight(&self) -> usize {
+        self.shared.concurrency.acquired()
+    }
+}
+
 impl<C> Connection<C>
 where
     C: Service<Uri>,
