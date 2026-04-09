@@ -10,6 +10,7 @@
 
 mod error;
 mod input_command;
+mod invocation_memory;
 mod invocation_state_machine;
 mod invocation_task;
 mod metric_definitions;
@@ -40,23 +41,22 @@ use restate_errors::warn_it;
 use restate_invoker_api::capacity::TokenBucket;
 use restate_invoker_api::invocation_reader::InvocationReader;
 use restate_invoker_api::{
-    Effect, EffectKind, EntryEnricher, InvocationErrorReport, InvocationStatusReport,
-    InvokeInputJournal,
+    Effect, EffectKind, EntryEnricher, InvocationErrorReport, InvocationStatusReport, YieldReason,
 };
+use restate_memory::{ByteCount, LocalMemoryPool, MemoryLease, MemoryPool};
 use restate_queue::SegmentQueue;
 use restate_service_client::{AssumeRoleCacheMode, ServiceClient};
 use restate_time_util::DurationExt;
-use restate_types::config::{InvokerOptions, ServiceClientOptions};
+use restate_types::config::{Configuration, InvokerOptions, ServiceClientOptions};
 use restate_types::deployment::PinnedDeployment;
 use restate_types::identifiers::{DeploymentId, InvocationId, PartitionKey, WithPartitionKey};
 use restate_types::identifiers::{PartitionId, PartitionLeaderEpoch};
 use restate_types::invocation::InvocationTarget;
+use restate_types::journal::EntryIndex;
 use restate_types::journal::enriched::EnrichedRawEntry;
-use restate_types::journal::{Completion, EntryIndex};
 use restate_types::journal_events::raw::RawEvent;
 use restate_types::journal_events::{Event, PausedEvent, TransientErrorEvent};
-use restate_types::journal_v2;
-use restate_types::journal_v2::raw::{RawCommand, RawEntry, RawNotification};
+use restate_types::journal_v2::raw::{RawCommand, RawNotification};
 use restate_types::journal_v2::{CommandIndex, EntryMetadata, NotificationId};
 use restate_types::live::{Live, LiveLoad};
 use restate_types::schema::deployment::DeploymentResolver;
@@ -64,9 +64,11 @@ use restate_types::schema::invocation_target::InvocationTargetResolver;
 use tokio_util::time::DelayQueue;
 use tokio_util::time::delay_queue::Key as RetryTimerKey;
 
+use crate::error::InvocationMemoryExhausted;
 use crate::error::InvokerError;
 use crate::error::SdkInvocationErrorV2;
 use crate::input_command::{InputCommand, InvokeCommand};
+use crate::invocation_memory::OutOfMemoryKind;
 use crate::invocation_state_machine::InvocationStateMachine;
 use crate::invocation_state_machine::OnTaskError;
 use crate::invocation_task::InvocationTask;
@@ -84,8 +86,11 @@ use self::input_command::VQueueInvokeCommand;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Notification {
-    Completion(Completion),
-    Entry(RawEntry),
+    /// V1 completion signal: just the entry index (data read from RocksDB on demand).
+    Completion(EntryIndex),
+    /// V2 notification signal: entry index.
+    Entry(EntryIndex),
+    /// V2 command ack: already signal-only.
     Ack(CommandIndex),
 }
 
@@ -103,8 +108,8 @@ trait InvocationTaskRunner<SR> {
         storage_reader: SR,
         invoker_tx: mpsc::UnboundedSender<InvocationTaskOutput>,
         invoker_rx: mpsc::UnboundedReceiver<Notification>,
-        input_journal: InvokeInputJournal,
         task_pool: &mut JoinSet<()>,
+        budget: LocalMemoryPool,
     ) -> AbortHandle;
 }
 
@@ -131,8 +136,8 @@ where
         storage_reader: IR,
         invoker_tx: mpsc::UnboundedSender<InvocationTaskOutput>,
         invoker_rx: mpsc::UnboundedReceiver<Notification>,
-        input_journal: InvokeInputJournal,
         task_pool: &mut JoinSet<()>,
+        budget: LocalMemoryPool,
     ) -> AbortHandle {
         task_pool
             .build_task()
@@ -145,7 +150,7 @@ where
                     invocation_target,
                     opts.inactivity_timeout.into(),
                     opts.abort_timeout.into(),
-                    opts.disable_eager_state,
+                    opts.eager_state_size_limit(),
                     opts.message_size_warning.as_non_zero_usize(),
                     opts.message_size_limit(),
                     retry_count_since_last_stored_entry,
@@ -155,7 +160,7 @@ where
                     invoker_rx,
                     self.action_token_bucket.clone(),
                 )
-                .run(input_journal, storage_reader),
+                .run(storage_reader, budget),
             )
             .expect("to spawn invocation task")
     }
@@ -222,6 +227,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
         entry_enricher: TEntryEnricher,
         invocation_token_bucket: Option<TokenBucket>,
         action_token_bucket: Option<TokenBucket>,
+        memory_pool: MemoryPool,
     ) -> Service<StorageReader, TEntryEnricher, Schemas>
     where
         StorageReader: InvocationReader + Clone + Send + Sync + 'static,
@@ -257,11 +263,14 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
                 ),
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
+                memory_pool,
+                pending_memory_lease: None,
             },
             invocation_token_bucket,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn from_options(
         invoker_id: impl Into<InvokerId>,
         service_client_options: &ServiceClientOptions,
@@ -270,6 +279,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
         schemas: Live<Schemas>,
         invocation_token_bucket: Option<TokenBucket>,
         action_token_bucket: Option<TokenBucket>,
+        memory_pool: MemoryPool,
     ) -> Result<Service<StorageReader, TEntryEnricher, Schemas>, BuildError>
     where
         StorageReader: InvocationReader + Clone + Send + Sync + 'static,
@@ -288,6 +298,7 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
             entry_enricher,
             invocation_token_bucket,
             action_token_bucket,
+            memory_pool,
         ))
     }
 }
@@ -398,6 +409,13 @@ struct ServiceInner<InvocationTaskRunner, Schemas, StorageReader> {
     status_store: InvocationStatusStore,
     invocation_state_machine_manager:
         state_machine_manager::InvocationStateMachineManager<StorageReader>,
+
+    // Global memory budget shared across all invocations on this node.
+    memory_pool: MemoryPool,
+    /// Pre-acquired memory lease for the next invocation from the segment queue.
+    /// Acquired at the top of `step()` when the queue is non-empty, and consumed
+    /// when the segment queue arm fires.
+    pending_memory_lease: Option<MemoryLease>,
 }
 
 impl<ITR, Schemas, IR> ServiceInner<ITR, Schemas, IR>
@@ -418,6 +436,17 @@ where
             >,
         >,
     ) {
+        // Pre-acquire a memory lease from the memory pool so the segment queue arm
+        // can create a budget without blocking inside select!.
+        let initial_invocation_memory = options.per_invocation_initial_memory.as_usize();
+        if segmented_input_queue.inner().is_empty() {
+            // Release the lease if the queue drained since we acquired it, so the
+            // memory is returned to the global pool instead of being held idle.
+            self.pending_memory_lease = None;
+        } else if self.pending_memory_lease.is_none() {
+            self.pending_memory_lease = self.memory_pool.try_reserve(initial_invocation_memory);
+        }
+
         tokio::select! {
             Some(cmd) = self.status_rx.recv() => {
                 let keys = cmd.payload();
@@ -459,20 +488,25 @@ where
                     InputCommand::AbortAllPartition { partition } => {
                         self.handle_abort_partition(partition);
                     }
-                    InputCommand::Completion { partition, invocation_id, completion } => {
-                        self.handle_completion(partition, invocation_id, completion);
+                    InputCommand::Completion { partition, invocation_id, entry_index } => {
+                        self.handle_completion(partition, invocation_id, entry_index);
                     },
-                    InputCommand::Notification { partition, invocation_id, notification } => {
-                        self.handle_notification(options, partition, invocation_id, notification);
+                    InputCommand::Notification { partition, invocation_id, entry_index, notification_id } => {
+                        self.handle_notification(options, partition, invocation_id, entry_index, notification_id);
                     },
                     InputCommand::StoredCommandAck { partition, invocation_id, command_index } => {
                         self.handle_stored_command_ack(options, partition, invocation_id, command_index);
                     }
                 }
             },
-            Some(invoke_input_command) = segmented_input_queue.next(), if !segmented_input_queue.inner().is_empty() && self.quota.is_slot_available() => {
-                self.handle_invoke(options, invoke_input_command.partition, invoke_input_command.invocation_id, invoke_input_command.invocation_target, invoke_input_command.journal);
+            Some(invoke_input_command) = segmented_input_queue.next(), if !segmented_input_queue.inner().is_empty() && self.quota.is_slot_available() && self.pending_memory_lease.is_some() => {
+                let initial_memory_lease = self.pending_memory_lease.take().unwrap();
+                let budget = self.create_outbound_budget(options, initial_memory_lease);
+                self.handle_invoke(options, invoke_input_command.partition, invoke_input_command.invocation_id, invoke_input_command.invocation_target, budget);
             },
+            memory_lease = self.memory_pool.reserve(initial_invocation_memory), if !segmented_input_queue.inner().is_empty() && self.pending_memory_lease.is_none() => {
+                self.pending_memory_lease = Some(memory_lease);
+            }
             Some(invocation_task_msg) = self.invocation_tasks_rx.recv() => {
                 let InvocationTaskOutput {
                     invocation_id,
@@ -514,8 +548,8 @@ where
                     InvocationTaskOutputInner::Closed => {
                         self.handle_invocation_task_closed(partition, invocation_id).await
                     },
-                    InvocationTaskOutputInner::Failed(e) => {
-                        self.handle_invocation_task_failed(partition, invocation_id, e).await
+                    InvocationTaskOutputInner::Failed(e, returned_budget) => {
+                        self.handle_invocation_task_failed(partition, invocation_id, e, returned_budget).await
                     },
                     InvocationTaskOutputInner::Suspended(indexes) => {
                         self.handle_invocation_task_suspended(partition, invocation_id, indexes).await
@@ -531,6 +565,9 @@ where
                     }
                     InvocationTaskOutputInner::SuspendedV2(notification_ids) => {
                         self.handle_invocation_task_suspended_v2(partition, invocation_id, notification_ids).await
+                    }
+                    InvocationTaskOutputInner::ShouldYield { oom, budget } => {
+                        self.handle_invocation_task_should_yield(partition, invocation_id, oom, budget).await
                     }
                 };
             },
@@ -610,12 +647,15 @@ where
                 .partition_storage_reader(command.partition)
                 .expect("partition is registered");
             let concurrency_slot = self.quota.acquire_slot();
+
+            // VQueue path: the vqueue scheduler supplies a pre-acquired MemoryLease
+            // used as the initial memory for the outbound budget.
+            let budget = self.create_outbound_budget(options, command.initial_memory_lease);
             self.start_invocation_task(
                 options,
                 command.partition,
                 storage_reader.clone(),
                 command.invocation_id,
-                command.journal,
                 InvocationStateMachine::create(
                     Some(command.qid),
                     command.permit,
@@ -624,6 +664,7 @@ where
                     on_max_attempts,
                     concurrency_slot,
                 ),
+                budget,
             )
         } else {
             trace!(
@@ -650,7 +691,7 @@ where
         partition: PartitionLeaderEpoch,
         invocation_id: InvocationId,
         invocation_target: InvocationTarget,
-        journal: InvokeInputJournal,
+        budget: LocalMemoryPool,
     ) {
         if self
             .invocation_state_machine_manager
@@ -673,7 +714,6 @@ where
                 partition,
                 storage_reader.clone(),
                 invocation_id,
-                journal,
                 InvocationStateMachine::create(
                     None,
                     Permit::new_empty(),
@@ -682,6 +722,7 @@ where
                     on_max_attempts,
                     concurrency_slot,
                 ),
+                budget,
             )
         } else {
             trace!(
@@ -971,7 +1012,7 @@ where
         &mut self,
         partition: PartitionLeaderEpoch,
         invocation_id: InvocationId,
-        completion: Completion,
+        entry_index: EntryIndex,
     ) {
         self.invocation_state_machine_manager.handle_for_invocation(
             partition,
@@ -979,10 +1020,10 @@ where
             |_, ism| {
                 trace!(
                     restate.invocation.target = %ism.invocation_target,
-                    restate.journal.index = completion.entry_index,
+                    restate.journal.index = entry_index,
                     "Notifying completion"
                 );
-                ism.notify_completion(completion);
+                ism.notify_completion(entry_index);
             },
         );
     }
@@ -1000,16 +1041,17 @@ where
         options: &InvokerOptions,
         partition: PartitionLeaderEpoch,
         invocation_id: InvocationId,
-        notification: RawNotification,
+        entry_index: EntryIndex,
+        notification_id: NotificationId,
     ) {
         self.handle_retry_event(options, partition, invocation_id, |ism| {
             trace!(
                 restate.invocation.target = %ism.invocation_target,
-                restate.journal.ty = %notification.ty(),
-                "Sending entry"
+                restate.journal.index = entry_index,
+                "Sending notification signal"
             );
 
-            ism.notify_entry(RawEntry::Notification(notification));
+            ism.notify_entry(entry_index, notification_id);
         });
     }
 
@@ -1180,16 +1222,97 @@ where
         partition: PartitionLeaderEpoch,
         invocation_id: InvocationId,
         error: InvokerError,
+        returned_budget: LocalMemoryPool,
     ) {
-        if let Some((_, _, ism)) = self
+        if let Some((_, _, mut ism)) = self
             .invocation_state_machine_manager
             .remove_invocation(partition, &invocation_id)
         {
+            // Stash the budget on the ISM so it can be reused if we retry.
+            ism.budget = Some(returned_budget);
             self.handle_error_event(partition, invocation_id, error, ism)
                 .await;
         } else {
             // If no state machine, this might be a result for an aborted invocation.
             trace!("No state machine found for invocation task error signal");
+        }
+    }
+
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            restate.invocation.id = %invocation_id,
+            restate.invoker.partition_leader_epoch = ?partition,
+        )
+    )]
+    async fn handle_invocation_task_should_yield(
+        &mut self,
+        partition: PartitionLeaderEpoch,
+        invocation_id: InvocationId,
+        oom: InvocationMemoryExhausted,
+        mut budget: LocalMemoryPool,
+    ) {
+        if let Some((sender, _, mut ism)) = self
+            .invocation_state_machine_manager
+            .remove_invocation(partition, &invocation_id)
+        {
+            match oom.kind {
+                OutOfMemoryKind::UpperBoundExceeded => {
+                    // Per-invocation upper bound exceeded — yielding or retrying
+                    // will never help. Route through the error handler which will
+                    // immediately go to the terminal action (pause or kill) because
+                    // this error is classified as non-transient.
+                    budget.release_excess();
+                    ism.budget = Some(budget);
+                    self.handle_error_event(
+                        partition,
+                        invocation_id,
+                        InvokerError::OutOfMemory(oom),
+                        ism,
+                    )
+                    .await;
+                }
+                OutOfMemoryKind::PoolExhausted => {
+                    // Global pool exhausted — yielding may help because freeing
+                    // the execution slot lets other invocations finish and return
+                    // their memory.
+                    if Configuration::pinned()
+                        .common
+                        .experimental_enable_invoker_yield
+                    {
+                        debug!(
+                            restate.invocation.target = %ism.invocation_target,
+                            needed = %oom.needed,
+                            "Invocation yielding due to global memory pool exhaustion while {}",
+                            oom.context,
+                        );
+                        ism.abort();
+                        self.status_store.on_end(&partition, &invocation_id);
+                        let _ = sender
+                            .send(Box::new(Effect {
+                                invocation_id,
+                                kind: EffectKind::Yield(YieldReason::ExhaustedMemoryBudget {
+                                    needed_memory: oom.needed,
+                                }),
+                            }))
+                            .await;
+                    } else {
+                        // Yield flag disabled: fall back to retry.
+                        budget.release_excess();
+                        ism.budget = Some(budget);
+                        self.handle_error_event(
+                            partition,
+                            invocation_id,
+                            InvokerError::OutOfMemory(oom),
+                            ism,
+                        )
+                        .await;
+                    }
+                }
+            }
+        } else {
+            trace!("No state machine found for invocation task yield signal");
         }
     }
 
@@ -1551,14 +1674,36 @@ where
         }
     }
 
+    /// Create a per-invocation memory budget from the given initial memory leases.
+    ///
+    /// Creates the outbound memory budget for an invocation.
+    ///
+    /// The upper bound caps how much memory a single invocation may use.
+    /// Defaults to `per_invocation_memory_limit` (which itself defaults to
+    /// `message_size_limit`).
+    fn create_outbound_budget(
+        &self,
+        options: &InvokerOptions,
+        initial_memory_lease: MemoryLease,
+    ) -> LocalMemoryPool {
+        let upper_bound = options.per_invocation_memory_limit();
+        let min_reserved = ByteCount::from(initial_memory_lease.size().as_usize());
+        LocalMemoryPool::new(
+            initial_memory_lease.budget().clone(),
+            initial_memory_lease,
+            min_reserved,
+            upper_bound,
+        )
+    }
+
     fn start_invocation_task(
         &mut self,
         options: &InvokerOptions,
         partition: PartitionLeaderEpoch,
         storage_reader: IR,
         invocation_id: InvocationId,
-        journal: InvokeInputJournal,
         mut ism: InvocationStateMachine,
+        budget: LocalMemoryPool,
     ) {
         // Start the InvocationTask
         let (completions_tx, completions_rx) = mpsc::unbounded_channel();
@@ -1571,8 +1716,8 @@ where
             storage_reader,
             self.invocation_tasks_tx.clone(),
             completions_rx,
-            journal,
             &mut self.invocation_tasks,
+            budget,
         );
 
         // Transition the state machine, and store it
@@ -1607,13 +1752,18 @@ where
                     restate.invocation.target = %ism.invocation_target,
                     "Going to retry now");
                 let storage_reader = storage_reader.clone();
+                // Reuse the budget stashed on the ISM from the previous attempt
+                let budget = ism
+                    .budget
+                    .take()
+                    .expect("Invocation budget must be present when retrying");
                 self.start_invocation_task(
                     options,
                     partition,
                     storage_reader,
                     invocation_id,
-                    InvokeInputJournal::NoCachedJournal,
                     ism,
+                    budget,
                 );
             } else {
                 trace!(
@@ -1652,6 +1802,7 @@ mod tests {
     use restate_invoker_api::InvokerHandle;
     use restate_invoker_api::entry_enricher;
     use restate_invoker_api::test_util::EmptyStorageReader;
+    use restate_serde_util::NonZeroByteCount;
     use restate_service_protocol_v4::entry_codec::ServiceProtocolV4Codec;
     use restate_test_util::check;
     use restate_time_util::FriendlyDuration;
@@ -1663,9 +1814,7 @@ mod tests {
     use restate_types::journal::enriched::EnrichedEntryHeader;
     use restate_types::journal::raw::RawEntry;
     use restate_types::journal_events::EventType;
-    use restate_types::journal_v2::{
-        Command, CompletionType, Encoder, Entry, NotificationType, OutputCommand, OutputResult,
-    };
+    use restate_types::journal_v2::{Command, Encoder, Entry, OutputCommand, OutputResult};
     use restate_types::live::Constant;
     use restate_types::retries::{RetryIter, RetryPolicy};
     use restate_types::schema::deployment::Deployment;
@@ -1679,7 +1828,9 @@ mod tests {
     use test_log::test;
     use tokio::sync::mpsc;
 
-    use crate::error::{InvokerError, SdkInvocationErrorV2};
+    use restate_memory::OutOfMemoryKind;
+
+    use crate::error::{InvocationMemoryExhausted, InvokerError, SdkInvocationErrorV2};
     use crate::quota::{ConcurrencySlot, InvokerConcurrencyQuota};
 
     // -- Mocks
@@ -1723,6 +1874,8 @@ mod tests {
                 quota: InvokerConcurrencyQuota::new(0, concurrency_limit),
                 status_store: Default::default(),
                 invocation_state_machine_manager: Default::default(),
+                memory_pool: MemoryPool::unlimited(),
+                pending_memory_lease: None,
             };
             (input_tx, status_tx, service_inner)
         }
@@ -1739,6 +1892,21 @@ mod tests {
                 partition_tx,
             );
             partition_rx
+        }
+
+        /// Helper for tests: Create an outbound budget from the mock's unlimited pool.
+        fn test_budget(&self) -> LocalMemoryPool {
+            let upper_bound = match NonZeroUsize::new(self.memory_pool.capacity().as_usize()) {
+                None => NonZeroByteCount::new(NonZeroUsize::MAX),
+                Some(cap) => NonZeroByteCount::new(cap),
+            };
+            let initial_lease = self.memory_pool.empty_lease();
+            LocalMemoryPool::new(
+                self.memory_pool.clone(),
+                initial_lease,
+                ByteCount::ZERO,
+                upper_bound,
+            )
         }
 
         /// Helper for tests: Process the registered retry timers until all timers have fired.
@@ -1774,7 +1942,6 @@ mod tests {
             IR,
             mpsc::UnboundedSender<InvocationTaskOutput>,
             mpsc::UnboundedReceiver<Notification>,
-            InvokeInputJournal,
         ) -> Fut,
         IR: InvocationReader + Clone + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
@@ -1789,8 +1956,8 @@ mod tests {
             storage_reader: IR,
             invoker_tx: mpsc::UnboundedSender<InvocationTaskOutput>,
             invoker_rx: mpsc::UnboundedReceiver<Notification>,
-            input_journal: InvokeInputJournal,
             task_pool: &mut JoinSet<()>,
+            _budget: LocalMemoryPool,
         ) -> AbortHandle {
             task_pool
                 .build_task()
@@ -1802,7 +1969,6 @@ mod tests {
                     storage_reader,
                     invoker_tx,
                     invoker_rx,
-                    input_journal,
                 ))
                 .expect("to spawn invocation task")
         }
@@ -1823,8 +1989,8 @@ mod tests {
             _storage_reader: SR,
             _invoker_tx: mpsc::UnboundedSender<InvocationTaskOutput>,
             _invoker_rx: mpsc::UnboundedReceiver<Notification>,
-            _input_journal: InvokeInputJournal,
             task_pool: &mut JoinSet<()>,
+            _budget: LocalMemoryPool,
         ) -> AbortHandle {
             task_pool.spawn(pending())
         }
@@ -1844,8 +2010,8 @@ mod tests {
             _storage_reader: SR,
             _invoker_tx: mpsc::UnboundedSender<InvocationTaskOutput>,
             _invoker_rx: mpsc::UnboundedReceiver<Notification>,
-            _input_journal: InvokeInputJournal,
             task_pool: &mut JoinSet<()>,
+            _budget: LocalMemoryPool,
         ) -> AbortHandle {
             self.fetch_add(1, Ordering::SeqCst);
             task_pool.spawn(pending())
@@ -1951,6 +2117,7 @@ mod tests {
             entry_enricher::test_util::MockEntryEnricher,
             None,
             None,
+            MemoryPool::unlimited(),
         );
 
         let mut handle = service.handle();
@@ -1978,12 +2145,7 @@ mod tests {
             )
             .unwrap();
         handle
-            .invoke(
-                partition_leader_epoch,
-                invocation_id,
-                invocation_target,
-                InvokeInputJournal::NoCachedJournal,
-            )
+            .invoke(partition_leader_epoch, invocation_id, invocation_target)
             .unwrap();
 
         // If input order between 'register partition' and 'invoke' is not maintained, then it can happen
@@ -2012,7 +2174,7 @@ mod tests {
         let invocation_id_2 = InvocationId::mock_random();
 
         let (_invoker_tx, _status_tx, mut service_inner) = ServiceInner::mock(
-            |_, _, _, _, _, _, _| ready(()),
+            |_, _, _, _, _, _| ready(()),
             MockSchemas(
                 // fixed amount of retries so that an invocation eventually completes with a failure
                 Some(RetryPolicy::fixed_delay(Duration::ZERO, Some(1))),
@@ -2030,7 +2192,6 @@ mod tests {
                 partition: MOCK_PARTITION,
                 invocation_id: invocation_id_1,
                 invocation_target: InvocationTarget::mock_virtual_object(),
-                journal: InvokeInputJournal::NoCachedJournal,
             }))
             .await;
         segment_queue
@@ -2040,7 +2201,6 @@ mod tests {
                 partition: MOCK_PARTITION,
                 invocation_id: invocation_id_2,
                 invocation_target: InvocationTarget::mock_virtual_object(),
-                journal: InvokeInputJournal::NoCachedJournal,
             }))
             .await;
 
@@ -2119,7 +2279,6 @@ mod tests {
              _service_id,
              _storage_reader,
              invoker_tx: mpsc::UnboundedSender<InvocationTaskOutput>,
-             _,
              _| {
                 let _ = invoker_tx.send(InvocationTaskOutput {
                     partition,
@@ -2143,12 +2302,13 @@ mod tests {
         let _ = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Invoke the service
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &invoker_options,
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // We should receive the new entry here
@@ -2171,6 +2331,7 @@ mod tests {
                 MOCK_PARTITION,
                 invocation_id,
                 InvokerError::EmptySuspensionMessage, /* any error is fine */
+                service_inner.test_budget(),
             )
             .await;
 
@@ -2200,8 +2361,7 @@ mod tests {
                   invocation_target,
                   _storage_reader,
                   _invoker_tx,
-                  _invoker_rx,
-                  _input_journal| {
+                  _invoker_rx| {
                 let task_started_tx = task_started_tx.clone();
                 async move {
                     // Signal that the task has started
@@ -2252,25 +2412,20 @@ mod tests {
                 MOCK_PARTITION,
                 invocation_id,
                 InvokerError::SdkV2(SdkInvocationErrorV2::unknown()),
+                service_inner.test_budget(),
             )
             .await;
 
         // Fire the retry timer using the helper that retrieves the key from the ISM
         service_inner.process_retry_timers(&invoker_options).await;
 
-        // Create a notification
-        let notification = RawNotification::new(
-            NotificationType::Completion(CompletionType::Run),
-            NotificationId::CompletionId(1),
-            Bytes::default(),
-        );
-
-        // Send the notification
+        // Send the notification with completion id 1
         service_inner.handle_notification(
             &invoker_options,
             MOCK_PARTITION,
             invocation_id,
-            notification,
+            0, // entry index does not matter as we are not reading this notification
+            NotificationId::CompletionId(1),
         );
 
         let (partition, id, target) = task_started_rx.recv().await.unwrap();
@@ -2288,12 +2443,13 @@ mod tests {
         let _effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Start an invocation with epoch 0
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &InvokerOptions::default(),
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // Simulate a transient failure to populate last_retry_attempt_failure
@@ -2302,6 +2458,7 @@ mod tests {
                 MOCK_PARTITION,
                 invocation_id,
                 InvokerError::SdkV2(SdkInvocationErrorV2::unknown()),
+                service_inner.test_budget(),
             )
             .await;
 
@@ -2373,12 +2530,13 @@ mod tests {
         let mut effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Start invocation epoch 0
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &invoker_options,
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // Select protocol V4 to allow proposing events
@@ -2396,7 +2554,12 @@ mod tests {
             error: InvocationError::new(codes::INTERNAL, "boom").into(),
         });
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, error_a)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                error_a,
+                service_inner.test_budget(),
+            )
             .await;
         assert_that!(
             *effects_rx
@@ -2420,7 +2583,12 @@ mod tests {
             error: InvocationError::new(codes::INTERNAL, "boom").into(),
         });
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, error_a_same)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                error_a_same,
+                service_inner.test_budget(),
+            )
             .await;
         assert!(
             effects_rx.try_recv().is_err(),
@@ -2437,7 +2605,12 @@ mod tests {
             error: InvocationError::new(codes::INTERNAL, "boom-2").into(),
         });
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, error_b)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                error_b,
+                service_inner.test_budget(),
+            )
             .await;
         assert_that!(
             *effects_rx
@@ -2463,12 +2636,13 @@ mod tests {
         let _rx = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Start invocation epoch 0
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &InvokerOptions::default(),
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // Abort error
@@ -2477,6 +2651,7 @@ mod tests {
                 MOCK_PARTITION,
                 invocation_id,
                 InvokerError::AbortTimeoutFired(Duration::from_secs(10).into()),
+                service_inner.test_budget(),
             )
             .await;
 
@@ -2515,18 +2690,24 @@ mod tests {
         let mut effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Start invocation
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &invoker_options,
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // First transient error -> schedules retry (because 1 attempt available)
         let error_a = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, error_a)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                error_a,
+                service_inner.test_budget(),
+            )
             .await;
         // There might be an extra transient error event proposed; drain if present
         let _ = effects_rx.try_recv();
@@ -2537,7 +2718,12 @@ mod tests {
         // Second transient error -> retries exhausted and Pause behavior -> expect Paused effect
         let error_b = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, error_b)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                error_b,
+                service_inner.test_budget(),
+            )
             .await;
 
         let effect = effects_rx
@@ -2610,12 +2796,13 @@ mod tests {
         let mut effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Start invocation
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &invoker_options,
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // Pin deployment (switches policy to Kill and resets attempts)
@@ -2625,7 +2812,12 @@ mod tests {
         // First transient failure after pin -> schedules retry
         let err1 = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, err1)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                err1,
+                service_inner.test_budget(),
+            )
             .await;
         // Drain any proposed event
         effects_rx.try_recv().unwrap();
@@ -2634,7 +2826,12 @@ mod tests {
         // Second transient failure after pin -> schedules retry (attempts now exhausted)
         let err2 = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, err2)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                err2,
+                service_inner.test_budget(),
+            )
             .await;
         effects_rx.try_recv().unwrap_err();
         service_inner.process_retry_timers(&invoker_options).await;
@@ -2646,7 +2843,12 @@ mod tests {
         // Next failure should hit OnMaxAttempts::Kill immediately (no more retries)
         let err3 = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, err3)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                err3,
+                service_inner.test_budget(),
+            )
             .await;
 
         let effect = effects_rx
@@ -2677,18 +2879,24 @@ mod tests {
         let mut effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Start invocation
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &invoker_options,
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // Simulate a transient error to put invocation in WaitingRetry state
         let error = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, error)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                error,
+                service_inner.test_budget(),
+            )
             .await;
         // Drain any proposed event
         let _ = effects_rx.try_recv();
@@ -2739,12 +2947,13 @@ mod tests {
         let mut effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Start invocation (goes to InFlight state with pending task)
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &invoker_options,
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // Call manual pause while in flight
@@ -2799,12 +3008,13 @@ mod tests {
         let mut effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Start invocation (goes to InFlight state with pending task)
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &invoker_options,
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // Call manual pause while in flight
@@ -2822,7 +3032,12 @@ mod tests {
         // Simulate the invocation task failing with a transient error
         let error = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, error)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                error,
+                service_inner.test_budget(),
+            )
             .await;
 
         // Should emit Paused effect (not Kill or ScheduleRetry) with last_failure set
@@ -2860,18 +3075,24 @@ mod tests {
         let mut effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
 
         // Start invocation
+        let budget = service_inner.test_budget();
         service_inner.handle_invoke(
             &invoker_options,
             MOCK_PARTITION,
             invocation_id,
             InvocationTarget::mock_virtual_object(),
-            InvokeInputJournal::NoCachedJournal,
+            budget,
         );
 
         // Simulate a transient error to put invocation in WaitingRetry state
         let error = InvokerError::SdkV2(SdkInvocationErrorV2::unknown());
         service_inner
-            .handle_invocation_task_failed(MOCK_PARTITION, invocation_id, error)
+            .handle_invocation_task_failed(
+                MOCK_PARTITION,
+                invocation_id,
+                error,
+                service_inner.test_budget(),
+            )
             .await;
         // Drain any proposed event
         let _ = effects_rx.try_recv();
@@ -2901,5 +3122,143 @@ mod tests {
                 })
             })
         );
+    }
+
+    /// When the yield flag is disabled (default), budget exhaustion falls back to the
+    /// retry path without bumping the retry count.
+    #[test(restate_core::test(start_paused = true))]
+    async fn yield_flag_disabled_falls_back_to_retry() {
+        let invoker_options = InvokerOptionsBuilder::default()
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
+            .disable_eager_state(false)
+            .message_size_warning(NonZeroUsize::new(1024).unwrap().into())
+            .message_size_limit(None)
+            .build()
+            .unwrap();
+        let invocation_id = InvocationId::mock_random();
+
+        let (_, _status_tx, mut service_inner) = ServiceInner::mock(
+            (),
+            MockSchemas(
+                Some(RetryPolicy::fixed_delay(Duration::from_millis(100), None)),
+                None,
+            ),
+            None,
+        );
+        let mut effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
+
+        let budget = service_inner.test_budget();
+        service_inner.handle_invoke(
+            &invoker_options,
+            MOCK_PARTITION,
+            invocation_id,
+            InvocationTarget::mock_virtual_object(),
+            budget,
+        );
+
+        // Simulate yield from invocation task (flag disabled by default)
+        service_inner
+            .handle_invocation_task_should_yield(
+                MOCK_PARTITION,
+                invocation_id,
+                InvocationMemoryExhausted {
+                    needed: NonZeroByteCount::new(NonZeroUsize::new(32768).unwrap()),
+                    kind: OutOfMemoryKind::PoolExhausted,
+                    context: "test",
+                },
+                service_inner.test_budget(),
+            )
+            .await;
+
+        // Should NOT emit EffectKind::Yield — instead the error goes through retry
+        // The ISM should be in WaitingRetry state (error was handled as OutOfMemory)
+        assert!(service_inner.is_invocation_waiting_retry(MOCK_PARTITION, &invocation_id));
+
+        // No Yield effect should be emitted, but a transient error event should be
+        let effect = effects_rx
+            .try_recv()
+            .expect("expected a transient error event");
+        assert_that!(
+            *effect,
+            pat!(Effect {
+                invocation_id: eq(invocation_id),
+                kind: pat!(EffectKind::JournalEvent {
+                    event: predicate(|e: &RawEvent| e.ty() == EventType::TransientError)
+                })
+            })
+        );
+    }
+
+    /// When the yield flag is enabled, the invoker sends EffectKind::Yield and
+    /// releases the invocation slot.
+    #[test(restate_core::test(start_paused = true))]
+    async fn yield_flag_enabled_sends_yield_effect() {
+        // Enable the experimental yield flag
+        let mut config = Configuration::default();
+        config.common.experimental_enable_invoker_yield = true;
+        restate_types::config::set_current_config(config);
+
+        let invoker_options = InvokerOptionsBuilder::default()
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
+            .disable_eager_state(false)
+            .message_size_warning(NonZeroUsize::new(1024).unwrap().into())
+            .message_size_limit(None)
+            .build()
+            .unwrap();
+        let invocation_id = InvocationId::mock_random();
+
+        let (_, _status_tx, mut service_inner) = ServiceInner::mock(
+            (),
+            MockSchemas(
+                Some(RetryPolicy::fixed_delay(Duration::from_millis(100), None)),
+                None,
+            ),
+            None,
+        );
+        let mut effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
+
+        let budget = service_inner.test_budget();
+        service_inner.handle_invoke(
+            &invoker_options,
+            MOCK_PARTITION,
+            invocation_id,
+            InvocationTarget::mock_virtual_object(),
+            budget,
+        );
+
+        // Simulate yield from invocation task
+        service_inner
+            .handle_invocation_task_should_yield(
+                MOCK_PARTITION,
+                invocation_id,
+                InvocationMemoryExhausted {
+                    needed: NonZeroByteCount::new(NonZeroUsize::new(32768).unwrap()),
+                    kind: OutOfMemoryKind::PoolExhausted,
+                    context: "test",
+                },
+                service_inner.test_budget(),
+            )
+            .await;
+
+        // Should emit EffectKind::Yield
+        let effect = effects_rx
+            .try_recv()
+            .expect("expected Yield effect to be emitted");
+        assert_that!(
+            *effect,
+            pat!(Effect {
+                invocation_id: eq(invocation_id),
+                kind: pat!(EffectKind::Yield(pat!(
+                    YieldReason::ExhaustedMemoryBudget {
+                        needed_memory: eq(NonZeroByteCount::new(NonZeroUsize::new(32768).unwrap())),
+                    }
+                )))
+            })
+        );
+
+        // The invocation should no longer be tracked (slot released)
+        assert!(service_inner.quota.is_slot_available());
     }
 }

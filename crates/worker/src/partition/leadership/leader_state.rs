@@ -26,6 +26,7 @@ use restate_bifrost::CommitToken;
 use restate_core::network::{Oneshot, Reciprocal};
 use restate_core::{Metadata, MetadataKind, TaskCenter, TaskHandle, TaskId};
 use restate_futures_util::concurrency::Permit;
+use restate_memory::MemoryPool;
 use restate_partition_store::{PartitionDb, PartitionStore};
 use restate_storage_api::vqueue_table::EntryCard;
 use restate_types::identifiers::{
@@ -473,6 +474,7 @@ impl LeaderState {
         invoker_tx: &mut impl restate_invoker_api::InvokerHandle<InvokerStorageReader<PartitionStore>>,
         actions: impl Iterator<Item = Action>,
         vqueues: VQueuesMeta<'_>,
+        memory_pool: &MemoryPool,
     ) -> Result<(), Error> {
         for action in actions {
             let action_name = action.name();
@@ -487,7 +489,7 @@ impl LeaderState {
             )
             .increment(1);
 
-            self.handle_action(action, invoker_tx, vqueues)?;
+            self.handle_action(action, invoker_tx, vqueues, memory_pool)?;
         }
 
         Ok(())
@@ -498,20 +500,15 @@ impl LeaderState {
         action: Action,
         invoker_tx: &mut impl restate_invoker_api::InvokerHandle<InvokerStorageReader<PartitionStore>>,
         vqueues: VQueuesMeta<'_>,
+        memory_pool: &MemoryPool,
     ) -> Result<(), Error> {
         let partition_leader_epoch = (self.partition_id, self.leader_epoch);
         match action {
             Action::Invoke {
                 invocation_id,
                 invocation_target,
-                invoke_input_journal,
             } => invoker_tx
-                .invoke(
-                    partition_leader_epoch,
-                    invocation_id,
-                    invocation_target,
-                    invoke_input_journal,
-                )
+                .invoke(partition_leader_epoch, invocation_id, invocation_target)
                 .map_err(Error::Invoker)?,
             Action::NewOutboxMessage {
                 seq_number,
@@ -535,9 +532,9 @@ impl LeaderState {
             }
             Action::ForwardCompletion {
                 invocation_id,
-                completion,
+                entry_index,
             } => invoker_tx
-                .notify_completion(partition_leader_epoch, invocation_id, completion)
+                .notify_completion(partition_leader_epoch, invocation_id, entry_index)
                 .map_err(Error::Invoker)?,
             Action::AbortInvocation { invocation_id } => invoker_tx
                 .abort_invocation(partition_leader_epoch, invocation_id)
@@ -580,10 +577,16 @@ impl LeaderState {
             }
             Action::ForwardNotification {
                 invocation_id,
-                notification,
+                entry_index,
+                notification_id,
             } => {
                 invoker_tx
-                    .notify_notification(partition_leader_epoch, invocation_id, notification)
+                    .notify_notification(
+                        partition_leader_epoch,
+                        invocation_id,
+                        entry_index,
+                        notification_id,
+                    )
                     .map_err(Error::Invoker)?;
             }
             Action::ForwardKillResponse {
@@ -654,14 +657,16 @@ impl LeaderState {
                 item_hash,
                 invocation_id,
                 invocation_target,
-                invoke_input_journal,
             } => {
-                let permit = self.scheduler.pop_permit(item_hash).unwrap_or_else(|| {
-                    tracing::warn!(
-                        "Cannot find a permit for item hash {item_hash} in scheduler. Will not respect the invoker limit for this invocation"
-                    );
-                    Permit::new_empty()
-                });
+                let (permit, memory_lease) = match self.scheduler.pop_resources(item_hash) {
+                    Some(resources) => (resources.permit, resources.memory_lease),
+                    None => {
+                        tracing::warn!(
+                            "Cannot find resources for item hash {item_hash} in scheduler. Will not respect the invoker limit for this invocation"
+                        );
+                        (Permit::new_empty(), memory_pool.empty_lease())
+                    }
+                };
                 invoker_tx
                     .vqueue_invoke(
                         partition_leader_epoch,
@@ -669,7 +674,7 @@ impl LeaderState {
                         permit,
                         invocation_id,
                         invocation_target,
-                        invoke_input_journal,
+                        memory_lease,
                     )
                     .map_err(Error::Invoker)?
             }

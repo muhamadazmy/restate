@@ -254,6 +254,9 @@ pub enum DurabilityMode {
 pub const DEFAULT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 // Changed from 60s to 10min in response to issue #3961
 pub const DEFAULT_ABORT_TIMEOUT: Duration = Duration::from_secs(600);
+/// Default per-invocation initial memory for the outbound budget.
+pub const DEFAULT_PER_INVOCATION_INITIAL_MEMORY: NonZeroByteCount =
+    NonZeroByteCount::new(NonZeroUsize::new(32 * 1024).unwrap());
 
 /// # Invoker options
 #[serde_as]
@@ -318,7 +321,22 @@ pub struct InvokerOptions {
     /// Number of concurrent invocations that can be processed by the invoker.
     concurrent_invocations_limit: Option<NonZeroUsize>,
 
+    /// # Eager state size limit (since v1.6.3)
+    ///
+    /// Maximum total size (in bytes) of state entries to send eagerly in the StartMessage.
+    /// When the total size of state entries exceeds this limit, only a partial state is sent
+    /// and the service will fetch remaining state lazily using GetEagerState commands.
+    ///
+    /// Set to `0` to disable eager state entirely (equivalent to enabling lazy state).
+    ///
+    /// This helps reduce memory pressure on deployments for services with large state.
+    /// If unset, defaults to `message-size-limit` (clamped to that value if set higher).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eager_state_size_limit: Option<ByteCount>,
+
     // -- Private config options (not exposed in the schema)
+    /// Deprecated since v1.6.3: Use `eager_state_size_limit` with a value of `0` instead.
+    /// When true, treated as `eager_state_size_limit = 0` (no eager state).
     #[cfg_attr(feature = "schemars", schemars(skip))]
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub disable_eager_state: bool,
@@ -348,6 +366,42 @@ pub struct InvokerOptions {
     /// When `unset`, no throttling is applied and actions are processed
     /// without throttling.
     pub action_throttling: Option<ThrottlingOptions>,
+
+    /// # Memory limit
+    ///
+    /// Global memory budget for the invoker, shared across all partitions on this node.
+    /// This controls how much memory can be used for in-flight journal entries, state,
+    /// and protocol messages between the invoker and service deployments.
+    ///
+    /// To effectively disable memory limiting, set this to a very large value.
+    ///
+    /// Since v1.6.3
+    pub memory_limit: NonZeroByteCount,
+
+    /// # Per-invocation memory limit
+    ///
+    /// Maximum memory (in bytes) a single invocation may use per direction (inbound and
+    /// outbound). Once an invocation's directional budget reaches this ceiling it must
+    /// wait for in-flight data to be consumed or yield back to the scheduler.
+    ///
+    /// If unset, defaults to `message-size-limit`. If set, it will be clamped at
+    /// the value of `message-size-limit`.
+    ///
+    /// Since v1.6.3
+    #[serde(skip_serializing_if = "Option::is_none")]
+    per_invocation_memory_limit: Option<ByteCount>,
+
+    /// # Per-invocation initial memory
+    ///
+    /// Memory (in bytes) reserved from the global memory pool before an invocation
+    /// starts. Used for the outbound budget and acts as the minimum reserved floor.
+    ///
+    /// Smaller values allow more concurrent invocations but may cause frequent
+    /// round-trips to the global pool. Larger values reduce contention but limit
+    /// maximum concurrency.
+    ///
+    /// Since v1.6.3
+    pub per_invocation_initial_memory: NonZeroByteCount,
 }
 
 impl InvokerOptions {
@@ -380,12 +434,62 @@ impl InvokerOptions {
         }
     }
 
+    /// Resolved per-invocation per-direction memory upper bound.
+    /// Falls back to `message_size_limit()` when unset.
+    pub fn per_invocation_memory_limit(&self) -> NonZeroByteCount {
+        self.per_invocation_memory_limit
+            .and_then(|v| NonZeroUsize::new(v.as_usize()))
+            .map(NonZeroByteCount::new)
+            .unwrap_or(NonZeroByteCount::new(self.message_size_limit()))
+    }
+
+    /// Resolved eager state size limit in bytes. After `merge()`, this is guaranteed
+    /// to be clamped to the message size limit. `0` means eager state is disabled.
+    pub fn eager_state_size_limit(&self) -> usize {
+        self.eager_state_size_limit
+            .map(|v| v.as_usize())
+            .unwrap_or(self.message_size_limit().get())
+    }
+
     pub(crate) fn merge(&mut self, opts: &NetworkingOptions) {
         self.message_size_limit = Some(
             self.message_size_limit
                 .map(|limit| limit.min(opts.message_size_limit))
                 .unwrap_or(opts.message_size_limit),
         );
+
+        // Resolve per_invocation_memory_limit, clamped to message_size_limit
+        self.per_invocation_memory_limit = Some(
+            self.per_invocation_memory_limit
+                .map(|limit| limit.min(opts.message_size_limit.into()))
+                .unwrap_or(opts.message_size_limit.into()),
+        );
+
+        // Fuse deprecated disable_eager_state into eager_state_size_limit
+        if self.disable_eager_state {
+            if self.eager_state_size_limit.is_some_and(|v| v.as_u64() > 0) {
+                warn!(
+                    "Both 'disable-eager-state' and 'eager-state-size-limit' are set; \
+                     'eager-state-size-limit' takes precedence. \
+                     'disable-eager-state' is deprecated, use 'eager-state-size-limit = \"0\"' instead."
+                );
+            } else if self.eager_state_size_limit.is_none() {
+                self.eager_state_size_limit = Some(ByteCount::ZERO);
+            }
+        }
+
+        // Clamp eager_state_size_limit to the resolved message_size_limit.
+        // The eager_state_size_limit must not be larger than the per_invocation_memory_limit
+        // because that's the maximum amount of memory used for the outbound/inbound direction.
+        self.eager_state_size_limit = Some(
+            self.eager_state_size_limit
+                .unwrap_or(opts.message_size_limit.into()),
+        )
+        .map(|limit| {
+            limit
+                .min(opts.message_size_limit.into())
+                .min(self.per_invocation_memory_limit.unwrap_or(ByteCount::MAX))
+        });
     }
 }
 
@@ -401,9 +505,15 @@ impl Default for InvokerOptions {
             message_size_limit: None,
             tmp_dir: None,
             concurrent_invocations_limit: Some(NonZeroUsize::new(1000).expect("is non zero")),
+            eager_state_size_limit: None,
             disable_eager_state: false,
             invocation_throttling: None,
             action_throttling: None,
+            memory_limit: NonZeroByteCount::new(
+                NonZeroUsize::new(256 * 1024 * 1024).unwrap(), // 256 MiB
+            ),
+            per_invocation_memory_limit: None,
+            per_invocation_initial_memory: DEFAULT_PER_INVOCATION_INITIAL_MEMORY,
         }
     }
 }

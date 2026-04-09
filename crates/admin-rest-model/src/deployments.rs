@@ -13,7 +13,7 @@ use restate_serde_util::SerdeableHeaderHashMap;
 use restate_types::identifiers::ServiceRevision;
 use restate_types::identifiers::{DeploymentId, LambdaARN};
 use restate_types::schema::deployment::{EndpointLambdaCompression, ProtocolType};
-use restate_types::schema::info::Info;
+use restate_types::schema::info::SchemaInfo;
 use restate_types::schema::service::ServiceMetadata;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -61,7 +61,7 @@ pub enum RegisterDeploymentRequest {
         /// # Breaking
         ///
         /// If `true`, it allows registering new service revisions with
-        /// schemas incompatible with previous service revisions, such as changing service type, removing a handler, etc.
+        /// schemas incompatible with previous service revisions, such as changing the service type.
         ///
         /// See the [versioning documentation](https://docs.restate.dev/operate/versioning) for more information.
         #[serde(default = "restate_serde_util::default::bool::<false>")]
@@ -113,7 +113,7 @@ pub enum RegisterDeploymentRequest {
         /// # Breaking
         ///
         /// If `true`, it allows registering new service revisions with
-        /// schemas incompatible with previous service revisions, such as changing service type, removing a handler, etc.
+        /// schemas incompatible with previous service revisions, such as changing the service type.
         ///
         /// See the [versioning documentation](https://docs.restate.dev/operate/versioning) for more information.
         #[serde(default = "restate_serde_util::default::bool::<false>")]
@@ -176,7 +176,7 @@ pub struct RegisterDeploymentResponse {
     ///
     /// List of configuration/deprecation information related to this deployment.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub info: Vec<Info>,
+    pub info: Vec<SchemaInfo>,
 }
 
 /// List of all registered deployments
@@ -258,7 +258,7 @@ pub enum DeploymentResponse {
         ///
         /// List of configuration/deprecation information related to this deployment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        info: Vec<Info>,
+        info: Vec<SchemaInfo>,
     },
     /// Deployment response for Lambda deployments
     #[cfg_attr(feature = "schema", schema(title = "LambdaDeploymentResponse"))]
@@ -324,7 +324,7 @@ pub enum DeploymentResponse {
         ///
         /// List of configuration/deprecation information related to this deployment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        info: Vec<Info>,
+        info: Vec<SchemaInfo>,
     },
 }
 
@@ -408,7 +408,7 @@ pub enum DetailedDeploymentResponse {
         ///
         /// List of configuration/deprecation information related to this deployment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        info: Vec<Info>,
+        info: Vec<SchemaInfo>,
     },
     /// Detailed deployment response for Lambda deployments
     #[cfg_attr(feature = "schema", schema(title = "LambdaDetailedDeploymentResponse"))]
@@ -475,7 +475,7 @@ pub enum DetailedDeploymentResponse {
         ///
         /// List of configuration/deprecation information related to this deployment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        info: Vec<Info>,
+        info: Vec<SchemaInfo>,
     },
 }
 

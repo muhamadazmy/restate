@@ -29,7 +29,7 @@ use restate_core::network::{Oneshot, Reciprocal, TransportConnect};
 use restate_core::{ShutdownError, TaskCenter, TaskKind, my_node_id};
 use restate_errors::NotRunningError;
 use restate_ingestion_client::IngestionClient;
-use restate_invoker_api::InvokeInputJournal;
+
 use restate_invoker_api::capacity::InvokerCapacity;
 use restate_partition_store::PartitionStore;
 use restate_storage_api::{StorageError, vqueue_table};
@@ -46,7 +46,7 @@ use restate_timer::TokioClock;
 use restate_types::cluster::cluster_state::RunMode;
 use restate_types::config::Configuration;
 use restate_types::errors::GenericError;
-use restate_types::identifiers::{LeaderEpoch, PartitionLeaderEpoch};
+use restate_types::identifiers::{LeaderEpoch, PartitionId, PartitionLeaderEpoch};
 use restate_types::identifiers::{PartitionKey, PartitionProcessorRpcRequestId};
 use restate_types::logs::Keys;
 use restate_types::message::MessageIndex;
@@ -202,6 +202,10 @@ where
 
     pub(crate) fn is_leader(&self) -> bool {
         matches!(self.state, State::Leader(_))
+    }
+
+    pub(crate) fn partition_id(&self) -> PartitionId {
+        self.partition.partition_id
     }
 
     pub fn effective_mode(&self) -> RunMode {
@@ -402,6 +406,8 @@ where
                 SchedulerService::create(
                     self.invoker_capacity.concurrency.clone(),
                     self.invoker_capacity.invocation_token_bucket.clone(),
+                    self.invoker_capacity.memory_pool.clone(),
+                    self.invoker_capacity.initial_invocation_memory,
                     partition_store.partition_db().clone(),
                     vqueues_cache,
                 )
@@ -557,12 +563,7 @@ where
                     invocation_target,
                 } = invoked_invocation?;
                 invoker_handle
-                    .invoke(
-                        partition_leader_epoch,
-                        invocation_id,
-                        invocation_target,
-                        InvokeInputJournal::NoCachedJournal,
-                    )
+                    .invoke(partition_leader_epoch, invocation_id, invocation_target)
                     .map_err(Error::Invoker)?;
                 count += 1;
             }
@@ -602,7 +603,12 @@ where
                 // nothing to do :-)
             }
             State::Leader(leader_state) => {
-                leader_state.handle_actions(&mut self.invoker_tx, actions, vqueues)?;
+                leader_state.handle_actions(
+                    &mut self.invoker_tx,
+                    actions,
+                    vqueues,
+                    &self.invoker_capacity.memory_pool,
+                )?;
             }
         }
 

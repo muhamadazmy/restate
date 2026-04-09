@@ -15,25 +15,31 @@ mod service_protocol_runner_v4;
 use super::Notification;
 
 use std::collections::HashSet;
-use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
+use std::convert::Infallible;
+
 use bytes::Bytes;
-use futures::{FutureExt, Stream};
+use futures::{FutureExt, Stream, StreamExt};
 use http::response::Parts as ResponseParts;
 use http::{HeaderName, HeaderValue, Response};
 use http_body::{Body, Frame};
-use metrics::histogram;
+use http_body_util::StreamBody;
+use metrics::{counter, histogram};
+use restate_memory::{LocalMemoryLease, LocalMemoryPool};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::task::AbortOnDropHandle;
-use tracing::instrument;
+use tracing::{debug, instrument};
 
-use restate_invoker_api::invocation_reader::{InvocationReader, InvocationReaderTransaction};
-use restate_invoker_api::{EntryEnricher, InvokeInputJournal};
+use restate_invoker_api::invocation_reader::{
+    EagerState, InvocationReader, InvocationReaderTransaction, JournalKind,
+};
+use restate_invoker_api::{EntryEnricher, InvocationReaderError};
+use restate_serde_util::{ByteCount, NonZeroByteCount};
 use restate_service_client::{Request, ResponseBody, ServiceClient, ServiceClientError};
 use restate_types::deployment::PinnedDeployment;
 use restate_types::identifiers::{InvocationId, PartitionLeaderEpoch};
@@ -49,9 +55,9 @@ use restate_types::schema::invocation_target::InvocationTargetResolver;
 use restate_types::service_protocol::ServiceProtocolVersion;
 
 use crate::TokenBucket;
-use crate::error::InvokerError;
+use crate::error::{InvocationMemoryExhausted, InvokerError};
 use crate::invocation_task::service_protocol_runner::ServiceProtocolRunner;
-use crate::metric_definitions::{ID_LOOKUP, INVOKER_TASK_DURATION};
+use crate::metric_definitions::{ID_LOOKUP, INVOKER_EAGER_STATE_TRUNCATED, INVOKER_TASK_DURATION};
 
 // Clippy false positive, might be caused by Bytes contained within HeaderValue.
 // https://github.com/rust-lang/rust/issues/40543#issuecomment-1212981256
@@ -81,6 +87,62 @@ const SERVICE_PROTOCOL_VERSION_V6: HeaderValue =
 
 #[allow(clippy::declare_interior_mutable_const)]
 const X_RESTATE_SERVER: HeaderName = HeaderName::from_static("x-restate-server");
+
+/// Collects state entries from an [`EagerState`] stream, respecting a size limit.
+///
+/// Returns a tuple of `(is_partial, entries, memory_lease)` where:
+/// - `is_partial` is true if the state was already partial or if collection stopped due to size limit
+/// - `entries` contains the collected and mapped key-value bytes
+/// - `memory_lease` represents the memory that entries occupy
+///
+/// If the first entry already exceeds the size limit, then an empty entries [`Vec`] is returned.
+async fn collect_eager_state<S, E, T>(
+    state: Option<EagerState<S>>,
+    size_limit: usize,
+    mut mapper: impl FnMut((Bytes, Bytes)) -> T,
+) -> Result<(bool, Vec<T>, Option<LocalMemoryLease>), InvokerError>
+where
+    S: Stream<Item = Result<(Bytes, Bytes, LocalMemoryLease), E>> + Send,
+    E: InvocationReaderError,
+{
+    let Some(state) = state else {
+        return Ok((true, Vec::new(), None));
+    };
+
+    let mut is_partial = state.is_partial();
+    let mut merged_lease: Option<LocalMemoryLease> = None;
+    let mut entries = Vec::new();
+    let mut total_size: usize = 0;
+
+    let mut stream = std::pin::pin!(state.into_inner());
+    while let Some(result) = stream.as_mut().next().await {
+        let (key, value, lease) = result.map_err(InvokerError::from_state_reader)?;
+        let entry_size = key.len() + value.len();
+
+        // Check if adding this entry would exceed the limit
+        if total_size.saturating_add(entry_size) > size_limit {
+            debug!(
+                "Eager state size limit reached ({}, limit: {}), \
+                 sending partial state with {} entries",
+                ByteCount::from(total_size),
+                ByteCount::from(size_limit),
+                entries.len()
+            );
+            counter!(INVOKER_EAGER_STATE_TRUNCATED).increment(1);
+            is_partial = true;
+            break;
+        }
+
+        total_size = total_size.saturating_add(entry_size);
+        entries.push(mapper((key, value)));
+        match &mut merged_lease {
+            Some(existing) => existing.merge(lease),
+            None => merged_lease = Some(lease),
+        }
+    }
+
+    Ok((is_partial, entries, merged_lease))
+}
 
 pub(super) struct InvocationTaskOutput {
     pub(super) partition: PartitionLeaderEpoch,
@@ -118,19 +180,59 @@ pub(super) enum InvocationTaskOutputInner {
     Closed,
     Suspended(HashSet<EntryIndex>),
     SuspendedV2(HashSet<NotificationId>),
-    Failed(InvokerError),
+    Failed(InvokerError, LocalMemoryPool),
+    /// The invocation task yielded due to memory pressure.
+    /// The budget was dropped, returning memory to the global pool.
+    ShouldYield {
+        oom: InvocationMemoryExhausted,
+        budget: LocalMemoryPool,
+    },
 }
 
-impl From<InvokerError> for InvocationTaskOutputInner {
-    fn from(value: InvokerError) -> Self {
-        InvocationTaskOutputInner::Failed(value)
+/// Sender half of the invoker body channel.
+///
+/// Unbounded because backpressure is provided by the memory budget rather than
+/// channel capacity. Each frame's [`Bytes`] may embed a [`LocalMemoryLease`] via
+/// [`Bytes::from_owner`], tying the budget lifetime to the bytes themselves — the
+/// lease is released when hyper (and the network stack) drops the `Bytes`.
+type InvokerBodySender = mpsc::UnboundedSender<Result<Frame<Bytes>, Infallible>>;
+
+/// The HTTP request body type sent to hyper.
+type InvokerBodyType = StreamBody<UnboundedReceiverStream<Result<Frame<Bytes>, Infallible>>>;
+
+/// Combines encoded frame data with a memory budget lease so the lease is
+/// released when hyper drops the [`Bytes`] (after sending on the wire).
+struct LeasedBytes {
+    data: Bytes,
+    _lease: LocalMemoryLease,
+}
+
+impl AsRef<[u8]> for LeasedBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
     }
 }
 
-type InvokerBodyStream =
-    http_body_util::StreamBody<ReceiverStream<Result<Frame<Bytes>, Infallible>>>;
+/// Creates a body frame, optionally embedding a memory lease in the [`Bytes`].
+///
+/// When a lease is provided, it is attached to the bytes via [`Bytes::from_owner`]
+/// so the budget is held exactly as long as hyper holds the data — no circular
+/// dependency between frame N's lease and frame N+1's send.
+fn leased_frame(data: Bytes, lease: Option<LocalMemoryLease>) -> Frame<Bytes> {
+    match lease {
+        Some(lease) => Frame::data(Bytes::from_owner(LeasedBytes {
+            data,
+            _lease: lease,
+        })),
+        None => Frame::data(data),
+    }
+}
 
-type InvokerRequestStreamSender = mpsc::Sender<Result<Frame<Bytes>, Infallible>>;
+fn new_invoker_body(
+    rx: mpsc::UnboundedReceiver<Result<Frame<Bytes>, Infallible>>,
+) -> InvokerBodyType {
+    StreamBody::new(UnboundedReceiverStream::new(rx))
+}
 
 /// Represents an open invocation stream
 pub(super) struct InvocationTask<EE, DMR> {
@@ -143,7 +245,7 @@ pub(super) struct InvocationTask<EE, DMR> {
     invocation_target: InvocationTarget,
     inactivity_timeout: Duration,
     abort_timeout: Duration,
-    disable_eager_state: bool,
+    eager_state_size_limit: usize,
     message_size_warning: NonZeroUsize,
     message_size_limit: NonZeroUsize,
     retry_count_since_last_stored_entry: u32,
@@ -165,6 +267,8 @@ enum TerminalLoopState<T> {
     Suspended(HashSet<EntryIndex>),
     SuspendedV2(HashSet<NotificationId>),
     Failed(InvokerError),
+    /// Memory budget exhausted — the invocation should yield.
+    ShouldYield(InvocationMemoryExhausted),
 }
 
 impl<T> TerminalLoopState<T> {
@@ -181,7 +285,13 @@ impl<T, E: Into<InvokerError>> From<Result<T, E>> for TerminalLoopState<T> {
     fn from(value: Result<T, E>) -> Self {
         match value {
             Ok(v) => TerminalLoopState::Continue(v),
-            Err(e) => TerminalLoopState::Failed(e.into()),
+            Err(e) => {
+                let err = e.into();
+                match err {
+                    InvokerError::OutOfMemory(oom) => TerminalLoopState::ShouldYield(oom),
+                    other => TerminalLoopState::Failed(other),
+                }
+            }
         }
     }
 }
@@ -195,6 +305,7 @@ macro_rules! shortcircuit {
             TerminalLoopState::Closed => return TerminalLoopState::Closed,
             TerminalLoopState::Suspended(v) => return TerminalLoopState::Suspended(v),
             TerminalLoopState::SuspendedV2(v) => return TerminalLoopState::SuspendedV2(v),
+            TerminalLoopState::ShouldYield(oom) => return TerminalLoopState::ShouldYield(oom),
             TerminalLoopState::Failed(e) => return TerminalLoopState::Failed(e),
         }
     };
@@ -213,7 +324,7 @@ where
         invocation_target: InvocationTarget,
         default_inactivity_timeout: Duration,
         default_abort_timeout: Duration,
-        disable_eager_state: bool,
+        eager_state_size_limit: usize,
         message_size_warning: NonZeroUsize,
         message_size_limit: NonZeroUsize,
         retry_count_since_last_stored_entry: u32,
@@ -230,7 +341,7 @@ where
             invocation_target,
             inactivity_timeout: default_inactivity_timeout,
             abort_timeout: default_abort_timeout,
-            disable_eager_state,
+            eager_state_size_limit,
             entry_enricher,
             schemas: deployment_metadata_resolver,
             invoker_tx,
@@ -255,17 +366,21 @@ where
         ),
         skip_all,
     )]
-    pub async fn run<IR>(mut self, input_journal: InvokeInputJournal, mut invocation_reader: IR)
+    pub async fn run<IR>(mut self, mut invocation_reader: IR, mut budget: LocalMemoryPool)
     where
-        IR: InvocationReader,
+        IR: InvocationReader + Clone,
     {
         let start = Instant::now();
-        // Execute the task
         let terminal_state = self
-            .select_protocol_version_and_run(input_journal, &mut invocation_reader)
+            .select_protocol_version_and_run(&mut invocation_reader, &mut budget)
             .await;
 
-        // Sanity check of the final state
+        // Failed and ShouldYield return the budget to the invoker main loop.
+        // Failed: the budget is stashed on the ISM for retry reuse.
+        // ShouldYield: the main loop either drops the budget (yield path) or
+        //   stashes it for retry (error fallback path).
+        // Other terminal states (Closed, Suspended) end the invocation and the
+        // budget is implicitly dropped here.
         let inner = match terminal_state {
             TerminalLoopState::Continue(_) => {
                 unreachable!("This is not supposed to happen. This is a runtime bug")
@@ -273,7 +388,24 @@ where
             TerminalLoopState::Closed => InvocationTaskOutputInner::Closed,
             TerminalLoopState::Suspended(v) => InvocationTaskOutputInner::Suspended(v),
             TerminalLoopState::SuspendedV2(v) => InvocationTaskOutputInner::SuspendedV2(v),
-            TerminalLoopState::Failed(e) => InvocationTaskOutputInner::Failed(e),
+            TerminalLoopState::Failed(e) => {
+                // Best effort to release excessive memory. Note there can still be effects in flight
+                // that are being replicated and thereby occupy memory. Best if we periodically check
+                // again to release memory.
+                budget.release_excess();
+                InvocationTaskOutputInner::Failed(e, budget)
+            }
+            TerminalLoopState::ShouldYield(mut oom) => {
+                // Request at least as much memory as the minimum reserved floor
+                // so that re-scheduling can satisfy the outbound budget.
+                if budget.min_reserved() > oom.needed {
+                    oom.needed = NonZeroByteCount::new(
+                        NonZeroUsize::new(budget.min_reserved().as_usize())
+                            .expect("min_reserved > needed > 0"),
+                    );
+                }
+                InvocationTaskOutputInner::ShouldYield { oom, budget }
+            }
         };
 
         self.send_invoker_tx(inner);
@@ -283,27 +415,26 @@ where
 
     async fn select_protocol_version_and_run<IR>(
         &mut self,
-        input_journal: InvokeInputJournal,
         invocation_reader: &mut IR,
+        invocation_budget: &mut LocalMemoryPool,
     ) -> TerminalLoopState<()>
     where
-        IR: InvocationReader,
+        IR: InvocationReader + Clone,
     {
+        // Clone the reader before creating the transaction. The clone will be passed
+        // to the protocol runner for non-transactional point reads during the bidi-stream
+        // phase (after the transaction is dropped).
+        let reader_for_bidi = invocation_reader.clone();
+
         let mut txn = invocation_reader.transaction();
 
-        // Get journal metadata and cached items (if any)
-        let (journal_metadata, cached_journal_items) = match input_journal {
-            InvokeInputJournal::NoCachedJournal => {
-                let metadata = shortcircuit!(
-                    txn.read_journal_metadata(&self.invocation_id)
-                        .await
-                        .map_err(|e| InvokerError::JournalReader(e.into()))
-                        .and_then(|opt| opt.ok_or_else(|| InvokerError::NotInvoked))
-                );
-                (metadata, None)
-            }
-            InvokeInputJournal::CachedJournal(metadata, items) => (metadata, Some(items)),
-        };
+        // Read journal metadata from storage
+        let journal_metadata = shortcircuit!(
+            txn.read_journal_metadata(&self.invocation_id)
+                .await
+                .map_err(|e| InvokerError::JournalReader(e.into()))
+                .and_then(|opt| opt.ok_or_else(|| InvokerError::NotInvoked))
+        );
 
         // Resolve the deployment metadata
         let schemas = self.schemas.live_load();
@@ -380,7 +511,7 @@ where
         }
 
         if chosen_service_protocol_version < ServiceProtocolVersion::V4
-            && journal_metadata.using_journal_table_v2
+            && journal_metadata.journal_kind == JournalKind::V2
         {
             // We don't support migrating from journal v2 to journal v1!
             shortcircuit!(Err(InvokerError::DeploymentDeprecated(
@@ -389,10 +520,17 @@ where
             )));
         }
 
-        // Determine if we need to read state
+        // Resolve the effective eager state size limit:
+        // Per-handler/service override takes precedence over server-level config.
+        // 0 means "disable eager state", non-zero values are clamped to the message size limit.
+        if let Some(limit) = invocation_attempt_options.eager_state_size_limit {
+            let limit = limit.as_usize();
+            self.eager_state_size_limit = limit.min(self.message_size_limit.get());
+        }
+
+        // Determine if we need to read state (0 means lazy state / no eager state)
         let keyed_service_id = if self.invocation_target.as_keyed_service_id().is_some()
-            && invocation_attempt_options.enable_lazy_state != Some(true)
-            && !self.disable_eager_state
+            && self.eager_state_size_limit > 0
         {
             self.invocation_target.as_keyed_service_id()
         } else {
@@ -413,8 +551,9 @@ where
                     txn,
                     journal_metadata,
                     keyed_service_id,
-                    cached_journal_items,
                     deployment,
+                    reader_for_bidi,
+                    invocation_budget,
                 )
                 .await
         } else {
@@ -428,8 +567,9 @@ where
                     txn,
                     journal_metadata,
                     keyed_service_id,
-                    cached_journal_items,
                     deployment,
+                    reader_for_bidi,
+                    invocation_budget,
                 )
                 .await
         }
@@ -437,6 +577,7 @@ where
 }
 
 impl<EE, Schemas> InvocationTask<EE, Schemas> {
+    /// Send a non-terminal message to the invoker main loop.
     pub(crate) fn send_invoker_tx(&self, invocation_task_output_inner: InvocationTaskOutputInner) {
         let _ = self.invoker_tx.send(InvocationTaskOutput {
             partition: self.partition,
@@ -489,7 +630,7 @@ pin_project_lite::pin_project! {
 }
 
 impl ResponseStream {
-    fn initialize(client: &ServiceClient, req: Request<InvokerBodyStream>) -> Self {
+    fn initialize(client: &ServiceClient, req: Request<InvokerBodyType>) -> Self {
         // Because the body sender blocks on waiting for the request body buffer to be available,
         // we need to spawn the request initiation separately, otherwise the loop below
         // will deadlock on the journal entry write.
@@ -546,5 +687,156 @@ impl Stream for ResponseStream {
             }
             ResponseStreamProj::Terminated => Poll::Ready(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use futures::stream;
+    use std::convert::Infallible;
+    use std::sync::LazyLock;
+
+    use super::collect_eager_state;
+    use restate_invoker_api::InvocationReaderError;
+    use restate_invoker_api::invocation_reader::EagerState;
+    use restate_memory::{LocalMemoryLease, LocalMemoryPool};
+
+    #[derive(Debug, derive_more::Display)]
+    struct TestError;
+
+    impl std::error::Error for TestError {}
+    impl InvocationReaderError for TestError {
+        fn budget_exhaustion(&self) -> Option<restate_memory::OutOfMemory> {
+            None
+        }
+    }
+
+    type StateResult = Result<(Bytes, Bytes, LocalMemoryLease), TestError>;
+
+    static MEMORY_POOL: LazyLock<LocalMemoryPool> = LazyLock::new(LocalMemoryPool::unlimited);
+
+    // Helper to create a (Bytes, Bytes) pair of known sizes
+    fn entry(key_size: usize, value_size: usize) -> StateResult {
+        Ok((
+            Bytes::from(vec![b'k'; key_size]),
+            Bytes::from(vec![b'v'; value_size]),
+            MEMORY_POOL.empty_lease(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn collect_eager_state_no_state_returns_partial() {
+        let (is_partial, entries, _memory_lease) = collect_eager_state::<
+            stream::Empty<Result<(Bytes, Bytes, LocalMemoryLease), Infallible>>,
+            _,
+            _,
+        >(None, 1024, std::convert::identity)
+        .await
+        .unwrap();
+
+        assert!(is_partial, "no state should be reported as partial");
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_eager_state_complete_within_limit() {
+        let items = vec![entry(10, 20), entry(5, 15)];
+        let state = EagerState::new_complete(stream::iter(items));
+
+        let (is_partial, entries, _memory_lease) =
+            collect_eager_state(Some(state), 1024, std::convert::identity)
+                .await
+                .unwrap();
+
+        assert!(!is_partial, "all entries fit within limit");
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn collect_eager_state_preserves_partial_flag() {
+        // Stream is pre-flagged as partial even though all entries fit
+        let items = vec![entry(10, 10)];
+        let state = EagerState::new_partial(stream::iter(items));
+
+        let (is_partial, entries, _memory_lease) =
+            collect_eager_state(Some(state), 1024, std::convert::identity)
+                .await
+                .unwrap();
+
+        assert!(is_partial, "partial flag should be preserved from source");
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn collect_eager_state_truncates_at_limit() {
+        // 3 entries of 50 bytes each, limit of 120 bytes => should fit 2
+        let items = vec![entry(25, 25), entry(25, 25), entry(25, 25)];
+        let state = EagerState::new_complete(stream::iter(items));
+
+        let (is_partial, entries, _memory_lease) =
+            collect_eager_state(Some(state), 120, std::convert::identity)
+                .await
+                .unwrap();
+
+        assert!(is_partial, "should be partial after truncation");
+        assert_eq!(entries.len(), 2, "only 2 entries should fit (100 bytes)");
+    }
+
+    #[tokio::test]
+    async fn collect_eager_state_first_entry_always_included() {
+        // Single entry larger than the limit — should return empty entries
+        let items = vec![entry(100, 101)];
+        let state = EagerState::new_complete(stream::iter(items));
+
+        let (is_partial, entries, _memory_lease) =
+            collect_eager_state(Some(state), 200, std::convert::identity)
+                .await
+                .unwrap();
+
+        assert!(is_partial, "first entry exceeded limit so partial state");
+        assert!(
+            entries.is_empty(),
+            "first entry exceeded limit so empty entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_eager_state_stream_error_propagated() {
+        let items: Vec<StateResult> = vec![Err(TestError)];
+        let state = EagerState::new_complete(stream::iter(items));
+
+        let result = collect_eager_state(Some(state), 1024, std::convert::identity).await;
+        assert!(result.is_err(), "stream error should be propagated");
+    }
+
+    #[tokio::test]
+    async fn collect_eager_state_exact_boundary() {
+        // 2 entries of exactly 50 bytes each, limit of 100 => both should fit
+        let items = vec![entry(25, 25), entry(25, 25)];
+        let state = EagerState::new_complete(stream::iter(items));
+
+        let (is_partial, entries, _memory_lease) =
+            collect_eager_state(Some(state), 100, std::convert::identity)
+                .await
+                .unwrap();
+
+        assert!(!is_partial, "entries exactly at limit should fit");
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn collect_eager_state_one_byte_over_limit() {
+        // 2 entries of 50 bytes each, limit of 99 => only first should fit
+        let items = vec![entry(25, 25), entry(25, 25)];
+        let state = EagerState::new_complete(stream::iter(items));
+
+        let (is_partial, entries, _memory_lease) =
+            collect_eager_state(Some(state), 99, std::convert::identity)
+                .await
+                .unwrap();
+
+        assert!(is_partial, "should be partial when 1 byte over");
+        assert_eq!(entries.len(), 1, "only first entry should fit");
     }
 }
