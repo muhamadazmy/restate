@@ -530,6 +530,9 @@ where
     {
         let mut release_interval = tokio::time::interval(Self::BUDGET_RELEASE_INTERVAL);
         release_interval.tick().await; // consume initial immediate tick
+        let mut inactivity_timeout =
+            std::pin::pin!(tokio::time::sleep(self.invocation_task.inactivity_timeout));
+
         loop {
             tokio::select! {
                 opt_completion = self.invocation_task.invoker_rx.recv() => {
@@ -575,6 +578,7 @@ where
                             return TerminalLoopState::Continue(())
                         },
                     }
+                    inactivity_timeout.set(tokio::time::sleep(self.invocation_task.inactivity_timeout));
                 },
                 chunk = http_stream_rx.next() => {
                     match crate::shortcircuit!(chunk.transpose()) {
@@ -586,11 +590,13 @@ where
                             crate::shortcircuit!(self.handle_message(parent_span_context, message_header, message));
                         }
                     }
+
+                    inactivity_timeout.set(tokio::time::sleep(self.invocation_task.inactivity_timeout));
                 },
                 _ = release_interval.tick() => {
                     outbound_budget.release_excess();
                 },
-                _ = tokio::time::sleep(self.invocation_task.inactivity_timeout) => {
+                _ = &mut inactivity_timeout => {
                     debug!("Inactivity detected, going to suspend invocation");
                     // Just return. This will drop the invoker_rx and http_stream_tx,
                     // closing the request stream and the invoker input channel.
