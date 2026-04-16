@@ -1169,19 +1169,25 @@ where
         &mut self,
         suspension: proto::SuspensionMessage,
     ) -> TerminalLoopState<()> {
-        let suspension_indexes: HashSet<_> = suspension
+        // TODO: Implement SuspensionMessage::flatten() to return SuspensionV2
+        // message.
+        let Some(awaiting_on) = suspension.awaiting_on else {
+            return TerminalLoopState::Failed(InvokerError::EmptySuspensionMessage);
+        };
+
+        let suspension_indexes: HashSet<_> = awaiting_on
             .waiting_completions
             .into_iter()
             .map(NotificationId::for_completion)
             .chain(
-                suspension
+                awaiting_on
                     .waiting_signals
                     .into_iter()
                     .map(SignalId::for_index)
                     .map(NotificationId::for_signal),
             )
             .chain(
-                suspension
+                awaiting_on
                     .waiting_named_signals
                     .into_iter()
                     .map(|s| SignalId::for_name(s.into()))
