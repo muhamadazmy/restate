@@ -2519,6 +2519,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             }
             InvokerEffectKind::SuspendedV2 {
                 waiting_for_notifications,
+                awaiting_on: _awaiting_on,
             } => {
                 lifecycle::OnSuspendCommand {
                     invocation_id: effect.invocation_id,

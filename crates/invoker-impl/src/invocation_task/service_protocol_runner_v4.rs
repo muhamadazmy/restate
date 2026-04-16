@@ -26,11 +26,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
 use restate_errors::warn_it;
-use restate_invoker_api::JournalMetadata;
 use restate_invoker_api::invocation_reader::{
     EagerState, InvocationReader, InvocationReaderError, InvocationReaderTransaction, JournalEntry,
     JournalKind,
 };
+use restate_invoker_api::{CombinatorType, JournalMetadata, NotificationsCombinator};
 use restate_memory::{LocalMemoryLease, LocalMemoryPool};
 use restate_service_client::{Endpoint, Method, Parts, Request};
 use restate_service_protocol::codec::ProtobufRawEntryCodec;
@@ -849,6 +849,7 @@ where
                 MessageType::CommandAck,
             )),
             Message::Suspension(suspension) => self.handle_suspension_message(suspension),
+            Message::AwaitingOn(awaiting_on) => self.handle_awaiting_on_message(awaiting_on),
             Message::Error(e) => self.handle_error_message(e),
             Message::End(_) => TerminalLoopState::Closed,
 
@@ -1171,34 +1172,80 @@ where
         }
     }
 
+    fn handle_awaiting_on_message(
+        &mut self,
+        _awaiting_on: proto::AwaitingOnMessage,
+    ) -> TerminalLoopState<()> {
+        // this message should mark this invocation as suspendable.
+        // if it's not running any side effects.
+        todo!("Handle awaiting on message");
+    }
+
     fn handle_suspension_message(
         &mut self,
         suspension: proto::SuspensionMessage,
     ) -> TerminalLoopState<()> {
-        let suspension_indexes: HashSet<_> = suspension
-            .waiting_completions
+        let Some(awaiting_on) = suspension.awaiting_on else {
+            return TerminalLoopState::Failed(InvokerError::EmptySuspensionMessage);
+        };
+
+        let combinator = Self::future_into_combinator(awaiting_on);
+
+        // We currently don't support empty suspension_indexes set
+        if combinator.is_empty() {
+            return TerminalLoopState::Failed(InvokerError::EmptySuspensionMessage);
+        }
+
+        TerminalLoopState::SuspendedV2(combinator)
+    }
+
+    fn future_into_combinator(fut: proto::Future) -> NotificationsCombinator {
+        let proto::Future {
+            combinator_type,
+            nested_futures,
+            waiting_completions,
+            waiting_named_signals,
+            waiting_signals,
+        } = fut;
+
+        let notifications: HashSet<_> = waiting_completions
             .into_iter()
             .map(NotificationId::for_completion)
             .chain(
-                suspension
-                    .waiting_signals
+                waiting_signals
                     .into_iter()
                     .map(SignalId::for_index)
                     .map(NotificationId::for_signal),
             )
             .chain(
-                suspension
-                    .waiting_named_signals
+                waiting_named_signals
                     .into_iter()
                     .map(|s| SignalId::for_name(s.into()))
                     .map(NotificationId::for_signal),
             )
             .collect();
-        // We currently don't support empty suspension_indexes set
-        if suspension_indexes.is_empty() {
-            return TerminalLoopState::Failed(InvokerError::EmptySuspensionMessage);
+
+        let combinator_type = proto::CombinatorType::try_from(combinator_type)
+            .unwrap_or(proto::CombinatorType::CombinatorUnknown);
+
+        NotificationsCombinator {
+            notifications,
+            nested: nested_futures
+                .into_iter()
+                .map(Self::future_into_combinator)
+                .collect(),
+            combinator: match combinator_type {
+                proto::CombinatorType::CombinatorUnknown => CombinatorType::Unknown,
+                proto::CombinatorType::FirstCompleted => CombinatorType::FirstCompleted,
+                proto::CombinatorType::AllCompleted => CombinatorType::AllCompleted,
+                proto::CombinatorType::FirstSucceededOrAllFailed => {
+                    CombinatorType::FirstSucceededOrAllFailed
+                }
+                proto::CombinatorType::AllSucceededOrFirstFailed => {
+                    CombinatorType::AllSucceededOrFirstFailed
+                }
+            },
         }
-        TerminalLoopState::SuspendedV2(suspension_indexes)
     }
 
     fn handle_error_message(&mut self, error: proto::ErrorMessage) -> TerminalLoopState<()> {

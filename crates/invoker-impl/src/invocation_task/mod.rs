@@ -38,7 +38,7 @@ use tracing::{debug, instrument};
 use restate_invoker_api::invocation_reader::{
     EagerState, InvocationReader, InvocationReaderTransaction, JournalKind,
 };
-use restate_invoker_api::{EntryEnricher, InvocationReaderError};
+use restate_invoker_api::{EntryEnricher, InvocationReaderError, NotificationsCombinator};
 use restate_serde_util::{ByteCount, NonZeroByteCount};
 use restate_service_client::{Request, ResponseBody, ServiceClient, ServiceClientError};
 use restate_types::deployment::PinnedDeployment;
@@ -46,9 +46,8 @@ use restate_types::identifiers::{InvocationId, PartitionLeaderEpoch};
 use restate_types::invocation::InvocationTarget;
 use restate_types::journal::EntryIndex;
 use restate_types::journal::enriched::EnrichedRawEntry;
-use restate_types::journal_v2;
 use restate_types::journal_v2::raw::RawNotification;
-use restate_types::journal_v2::{CommandIndex, NotificationId};
+use restate_types::journal_v2::{self, CommandIndex};
 use restate_types::live::Live;
 use restate_types::schema::deployment::DeploymentResolver;
 use restate_types::schema::invocation_target::InvocationTargetResolver;
@@ -84,6 +83,10 @@ const SERVICE_PROTOCOL_VERSION_V5: HeaderValue =
 #[allow(clippy::declare_interior_mutable_const)]
 const SERVICE_PROTOCOL_VERSION_V6: HeaderValue =
     HeaderValue::from_static("application/vnd.restate.invocation.v6");
+
+#[allow(clippy::declare_interior_mutable_const)]
+const SERVICE_PROTOCOL_VERSION_V7: HeaderValue =
+    HeaderValue::from_static("application/vnd.restate.invocation.v7");
 
 #[allow(clippy::declare_interior_mutable_const)]
 const X_RESTATE_SERVER: HeaderName = HeaderName::from_static("x-restate-server");
@@ -179,7 +182,7 @@ pub(super) enum InvocationTaskOutputInner {
     },
     Closed,
     Suspended(HashSet<EntryIndex>),
-    SuspendedV2(HashSet<NotificationId>),
+    SuspendedV2(NotificationsCombinator),
     Failed(InvokerError, LocalMemoryPool),
     /// The invocation task yielded due to memory pressure.
     /// The budget was dropped, returning memory to the global pool.
@@ -265,7 +268,7 @@ enum TerminalLoopState<T> {
     Continue(T),
     Closed,
     Suspended(HashSet<EntryIndex>),
-    SuspendedV2(HashSet<NotificationId>),
+    SuspendedV2(NotificationsCombinator),
     Failed(InvokerError),
     /// Memory budget exhausted — the invocation should yield.
     ShouldYield(InvocationMemoryExhausted),
@@ -600,6 +603,7 @@ fn service_protocol_version_to_header_value(
         ServiceProtocolVersion::V4 => SERVICE_PROTOCOL_VERSION_V4,
         ServiceProtocolVersion::V5 => SERVICE_PROTOCOL_VERSION_V5,
         ServiceProtocolVersion::V6 => SERVICE_PROTOCOL_VERSION_V6,
+        ServiceProtocolVersion::V7 => SERVICE_PROTOCOL_VERSION_V7,
     }
 }
 
