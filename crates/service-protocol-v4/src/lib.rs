@@ -31,7 +31,8 @@ pub mod proto {
         CommandAckMessage,
         ProposeRunCompletionMessage,
         CallCommandMessage,
-        OneWayCallCommandMessage
+        OneWayCallCommandMessage,
+        AwaitingOnMessage
     );
 }
 

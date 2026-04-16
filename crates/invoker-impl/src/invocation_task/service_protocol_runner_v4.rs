@@ -843,6 +843,7 @@ where
                 MessageType::CommandAck,
             )),
             Message::Suspension(suspension) => self.handle_suspension_message(suspension),
+            Message::AwaitingOn(awaiting_on) => self.handle_awaiting_on_message(awaiting_on),
             Message::Error(e) => self.handle_error_message(e),
             Message::End(_) => TerminalLoopState::Closed,
 
@@ -1163,6 +1164,13 @@ where
                 unimplemented!()
             }
         }
+    }
+
+    fn handle_awaiting_on_message(
+        &mut self,
+        _awaiting_on: proto::AwaitingOnMessage,
+    ) -> TerminalLoopState<()> {
+        todo!("Handle awaiting on message");
     }
 
     fn handle_suspension_message(
