@@ -1169,19 +1169,27 @@ where
         &mut self,
         suspension: proto::SuspensionMessage,
     ) -> TerminalLoopState<()> {
-        let suspension_indexes: HashSet<_> = suspension
+        let Some(awaiting_on) = suspension.awaiting_on else {
+            return TerminalLoopState::Failed(InvokerError::EmptySuspensionMessage);
+        };
+
+        // TODO(azmy): Currently we flatten `awaiting_on` by collecting all completion and signal
+        // IDs into a single SuspendedV2 message. This loses the nested structure of the suspension.
+        // We should propagate the full (nested) suspension message instead.
+
+        let suspension_indexes: HashSet<_> = awaiting_on
             .waiting_completions
             .into_iter()
             .map(NotificationId::for_completion)
             .chain(
-                suspension
+                awaiting_on
                     .waiting_signals
                     .into_iter()
                     .map(SignalId::for_index)
                     .map(NotificationId::for_signal),
             )
             .chain(
-                suspension
+                awaiting_on
                     .waiting_named_signals
                     .into_iter()
                     .map(|s| SignalId::for_name(s.into()))
