@@ -14,14 +14,13 @@ use restate_storage_api::journal_table_v2::ReadJournalTable;
 use restate_storage_api::vqueue_table::{ReadVQueueTable, WriteVQueueTable};
 use restate_types::config::Configuration;
 use restate_types::identifiers::InvocationId;
-use restate_types::journal_v2::NotificationId;
-use std::collections::HashSet;
+use restate_types::journal_v2::NotificationsCombinator;
 use tracing::trace;
 
 pub struct OnSuspendCommand {
     pub invocation_id: InvocationId,
     pub invocation_status: InvocationStatus,
-    pub waiting_for_notifications: HashSet<NotificationId>,
+    pub awaiting_on: NotificationsCombinator,
 }
 
 impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
@@ -29,32 +28,25 @@ impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>
 where
     S: ReadJournalTable + WriteInvocationStatusTable + WriteVQueueTable + ReadVQueueTable,
 {
-    async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
+    async fn apply(mut self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         debug_assert!(
-            !self.waiting_for_notifications.is_empty(),
+            !self.awaiting_on.is_empty(),
             "Expecting at least one entry on which the invocation {} is waiting.",
             self.invocation_id
         );
 
-        // Notifications currently stored
-        let available_notifications = ctx
+        let notifications = ctx
             .storage
             .get_notifications_index(self.invocation_id)
-            .await?
-            .into_keys()
-            .collect::<HashSet<_>>();
+            .await?;
 
-        // Find if any new notification is available of the ones the SDK is waiting on
-        let mut any_completed = false;
-        for notif in &self.waiting_for_notifications {
-            if available_notifications.contains(notif) {
-                any_completed = true;
-                break;
-            }
-        }
+        // Notifications currently stored
+        let available_notifications = notifications
+            .iter()
+            .map(|(notification_id, index)| (notification_id, index.result_variant));
 
         let mut invocation_status = self.invocation_status;
-        if any_completed {
+        if self.awaiting_on.resolve_all(available_notifications) {
             trace!(
                 "Resuming instead of suspending service because a notification is already available."
             );
@@ -72,7 +64,7 @@ where
 
             trace!(
                 "Suspending invocation waiting for notifications {:?}",
-                self.waiting_for_notifications
+                self.awaiting_on.flatten()
             );
 
             in_flight_invocation_metadata
@@ -90,7 +82,8 @@ where
 
             invocation_status = InvocationStatus::Suspended {
                 metadata: in_flight_invocation_metadata,
-                waiting_for_notifications: self.waiting_for_notifications,
+                waiting_for_notifications: self.awaiting_on.flatten(),
+                awaiting_on: Some(self.awaiting_on),
             };
         }
 
