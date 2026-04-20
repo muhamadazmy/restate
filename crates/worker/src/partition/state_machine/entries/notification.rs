@@ -1,3 +1,6 @@
+use std::cmp::Ordering;
+
+use restate_types::{RESTATE_VERSION_1_8_0, SemanticRestateVersion};
 // Copyright (c) 2023 - 2026 Restate Software, Inc., Restate GmbH.
 // All rights reserved.
 //
@@ -155,16 +158,40 @@ where
         match self.invocation_status {
             InvocationStatus::Suspended {
                 waiting_for_notifications,
+                awaiting_on,
                 ..
             } => {
-                // If we're suspended, let's figure out if we need to resume
-                if waiting_for_notifications.remove(&self.entry.id()) {
-                    ResumeInvocationCommand {
-                        invocation_id: self.invocation_id,
-                        invocation_status: self.invocation_status,
+                match awaiting_on {
+                    Some(awaiting_on) => {
+                        if awaiting_on.resolve(&self.entry.id(), self.entry.result_variant()) {
+                            ResumeInvocationCommand {
+                                invocation_id: self.invocation_id,
+                                invocation_status: self.invocation_status,
+                            }
+                            .apply(ctx)
+                            .await?;
+                        } else if SemanticRestateVersion::current()
+                            .cmp_precedence(&RESTATE_VERSION_1_8_0)
+                            == Ordering::Less
+                        {
+                            // for Restate version < v1.8 make sure that
+                            // the waiting_for_notifications list is update
+                            // to remain in sync with awaited_on
+                            *waiting_for_notifications = awaiting_on.flatten();
+                        }
                     }
-                    .apply(ctx)
-                    .await?;
+                    None => {
+                        // Status is stored by Restate < v1.7.
+                        // If we're suspended, let's figure out if we need to resume
+                        if waiting_for_notifications.remove(&self.entry.id()) {
+                            ResumeInvocationCommand {
+                                invocation_id: self.invocation_id,
+                                invocation_status: self.invocation_status,
+                            }
+                            .apply(ctx)
+                            .await?;
+                        }
+                    }
                 }
             }
             InvocationStatus::Invoked(_) => {

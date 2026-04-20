@@ -8,14 +8,19 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::fmt;
+use std::collections::HashSet;
+use std::fmt::{self, Debug};
 
 use bytes::Bytes;
 use enum_dispatch::enum_dispatch;
+use itertools::{Itertools, Position};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::identifiers::InvocationId;
-use crate::journal_v2::raw::{RawEntry, TryFromEntry, TryFromEntryError};
+use crate::journal_v2::raw::{
+    RawEntry, RawNotificationResultVariant, TryFromEntry, TryFromEntryError,
+};
 use crate::journal_v2::{
     CompletionId, Encoder, Entry, EntryMetadata, EntryType, Failure, SignalIndex, SignalName,
 };
@@ -420,4 +425,125 @@ pub enum SignalResult {
     Void,
     Success(Bytes),
     Failure(Failure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CombinatorType {
+    // Should be treated as FirstCompleted,
+    // Used with Suspension V2 to indicate that
+    // the sdk did not provide a combinator kind
+    Unknown,
+    /// Resolve as soon as any one child future completes with success, or with failure (same as JS Promise.race).
+    FirstCompleted,
+    /// Wait for every child to complete, regardless of success or failure (same as JS Promise.allSettled).
+    AllCompleted,
+    /// Resolve on the first success; fail only if all children fail (same as JS Promise.any).
+    FirstSucceededOrAllFailed,
+    /// Resolve when all children succeed; short-circuit on the first failure (same as JS Promise.all).
+    AllSucceededOrFirstFailed,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnresolvedFuture {
+    pub notifications: HashSet<NotificationId>,
+    pub nested: Vec<UnresolvedFuture>,
+    pub combinator: CombinatorType,
+}
+
+impl UnresolvedFuture {
+    pub fn is_empty(&self) -> bool {
+        self.notifications.is_empty() && self.nested.iter().all(|n| n.is_empty())
+    }
+
+    pub fn flatten(&self) -> HashSet<NotificationId> {
+        let mut set = HashSet::default();
+        self.flatten_inner(&mut set);
+        set
+    }
+
+    fn flatten_inner(&self, set: &mut HashSet<NotificationId>) {
+        for id in &self.notifications {
+            set.insert(id.clone());
+        }
+
+        for nested in &self.nested {
+            nested.flatten_inner(set);
+        }
+    }
+
+    pub fn resolve(
+        &mut self,
+        notification_id: &NotificationId,
+        result: RawNotificationResultVariant,
+    ) -> bool {
+        // this is a dummy implementation that only checks if
+        // any of the notifications ids in the entire tree has been
+        // completed (regardless of the result) and then mark the combinator
+        // as resolved
+
+        debug!("Resolving combinator '{self:?}' with ({notification_id}, result: {result:?})");
+        if self.notifications.contains(notification_id) {
+            return true;
+        }
+
+        self.nested
+            .iter_mut()
+            .any(|v| v.resolve(notification_id, result))
+    }
+
+    pub fn resolve_all<'a>(
+        &mut self,
+        notifications: impl Iterator<Item = (&'a NotificationId, RawNotificationResultVariant)>,
+    ) -> bool {
+        for (notification_id, result) in notifications {
+            if self.resolve(notification_id, result) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+impl<T> From<T> for UnresolvedFuture
+where
+    T: Into<HashSet<NotificationId>>,
+{
+    fn from(value: T) -> Self {
+        let notifications = value.into();
+        Self {
+            notifications,
+            nested: Vec::default(),
+            combinator: CombinatorType::Unknown,
+        }
+    }
+}
+
+impl Debug for UnresolvedFuture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.combinator {
+            CombinatorType::Unknown => write!(f, "unknown"),
+            CombinatorType::FirstCompleted => write!(f, "race"),
+            CombinatorType::AllCompleted => write!(f, "all-settled"),
+            CombinatorType::FirstSucceededOrAllFailed => write!(f, "any"),
+            CombinatorType::AllSucceededOrFirstFailed => write!(f, "all"),
+        }?;
+
+        write!(f, "(")?;
+        for (pos, notification_id) in self.notifications.iter().with_position() {
+            write!(f, "{notification_id}")?;
+            if matches!(pos, Position::First | Position::Middle) {
+                write!(f, ", ")?;
+            }
+        }
+
+        for (pos, nested) in self.nested.iter().with_position() {
+            write!(f, "{nested:?}")?;
+            if matches!(pos, Position::First | Position::Middle) {
+                write!(f, ", ")?;
+            }
+        }
+
+        write!(f, ")")
+    }
 }
