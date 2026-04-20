@@ -120,6 +120,7 @@ fn suspended_status(invocation_target: InvocationTarget) -> InvocationStatus {
             random_seed: None,
         },
         waiting_for_notifications: HashSet::default(),
+        awaiting_on: None,
     }
 }
 

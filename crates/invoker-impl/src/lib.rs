@@ -31,6 +31,7 @@ use gardal::futures::ThrottledStream;
 use gardal::{PaddedAtomicSharedStorage, StreamExt as GardalStreamExt, TokioClock};
 use metrics::counter;
 use restate_futures_util::concurrency::Permit;
+use restate_types::{RESTATE_VERSION_1_8_0, SemanticRestateVersion};
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinSet};
 use tracing::instrument;
@@ -57,7 +58,9 @@ use restate_types::journal::enriched::EnrichedRawEntry;
 use restate_types::journal_events::raw::RawEvent;
 use restate_types::journal_events::{Event, PausedEvent, TransientErrorEvent};
 use restate_types::journal_v2::raw::{RawCommand, RawNotification};
-use restate_types::journal_v2::{CommandIndex, EntryMetadata, NotificationId};
+use restate_types::journal_v2::{
+    CommandIndex, EntryMetadata, NotificationId, NotificationsCombinator,
+};
 use restate_types::live::{Live, LiveLoad};
 use restate_types::schema::deployment::DeploymentResolver;
 use restate_types::schema::invocation_target::InvocationTargetResolver;
@@ -563,8 +566,8 @@ where
                             requires_ack
                         ).await
                     }
-                    InvocationTaskOutputInner::SuspendedV2(notification_ids) => {
-                        self.handle_invocation_task_suspended_v2(partition, invocation_id, notification_ids).await
+                    InvocationTaskOutputInner::SuspendedV2(combinator) => {
+                        self.handle_invocation_task_suspended_v2(partition, invocation_id, combinator).await
                     }
                     InvocationTaskOutputInner::ShouldYield { oom, budget } => {
                         self.handle_invocation_task_should_yield(partition, invocation_id, oom, budget).await
@@ -1161,7 +1164,7 @@ where
         &mut self,
         partition: PartitionLeaderEpoch,
         invocation_id: InvocationId,
-        waiting_for_notifications: HashSet<NotificationId>,
+        combinator: NotificationsCombinator,
     ) {
         if let Some((sender, _, ism)) = self
             .invocation_state_machine_manager
@@ -1198,7 +1201,16 @@ where
                     .send(Box::new(Effect {
                         invocation_id,
                         kind: EffectKind::SuspendedV2 {
-                            waiting_for_notifications,
+                            waiting_for_notifications: if SemanticRestateVersion::current()
+                                .is_equal_or_newer_than(&RESTATE_VERSION_1_8_0)
+                            {
+                                HashSet::default()
+                            } else {
+                                // for all versions before v1.8 we keep writing
+                                // the flatten notification ids set.
+                                combinator.flatten()
+                            },
+                            awaiting_on: Some(combinator),
                         },
                     }))
                     .await;

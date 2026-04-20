@@ -357,6 +357,9 @@ async fn query_sys_invocation_suspended_waiting() {
                 NotificationId::SignalIndex(20),
             ]
             .into(),
+            // todo(azmy): fill the awaiting_on up and
+            // and use it with the waiting_for_notifications
+            awaiting_on: None,
         },
     )
     .unwrap();
