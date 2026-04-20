@@ -8044,6 +8044,7 @@ dependencies = [
  "prost-build",
  "restate-clock",
  "restate-memory",
+ "restate-service-protocol-v4",
  "restate-types",
  "restate-util-string",
  "restate-workspace-hack",

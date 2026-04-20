@@ -20,7 +20,7 @@ fn main() -> std::io::Result<()> {
         .protoc_arg("--experimental_allow_proto3_optional")
         .extern_path(
             ".dev.restate.service.protocol",
-            "::restate_types::service_protocol",
+            "::restate_service_protocol_v4::proto",
         )
         .compile_protos(
             &["proto/dev/restate/storage/v1/domain.proto"],

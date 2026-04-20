@@ -11,7 +11,7 @@
 use bytes::{Buf, BytesMut};
 
 use restate_types::SemanticRestateVersion;
-use restate_types::errors::IdDecodeError;
+use restate_types::errors::ConversionError;
 use restate_types::storage::{StorageCodec, StorageDecode, StorageDecodeError, StorageEncode};
 
 use crate::StorageError;
@@ -71,46 +71,9 @@ impl<T: prost::Message + Default> StorageDecode for ProtobufStorageWrapper<T> {
     }
 }
 
-/// Error type for conversion related problems (e.g. Rust <-> Protobuf)
-#[derive(Debug, thiserror::Error)]
-pub enum ConversionError {
-    #[error("missing field '{0}'")]
-    MissingField(&'static str),
-    #[error("unexpected enum variant {1} for field '{0}'")]
-    UnexpectedEnumVariant(&'static str, i32),
-    #[error("invalid data: {0}")]
-    InvalidData(anyhow::Error),
-}
-
-impl ConversionError {
-    pub fn invalid_data(source: impl Into<anyhow::Error>) -> Self {
-        ConversionError::InvalidData(source.into())
-    }
-
-    pub fn missing_field(field: &'static str) -> Self {
-        ConversionError::MissingField(field)
-    }
-
-    pub fn unexpected_enum_variant(field: &'static str, enum_variant: impl Into<i32>) -> Self {
-        ConversionError::UnexpectedEnumVariant(field, enum_variant.into())
-    }
-}
-
-impl From<IdDecodeError> for ConversionError {
-    fn from(value: IdDecodeError) -> Self {
-        ConversionError::invalid_data(value)
-    }
-}
-
 impl From<ConversionError> for StorageError {
     fn from(value: ConversionError) -> Self {
         StorageError::Conversion(value.into())
-    }
-}
-
-impl From<ConversionError> for StorageDecodeError {
-    fn from(value: ConversionError) -> Self {
-        StorageDecodeError::DecodeValue(value.into())
     }
 }
 
@@ -136,6 +99,7 @@ pub mod v1 {
         };
         use restate_types::invocation::{InvocationTermination, TerminationFlavor};
         use restate_types::journal::enriched::AwakeableEnrichmentResult;
+        use restate_types::journal_v2::raw::RawNotificationResultVariant;
         use restate_types::journal_v2::{EntryMetadata, NotificationId};
         use restate_types::logs::Lsn;
         use restate_types::service_protocol::ServiceProtocolVersion;
@@ -174,6 +138,7 @@ pub mod v1 {
             PreFlightInvocationArgument, PreFlightInvocationInput, PreFlightInvocationJournal,
         };
         use crate::protobuf_types::ConversionError;
+        use crate::protobuf_types::v1::{NotificationEntryIndex, NotificationResultVariant};
 
         impl TryFrom<VirtualObjectStatus> for crate::service_status_table::VirtualObjectStatus {
             type Error = ConversionError;
@@ -448,6 +413,7 @@ pub mod v1 {
                     waiting_for_completions,
                     waiting_for_signal_indexes,
                     waiting_for_signal_names,
+                    awaiting_on,
                     result,
                     hotfix_apply_cancellation_after_deployment_is_pinned,
                 } = value;
@@ -649,6 +615,10 @@ pub mod v1 {
                                         .map(NotificationId::for_signal),
                                 )
                                 .collect(),
+                            awaiting_on: match awaiting_on {
+                                Some(awaiting_on) => Some(awaiting_on.try_into()?),
+                                None => None,
+                            },
                         },
                     ),
                     invocation_status_v2::Status::Paused => {
@@ -781,6 +751,7 @@ pub mod v1 {
                         waiting_for_completions: vec![],
                         waiting_for_signal_indexes: vec![],
                         waiting_for_signal_names: vec![],
+                        awaiting_on: None,
                         result: None,
                         random_seed,
                     },
@@ -858,6 +829,7 @@ pub mod v1 {
                             waiting_for_completions: vec![],
                             waiting_for_signal_indexes: vec![],
                             waiting_for_signal_names: vec![],
+                            awaiting_on: None,
                             result: None,
                             random_seed,
                         }
@@ -924,6 +896,7 @@ pub mod v1 {
                         waiting_for_completions: vec![],
                         waiting_for_signal_indexes: vec![],
                         waiting_for_signal_names: vec![],
+                        awaiting_on: None,
                         result: None,
                         random_seed,
                     },
@@ -1001,6 +974,7 @@ pub mod v1 {
                             waiting_for_completions: vec![],
                             waiting_for_signal_indexes: vec![],
                             waiting_for_signal_names: vec![],
+                            awaiting_on: None,
                             result: None,
                             random_seed,
                         }
@@ -1071,6 +1045,7 @@ pub mod v1 {
                             waiting_for_completions: vec![],
                             waiting_for_signal_indexes: vec![],
                             waiting_for_signal_names: vec![],
+                            awaiting_on: None,
                             result: None,
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             random_seed,
@@ -1094,6 +1069,7 @@ pub mod v1 {
                                 random_seed,
                             },
                         waiting_for_notifications,
+                        awaiting_on,
                     } => {
                         let (deployment_id, service_protocol_version) = match pinned_deployment {
                             None => (None, None),
@@ -1161,6 +1137,7 @@ pub mod v1 {
                             waiting_for_completions,
                             waiting_for_signal_indexes,
                             waiting_for_signal_names,
+                            awaiting_on: awaiting_on.map(Into::into),
                             result: None,
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             random_seed,
@@ -1232,6 +1209,7 @@ pub mod v1 {
                             waiting_for_completions: vec![],
                             waiting_for_signal_indexes: vec![],
                             waiting_for_signal_names: vec![],
+                            awaiting_on: None,
                             result: None,
                             hotfix_apply_cancellation_after_deployment_is_pinned,
                             random_seed,
@@ -1300,6 +1278,7 @@ pub mod v1 {
                             waiting_for_completions: vec![],
                             waiting_for_signal_indexes: vec![],
                             waiting_for_signal_names: vec![],
+                            awaiting_on: None,
                             result: Some(response_result.into()),
                             random_seed,
                         }
@@ -1374,9 +1353,9 @@ pub mod v1 {
 
             if let Some(deployment_id) = deployment_id {
                 let service_protocol_version = service_protocol_version.ok_or_else(|| {
-                    ConversionError::invalid_data(anyhow!(
-                        "service_protocol_version has not been set"
-                    ))
+                    ConversionError::invalid_data_static(
+                        "service_protocol_version has not been set",
+                    )
                 })?;
                 let service_protocol_version =
                     ServiceProtocolVersion::try_from(service_protocol_version).map_err(|_| {
@@ -3138,11 +3117,22 @@ pub mod v1 {
                                 }
                             };
 
+                            let result_variant = NotificationResultVariant::try_from(
+                                value.notification_result_variant,
+                            )
+                            .map_err(|e| {
+                                ConversionError::unexpected_enum_variant(
+                                    "notification_result_variant",
+                                    e.0,
+                                )
+                            })?;
+
                             restate_types::storage::StoredRawEntry::new(
                                 header,
                                 journal_v2::raw::RawNotification::new(
                                     notification_ty,
                                     notification_id,
+                                    result_variant.into(),
                                     value.content,
                                 ),
                             )
@@ -3186,6 +3176,8 @@ pub mod v1 {
                 let mut call_or_send_command_metadata: Option<entry::CallOrSendCommandMetadata> =
                     None;
                 let mut notification_id: Option<entry::NotificationId> = None;
+                let mut notification_result_variant: NotificationResultVariant =
+                    NotificationResultVariant::Unknown;
                 let content = match raw_entry.inner {
                     journal_v2::raw::RawEntry::Command(cmd) => {
                         match cmd.command_specific_metadata {
@@ -3213,6 +3205,8 @@ pub mod v1 {
                             }
                         });
 
+                        notification_result_variant = notification.result_variant().into();
+
                         notification.serialized_content()
                     }
                 };
@@ -3223,6 +3217,7 @@ pub mod v1 {
                     append_time,
                     call_or_send_command_metadata,
                     notification_id,
+                    notification_result_variant: notification_result_variant.into(),
                 }
             }
         }
@@ -3896,6 +3891,60 @@ pub mod v1 {
             }
         }
 
+        impl From<crate::journal_table_v2::NotificationEntryIndex> for NotificationEntryIndex {
+            fn from(value: crate::journal_table_v2::NotificationEntryIndex) -> Self {
+                Self {
+                    entry_index: value.entry_index,
+                    result_variant: NotificationResultVariant::from(value.result_variant).into(),
+                }
+            }
+        }
+
+        impl TryFrom<NotificationEntryIndex> for crate::journal_table_v2::NotificationEntryIndex {
+            type Error = ConversionError;
+
+            fn try_from(value: NotificationEntryIndex) -> Result<Self, Self::Error> {
+                Ok(Self {
+                    entry_index: value.entry_index,
+                    result_variant: NotificationResultVariant::try_from(value.result_variant)
+                        .map_err(|err| {
+                            ConversionError::unexpected_enum_variant("result_variant", err.0)
+                        })?
+                        .into(),
+                })
+            }
+        }
+
+        impl From<RawNotificationResultVariant> for NotificationResultVariant {
+            fn from(value: RawNotificationResultVariant) -> Self {
+                match value {
+                    RawNotificationResultVariant::Unknown => NotificationResultVariant::Unknown,
+                    RawNotificationResultVariant::Void => NotificationResultVariant::Void,
+                    RawNotificationResultVariant::Value => NotificationResultVariant::Value,
+                    RawNotificationResultVariant::Failure => NotificationResultVariant::Failure,
+                    RawNotificationResultVariant::InvocationId => {
+                        NotificationResultVariant::InvocationId
+                    }
+                    RawNotificationResultVariant::StateKeys => NotificationResultVariant::StateKeys,
+                }
+            }
+        }
+
+        impl From<NotificationResultVariant> for RawNotificationResultVariant {
+            fn from(value: NotificationResultVariant) -> Self {
+                match value {
+                    NotificationResultVariant::Unknown => RawNotificationResultVariant::Unknown,
+                    NotificationResultVariant::Void => RawNotificationResultVariant::Void,
+                    NotificationResultVariant::Value => RawNotificationResultVariant::Value,
+                    NotificationResultVariant::Failure => RawNotificationResultVariant::Failure,
+                    NotificationResultVariant::InvocationId => {
+                        RawNotificationResultVariant::InvocationId
+                    }
+                    NotificationResultVariant::StateKeys => RawNotificationResultVariant::StateKeys,
+                }
+            }
+        }
+
         fn restate_version_from_pb(restate_version: String) -> restate_types::RestateVersion {
             if restate_version.is_empty() {
                 restate_types::RestateVersion::unknown()
@@ -4067,7 +4116,9 @@ pub mod v1 {
                 match self.inner.service_protocol_version {
                     Some(service_protocol_version) => {
                         ServiceProtocolVersion::try_from(service_protocol_version)
-                            .map_err(|_| ConversionError::invalid_data("service_protocol_version"))
+                            .map_err(|_| {
+                                ConversionError::invalid_data_static("service_protocol_version")
+                            })
                             .map(Some)
                     }
                     None => Ok(None),
@@ -4095,7 +4146,7 @@ pub mod v1 {
                 let mut target = InvocationTargetLazy::default();
                 target
                     .merge(invocation_target)
-                    .map_err(|_| ConversionError::invalid_data("invocation_target"))?;
+                    .map_err(|_| ConversionError::invalid_data_static("invocation_target"))?;
                 Ok(Some(target))
             }
 
@@ -4109,7 +4160,7 @@ pub mod v1 {
                     | Status::Paused
                     | Status::Completed => {}
                     Status::UnknownStatus => {
-                        return Err(ConversionError::invalid_data("status"));
+                        return Err(ConversionError::invalid_data_static("status"));
                     }
                 }
 
@@ -4122,8 +4173,8 @@ pub mod v1 {
 
                 let source = Bytes::copy_from_slice(source);
 
-                let source =
-                    Source::decode(source).map_err(|_| ConversionError::invalid_data("source"))?;
+                let source = Source::decode(source)
+                    .map_err(|_| ConversionError::invalid_data_static("source"))?;
 
                 source
                     .source
@@ -4136,10 +4187,10 @@ pub mod v1 {
                 let span_context = expect_or_fail!(span_context)?;
 
                 let span_context = SpanContextLite::decode(*span_context)
-                    .map_err(|_| ConversionError::invalid_data("span_context"))?;
+                    .map_err(|_| ConversionError::invalid_data_static("span_context"))?;
 
                 let trace_id = try_bytes_into_trace_id(span_context.trace_id.as_ref())
-                    .map_err(|_| ConversionError::InvalidData("trace_id"))?;
+                    .map_err(|_| ConversionError::invalid_data_static("trace_id"))?;
                 Ok(trace_id)
             }
 
@@ -4149,20 +4200,20 @@ pub mod v1 {
                 match self.completion_retention_duration_lazy {
                     Some(completion_retention_duration) => {
                         super::Duration::decode(completion_retention_duration).map_err(|_| {
-                            ConversionError::invalid_data("completion_retention_duration")
+                            ConversionError::invalid_data_static("completion_retention_duration")
                         })?
                     }
                     None => super::Duration::default(),
                 }
                 .try_into()
-                .map_err(|_| ConversionError::invalid_data("completion_retention_duration"))
+                .map_err(|_| ConversionError::invalid_data_static("completion_retention_duration"))
             }
 
             pub fn idempotency_key(&self) -> std::result::Result<Option<&str>, ConversionError> {
                 self.idempotency_key
                     .map(str::from_utf8)
                     .transpose()
-                    .map_err(|_| ConversionError::invalid_data("idempotency_key"))
+                    .map_err(|_| ConversionError::invalid_data_static("idempotency_key"))
             }
 
             pub fn deployment_id(
@@ -4172,9 +4223,9 @@ pub mod v1 {
 
                 match self.deployment_id {
                     Some(deployment_id) => str::from_utf8(deployment_id)
-                        .map_err(|_| ConversionError::invalid_data("deployment_id"))?
+                        .map_err(|_| ConversionError::invalid_data_static("deployment_id"))?
                         .parse()
-                        .map_err(|_| ConversionError::invalid_data("deployment_id"))
+                        .map_err(|_| ConversionError::invalid_data_static("deployment_id"))
                         .map(Some),
                     None => Ok(None),
                 }
@@ -4189,7 +4240,7 @@ pub mod v1 {
                 let result = expect_or_fail!(result)?;
 
                 let result = ResponseResult::decode(*result)
-                    .map_err(|_| ConversionError::invalid_data("result"))?;
+                    .map_err(|_| ConversionError::invalid_data_static("result"))?;
 
                 let response_result = result.response_result.as_ref();
                 let response_result = expect_or_fail!(response_result)?;
@@ -4203,13 +4254,13 @@ pub mod v1 {
                 match self.journal_retention_duration_lazy {
                     Some(journal_retention_duration) => {
                         super::Duration::decode(journal_retention_duration).map_err(|_| {
-                            ConversionError::invalid_data("journal_retention_duration")
+                            ConversionError::invalid_data_static("journal_retention_duration")
                         })?
                     }
                     None => super::Duration::default(),
                 }
                 .try_into()
-                .map_err(|_| ConversionError::invalid_data("journal_retention_duration"))
+                .map_err(|_| ConversionError::invalid_data_static("journal_retention_duration"))
             }
 
             pub fn created_using_restate_version(
@@ -4218,8 +4269,9 @@ pub mod v1 {
                 if self.created_using_restate_version.is_empty() {
                     Ok(restate_types::RestateVersion::UNKNOWN_STR)
                 } else {
-                    str::from_utf8(self.created_using_restate_version)
-                        .map_err(|_| ConversionError::invalid_data("created_using_restate_version"))
+                    str::from_utf8(self.created_using_restate_version).map_err(|_| {
+                        ConversionError::invalid_data_static("created_using_restate_version")
+                    })
                 }
             }
         }
@@ -4241,14 +4293,14 @@ pub mod v1 {
                         .as_ref()
                         .ok_or(ConversionError::missing_field("invocation_id"))?,
                 )
-                .map_err(|_| ConversionError::invalid_data("invocation_id"))
+                .map_err(|_| ConversionError::invalid_data_static("invocation_id"))
             }
         }
 
         impl super::source::Subscription {
             pub fn subscription_id(&self) -> std::result::Result<SubscriptionId, ConversionError> {
                 SubscriptionId::from_slice(self.subscription_id.as_ref())
-                    .map_err(|_| ConversionError::invalid_data("subscription_id"))
+                    .map_err(|_| ConversionError::invalid_data_static("subscription_id"))
             }
         }
 
@@ -4259,7 +4311,7 @@ pub mod v1 {
                         .as_ref()
                         .ok_or(ConversionError::missing_field("invocation_id"))?,
                 )
-                .map_err(|_| ConversionError::invalid_data("invocation_id"))
+                .map_err(|_| ConversionError::invalid_data_static("invocation_id"))
             }
         }
 
@@ -4330,7 +4382,7 @@ pub mod v1 {
             }
 
             pub fn service_name(&self) -> std::result::Result<&str, ConversionError> {
-                str::from_utf8(self.name).map_err(|_| ConversionError::invalid_data("name"))
+                str::from_utf8(self.name).map_err(|_| ConversionError::invalid_data_static("name"))
             }
 
             pub fn key(&self) -> std::result::Result<Option<&str>, ConversionError> {
@@ -4343,19 +4395,20 @@ pub mod v1 {
                         | Ty::WorkflowShared,
                     ) => {
                         let key = str::from_utf8(self.key)
-                            .map_err(|_| ConversionError::invalid_data("key"))?;
+                            .map_err(|_| ConversionError::invalid_data_static("key"))?;
 
                         Ok(Some(key))
                     }
                     Ok(Ty::Service) => Ok(None),
-                    Err(_) | Ok(Ty::UnknownTy) => {
-                        Err(ConversionError::invalid_data("service_and_handler_ty"))
-                    }
+                    Err(_) | Ok(Ty::UnknownTy) => Err(ConversionError::invalid_data_static(
+                        "service_and_handler_ty",
+                    )),
                 }
             }
 
             pub fn handler_name(&self) -> std::result::Result<&str, ConversionError> {
-                str::from_utf8(self.handler).map_err(|_| ConversionError::invalid_data("name"))
+                str::from_utf8(self.handler)
+                    .map_err(|_| ConversionError::invalid_data_static("name"))
             }
 
             pub fn service_ty(&self) -> Result<ServiceType, ConversionError> {
@@ -4366,9 +4419,9 @@ pub mod v1 {
                         Ok(ServiceType::VirtualObject)
                     }
                     Ok(Ty::WorkflowWorkflow | Ty::WorkflowShared) => Ok(ServiceType::Workflow),
-                    Err(_) | Ok(Ty::UnknownTy) => {
-                        Err(ConversionError::invalid_data("service_and_handler_ty"))
-                    }
+                    Err(_) | Ok(Ty::UnknownTy) => Err(ConversionError::invalid_data_static(
+                        "service_and_handler_ty",
+                    )),
                 }
             }
 
