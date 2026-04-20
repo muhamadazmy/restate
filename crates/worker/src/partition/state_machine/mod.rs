@@ -1665,7 +1665,13 @@ impl<S> StateMachineApplyContext<'_, S> {
             InvocationStatus::Suspended {
                 metadata,
                 waiting_for_notifications,
+                awaiting_on,
             } => {
+                let waiting_for_notifications = match awaiting_on {
+                    Some(awaiting_on) => awaiting_on.flatten(),
+                    None => waiting_for_notifications,
+                };
+
                 if self
                     .cancel_journal_leaves(
                         invocation_id,
@@ -1676,7 +1682,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                                     NotificationId::CompletionId(idx) => idx,
                                     _ => panic!("When using Service Protocol <= 3, an invocation cannot be suspended on a named notification")
                                 }).collect()
-
                         ),
                         metadata.journal_metadata.length,
                     )
@@ -2519,11 +2524,17 @@ impl<S> StateMachineApplyContext<'_, S> {
             }
             InvokerEffectKind::SuspendedV2 {
                 waiting_for_notifications,
+                awaiting_on,
             } => {
+                // awaiting_on introduced in Restate v1.7.
+                // fallback to waiting_for_notifications if awaiting_on is not set for
+                // invoker effects created with older versions.
+                let awaiting_on = awaiting_on.unwrap_or_else(|| waiting_for_notifications.into());
+
                 lifecycle::OnSuspendCommand {
                     invocation_id: effect.invocation_id,
                     invocation_status,
-                    waiting_for_notifications,
+                    awaiting_on,
                 }
                 .apply(self)
                 .await?;
@@ -3948,6 +3959,8 @@ impl<S> StateMachineApplyContext<'_, S> {
             InvocationStatus::Suspended {
                 metadata,
                 waiting_for_notifications,
+                // awaiting_on not supported in Service protocol <= 3.
+                awaiting_on: _,
             } => {
                 if self.handle_completion_for_suspended(
                     invocation_id,
@@ -4467,6 +4480,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                         .into_iter()
                         .map(NotificationId::CompletionId)
                         .collect(),
+                    awaiting_on: None,
                 },
             )
             .map_err(Error::Storage)

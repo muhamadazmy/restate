@@ -8,6 +8,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::collections::HashSet;
+
 use restate_memory::NonZeroByteCount;
 use restate_types::deployment::PinnedDeployment;
 use restate_types::errors::InvocationError;
@@ -15,16 +17,15 @@ use restate_types::identifiers::InvocationId;
 use restate_types::journal::EntryIndex;
 use restate_types::journal::enriched::EnrichedRawEntry;
 use restate_types::journal_events::raw::RawEvent;
-use restate_types::journal_v2;
 use restate_types::journal_v2::CommandIndex;
 use restate_types::journal_v2::raw::RawEntry;
+use restate_types::journal_v2::{self, UnresolvedFuture};
 use restate_types::storage::{StoredRawEntry, StoredRawEntryHeader};
 use restate_types::time::MillisSinceEpoch;
-use std::collections::HashSet;
 
 use crate::EffectKind::JournalEntryV2;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Effect {
     pub invocation_id: InvocationId,
@@ -37,7 +38,7 @@ pub struct Effect {
     pub kind: EffectKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 // todo: fix this and box the large variant (EffectKind is 320 bytes)
 #[allow(clippy::large_enum_variant)]
@@ -62,7 +63,15 @@ pub enum EffectKind {
         event: RawEvent,
     },
     SuspendedV2 {
+        /// Flattened set of notification ids derived from `awaiting_on`.
+        /// Present only for backward compatibility with Restate < v1.7;
+        /// Restate >= v1.7 should use the `awaiting_on` combinator instead.
+        /// todo(azmy): drop in version >= v1.8
         waiting_for_notifications: HashSet<journal_v2::NotificationId>,
+        /// Combinator tree describing the notifications this invocation is waiting on.
+        /// Introduced in Restate v1.7 (protocol version V7). `None` for older invocations.
+        /// todo(azmy): make required in >= v1.8
+        awaiting_on: Option<UnresolvedFuture>,
     },
     Paused {
         paused_event: RawEvent,
