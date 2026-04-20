@@ -221,7 +221,7 @@ pub(crate) fn append_invocation_status_row<'a>(
                         row.completion_result("failure");
                         if row.is_completion_failure_defined() {
                             let message = str::from_utf8(failure_message.as_ref())
-                                .map_err(|_| ConversionError::invalid_data("failure_message"))?;
+                                .map_err(|_| ConversionError::invalid_data_str("failure_message"))?;
                             row.fmt_completion_failure(format_args!(
                                 "[{}] {}",
                                 failure_code, message,
@@ -231,7 +231,7 @@ pub(crate) fn append_invocation_status_row<'a>(
                 }
             }
         }
-        Status::UnknownStatus => return Err(ConversionError::invalid_data("status")),
+        Status::UnknownStatus => return Err(ConversionError::invalid_data_str("status")),
     };
 
     Ok(())

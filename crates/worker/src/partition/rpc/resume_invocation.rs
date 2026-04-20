@@ -241,6 +241,7 @@ mod tests {
             InvocationStatus::Suspended {
                 metadata: InFlightInvocationMetadata::mock(),
                 waiting_for_notifications: HashSet::new(),
+                awaiting_on: None,
                 },
             InvocationStatus::Paused(InFlightInvocationMetadata::mock())
         )]
@@ -448,6 +449,7 @@ mod tests {
                 InvocationStatus::Suspended {
                     metadata,
                     waiting_for_notifications: Default::default(),
+                    awaiting_on: None,
                 }
             } else {
                 InvocationStatus::Paused(metadata)
@@ -537,6 +539,7 @@ mod tests {
                 InvocationStatus::Suspended {
                     metadata,
                     waiting_for_notifications: Default::default(),
+                    awaiting_on: None,
                 }
             } else {
                 InvocationStatus::Paused(metadata)
