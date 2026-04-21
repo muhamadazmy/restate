@@ -349,7 +349,7 @@ async fn query_sys_invocation_suspended_waiting() {
                 invocation_target: InvocationTarget::mock_service(),
                 ..InFlightInvocationMetadata::mock()
             },
-            waiting_for_notifications: [
+            awaiting_on: [
                 NotificationId::for_completion(1),
                 NotificationId::for_completion(2),
                 NotificationId::for_completion(3),

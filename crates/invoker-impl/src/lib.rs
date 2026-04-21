@@ -30,14 +30,16 @@ use futures::StreamExt;
 use gardal::futures::ThrottledStream;
 use gardal::{PaddedAtomicSharedStorage, StreamExt as GardalStreamExt, TokioClock};
 use metrics::counter;
-use restate_futures_util::concurrency::Permit;
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinSet};
+use tokio_util::time::DelayQueue;
+use tokio_util::time::delay_queue::Key as RetryTimerKey;
 use tracing::instrument;
 use tracing::{debug, trace, warn};
 
 use restate_core::cancellation_token;
 use restate_errors::warn_it;
+use restate_futures_util::concurrency::Permit;
 use restate_invoker_api::capacity::TokenBucket;
 use restate_invoker_api::invocation_reader::InvocationReader;
 use restate_invoker_api::{
@@ -57,12 +59,10 @@ use restate_types::journal::enriched::EnrichedRawEntry;
 use restate_types::journal_events::raw::RawEvent;
 use restate_types::journal_events::{Event, PausedEvent, TransientErrorEvent};
 use restate_types::journal_v2::raw::{RawCommand, RawNotification};
-use restate_types::journal_v2::{CommandIndex, EntryMetadata, NotificationId};
+use restate_types::journal_v2::{CommandIndex, EntryMetadata, NotificationId, UnresolvedFuture};
 use restate_types::live::{Live, LiveLoad};
 use restate_types::schema::deployment::DeploymentResolver;
 use restate_types::schema::invocation_target::InvocationTargetResolver;
-use tokio_util::time::DelayQueue;
-use tokio_util::time::delay_queue::Key as RetryTimerKey;
 
 use crate::error::InvocationMemoryExhausted;
 use crate::error::InvokerError;
@@ -118,6 +118,7 @@ struct DefaultInvocationTaskRunner<EE, Schemas> {
     entry_enricher: EE,
     schemas: Live<Schemas>,
     action_token_bucket: Option<TokenBucket>,
+    allow_protocol_v7: bool,
 }
 
 impl<IR, EE, Schemas> InvocationTaskRunner<IR> for DefaultInvocationTaskRunner<EE, Schemas>
@@ -159,6 +160,7 @@ where
                     invoker_tx,
                     invoker_rx,
                     self.action_token_bucket.clone(),
+                    self.allow_protocol_v7,
                 )
                 .run(storage_reader, budget),
             )
@@ -252,6 +254,9 @@ impl<StorageReader, TEntryEnricher, Schemas> Service<StorageReader, TEntryEnrich
                     entry_enricher,
                     schemas: Live::clone(&schemas),
                     action_token_bucket,
+                    allow_protocol_v7: Configuration::pinned()
+                        .common
+                        .experimental_allow_protocol_v7,
                 },
                 schemas,
                 invocation_tasks: Default::default(),
@@ -563,8 +568,11 @@ where
                             requires_ack
                         ).await
                     }
-                    InvocationTaskOutputInner::SuspendedV2(notification_ids) => {
-                        self.handle_invocation_task_suspended_v2(partition, invocation_id, notification_ids).await
+                    InvocationTaskOutputInner::SuspendedV2(future) => {
+                        self.handle_invocation_task_suspended_v2(partition, invocation_id, future).await
+                    }
+                    InvocationTaskOutputInner::SuspendedV3(future) => {
+                        self.handle_invocation_task_suspended_v3(partition, invocation_id, future).await
                     }
                     InvocationTaskOutputInner::ShouldYield { oom, budget } => {
                         self.handle_invocation_task_should_yield(partition, invocation_id, oom, budget).await
@@ -1199,6 +1207,66 @@ where
                         invocation_id,
                         kind: EffectKind::SuspendedV2 {
                             waiting_for_notifications,
+                        },
+                    }))
+                    .await;
+            }
+        } else {
+            // If no state machine, this might be a result for an aborted invocation.
+            trace!("No state machine found for invocation task suspended signal");
+        }
+    }
+
+    #[instrument(
+        level = "trace",
+        skip_all,
+        fields(
+            restate.invocation.id = %invocation_id,
+            restate.invoker.partition_leader_epoch = ?partition,
+        )
+    )]
+    async fn handle_invocation_task_suspended_v3(
+        &mut self,
+        partition: PartitionLeaderEpoch,
+        invocation_id: InvocationId,
+        future: UnresolvedFuture,
+    ) {
+        if let Some((sender, _, ism)) = self
+            .invocation_state_machine_manager
+            .remove_invocation(partition, &invocation_id)
+        {
+            counter!(INVOKER_INVOCATION_TASKS, "status" => TASK_OP_SUSPENDED, "partition_id" => ID_LOOKUP.get(partition.0))
+                .increment(1);
+            self.status_store.on_end(&partition, &invocation_id);
+
+            if ism.requested_pause {
+                // We should send pause instead
+                trace!(
+                    restate.invocation.target = %ism.invocation_target,
+                    "Pausing invocation after suspension"
+                );
+
+                let _ = sender
+                    .send(Box::new(Effect {
+                        invocation_id,
+                        kind: EffectKind::Paused {
+                            paused_event: RawEvent::from(Event::Paused(PausedEvent {
+                                last_failure: None,
+                            })),
+                        },
+                    }))
+                    .await;
+            } else {
+                trace!(
+                    restate.invocation.target = %ism.invocation_target,
+                    "Suspending invocation"
+                );
+
+                let _ = sender
+                    .send(Box::new(Effect {
+                        invocation_id,
+                        kind: EffectKind::SuspendedV3 {
+                            awaiting_on: future,
                         },
                     }))
                     .await;
