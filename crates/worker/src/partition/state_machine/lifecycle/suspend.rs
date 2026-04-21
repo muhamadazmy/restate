@@ -8,20 +8,21 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use crate::partition::state_machine::{CommandHandler, Error, ParkCause, StateMachineApplyContext};
+use tracing::trace;
+
 use restate_storage_api::invocation_status_table::{InvocationStatus, WriteInvocationStatusTable};
 use restate_storage_api::journal_table_v2::ReadJournalTable;
 use restate_storage_api::vqueue_table::{ReadVQueueTable, WriteVQueueTable};
 use restate_types::config::Configuration;
 use restate_types::identifiers::InvocationId;
-use restate_types::journal_v2::NotificationId;
-use std::collections::HashSet;
-use tracing::trace;
+use restate_types::journal_v2::UnresolvedFuture;
+
+use crate::partition::state_machine::{CommandHandler, Error, ParkCause, StateMachineApplyContext};
 
 pub struct OnSuspendCommand {
     pub invocation_id: InvocationId,
     pub invocation_status: InvocationStatus,
-    pub waiting_for_notifications: HashSet<NotificationId>,
+    pub awaiting_on: UnresolvedFuture,
 }
 
 impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>>
@@ -29,32 +30,25 @@ impl<'ctx, 's: 'ctx, S> CommandHandler<&'ctx mut StateMachineApplyContext<'s, S>
 where
     S: ReadJournalTable + WriteInvocationStatusTable + WriteVQueueTable + ReadVQueueTable,
 {
-    async fn apply(self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
+    async fn apply(mut self, ctx: &'ctx mut StateMachineApplyContext<'s, S>) -> Result<(), Error> {
         debug_assert!(
-            !self.waiting_for_notifications.is_empty(),
+            !self.awaiting_on.is_empty(),
             "Expecting at least one entry on which the invocation {} is waiting.",
             self.invocation_id
         );
 
-        // Notifications currently stored
-        let available_notifications = ctx
+        let notifications = ctx
             .storage
             .get_notifications_index(self.invocation_id)
-            .await?
-            .into_keys()
-            .collect::<HashSet<_>>();
+            .await?;
 
-        // Find if any new notification is available of the ones the SDK is waiting on
-        let mut any_completed = false;
-        for notif in &self.waiting_for_notifications {
-            if available_notifications.contains(notif) {
-                any_completed = true;
-                break;
-            }
-        }
+        // Notifications currently stored
+        let available_notifications = notifications
+            .iter()
+            .map(|(notification_id, index)| (notification_id, index.result_variant));
 
         let mut invocation_status = self.invocation_status;
-        if any_completed {
+        if self.awaiting_on.resolve_all(available_notifications) {
             trace!(
                 "Resuming instead of suspending service because a notification is already available."
             );
@@ -72,7 +66,7 @@ where
 
             trace!(
                 "Suspending invocation waiting for notifications {:?}",
-                self.waiting_for_notifications
+                self.awaiting_on
             );
 
             in_flight_invocation_metadata
@@ -90,7 +84,7 @@ where
 
             invocation_status = InvocationStatus::Suspended {
                 metadata: in_flight_invocation_metadata,
-                waiting_for_notifications: self.waiting_for_notifications,
+                awaiting_on: self.awaiting_on,
             };
         }
 

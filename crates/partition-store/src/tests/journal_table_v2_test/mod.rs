@@ -18,7 +18,9 @@ use futures_util::StreamExt;
 use restate_rocksdb::RocksDbManager;
 use restate_service_protocol_v4::entry_codec::ServiceProtocolV4Codec;
 use restate_storage_api::Transaction;
-use restate_storage_api::journal_table_v2::{ReadJournalTable, WriteJournalTable};
+use restate_storage_api::journal_table_v2::{
+    NotificationEntryIndex, ReadJournalTable, WriteJournalTable,
+};
 use restate_test_util::let_assert;
 use restate_types::identifiers::{InvocationId, InvocationUuid};
 use restate_types::invocation::{InvocationTarget, ServiceInvocationSpanContext};
@@ -154,7 +156,10 @@ async fn check_sleep_notification_index<T: ReadJournalTable>(txn: &mut T) {
             .await
             .unwrap(),
         (0..5)
-            .map(|i| (NotificationId::for_completion(i), i + 5))
+            .map(|i| (
+                NotificationId::for_completion(i),
+                NotificationEntryIndex::from_entry_index(i + 5, RawNotificationResultVariant::Void)
+            ))
             .collect()
     );
 }
