@@ -519,11 +519,12 @@ async fn cancel_suspended_invocation() -> Result<(), Error> {
     let invocation_status = tx.get_invocation_status(&invocation_id).await?;
     let_assert!(InvocationStatus::Invoked(mut in_flight_meta) = invocation_status);
     in_flight_meta.journal_metadata.length = (journal_length + 1) as EntryIndex;
+
     tx.put_invocation_status(
         &invocation_id,
         &InvocationStatus::Suspended {
             metadata: in_flight_meta,
-            waiting_for_notifications: HashSet::from([
+            awaiting_on: [
                 NotificationId::for_completion(3),
                 NotificationId::for_completion(4),
                 NotificationId::for_completion(5),
@@ -531,7 +532,8 @@ async fn cancel_suspended_invocation() -> Result<(), Error> {
                 NotificationId::for_completion(7),
                 NotificationId::for_completion(8),
                 NotificationId::for_completion(9),
-            ]),
+            ]
+            .into(),
         },
     )?;
     // Add timer
